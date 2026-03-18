@@ -2,7 +2,6 @@ import pytest
 import ion_flux as fx
 
 class TransientHeatPDE(fx.PDE):
-    """Simple 1D PDE for testing spatial stencils and compilation."""
     rod = fx.Domain(bounds=(0.0, 2.0), resolution=30)
     T = fx.State(domain=rod)
     k = fx.Parameter(default=0.75)
@@ -19,10 +18,9 @@ class TransientHeatPDE(fx.PDE):
         }
 
 class CoupledDAE(fx.PDE):
-    """System containing both a PDE and an Algebraic constraint (DAE)."""
     bulk = fx.Domain(bounds=(0.0, 1.0), resolution=10)
-    c = fx.State(domain=bulk)     # PDE
-    V = fx.State(domain=None)     # ODE/Algebraic (Scalar)
+    c = fx.State(domain=bulk)     
+    V = fx.State(domain=None)     
 
     def math(self):
         return {
@@ -30,7 +28,6 @@ class CoupledDAE(fx.PDE):
             self.c.t0: 1.0,
             self.c.left: 0.0,
             self.c.right: 0.0,
-            # No fx.dt(V) -> evaluated as 0 = V - c.right
             self.V: self.V - self.c.right, 
             self.V.t0: 0.0
         }
