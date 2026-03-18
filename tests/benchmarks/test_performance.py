@@ -1,0 +1,82 @@
+import pytest
+from ion_flux.battery import DFN, parameters
+from ion_flux import Engine
+import ion_flux.protocols as protocols
+
+# Standard resolution for benchmarking
+MESH_RES = {"x_n": 50, "x_s": 50, "x_p": 50, "r_n": 20, "r_p": 20}
+
+@pytest.fixture
+def base_model():
+    return DFN(options={"thermal": "lumped"})
+
+@pytest.fixture
+def compiled_cpu_engine(base_model):
+    # Pre-compiled engine for execution benchmarks
+    return Engine(model=base_model, target="cpu", mesh_resolution=MESH_RES)
+
+def test_bench_cold_start_compilation(benchmark, base_model):
+    """
+    Measures the JIT pipeline: AST extraction -> Rust Symbolic Diff 
+    -> C++ Emission -> clang++ Compilation -> .so Loading.
+    """
+    def compile_model():
+        # Force a bypass of any disk-caching for the benchmark
+        return Engine(model=base_model, target="cpu", mesh_resolution=MESH_RES, cache=False)
+
+    # Rounds are limited because compilation takes seconds, not milliseconds
+    benchmark.pedantic(compile_model, rounds=3, iterations=1)
+
+def test_bench_warm_start_execution_cpu(benchmark, compiled_cpu_engine):
+    """
+    Measures the purely numerical integration loop (SUNDIALS KLU) and 
+    memory updates for a standard 1C discharge.
+    """
+    params = parameters.Chen2020()
+    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
+
+    def execute_solve():
+        return compiled_cpu_engine.solve(protocol=protocol, parameters=params)
+
+    benchmark(execute_solve)
+
+def test_bench_warm_start_execution_gpu(benchmark, base_model):
+    """
+    Measures the GPU execution loop (SUNDIALS cuSOLVER).
+    Requires a GPU runner.
+    """
+    try:
+        gpu_engine = Engine(model=base_model, target="cuda:0", mesh_resolution=MESH_RES)
+    except RuntimeError:
+        pytest.skip("CUDA hardware not available on this runner.")
+
+    params = parameters.Chen2020()
+    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
+
+    def execute_solve():
+        return gpu_engine.solve(protocol=protocol, parameters=params)
+
+    benchmark(execute_solve)
+
+def test_bench_parameter_sweep_throughput(benchmark, compiled_cpu_engine):
+    """
+    Measures the task-parallel throughput for MCMC or parameter sweeps.
+    """
+    base_params = parameters.Chen2020()
+    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
+    
+    # Generate 100 varying parameter sets
+    param_batch = [
+        {**base_params, "neg_elec.porosity": 0.2 + (i * 0.001)} 
+        for i in range(100)
+    ]
+
+    def execute_batch():
+        # Uses Rust's Rayon threadpool internally
+        return compiled_cpu_engine.solve_batch(
+            protocol=protocol, 
+            parameters=param_batch,
+            max_workers=16
+        )
+
+    benchmark.pedantic(execute_batch, rounds=5, iterations=1)

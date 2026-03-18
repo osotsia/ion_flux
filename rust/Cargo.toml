@@ -1,0 +1,9 @@
+[package]
+name = "rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libloading = "0.9.0"
+pyo3 = { version = "0.28.2", features = ["extension-module"] }
+rayon = "1.11.0"
