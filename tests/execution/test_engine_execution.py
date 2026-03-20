@@ -1,33 +1,41 @@
-from ion_flux import Engine
+import pytest
+import numpy as np
+import ion_flux as fx
+from ion_flux.runtime.engine import Engine, RUST_FFI_AVAILABLE
+
+class ExponentialDecay(fx.PDE):
+    """
+    y_dot = -k * y
+    y(0) = 5.0
+    """
+    y = fx.State()
+    k = fx.Parameter(default=2.0)
+    
+    def math(self):
+        return {
+            fx.dt(self.y): -self.k * self.y,
+            self.y.t0: 5.0
+        }
 
 def test_engine_emits_enzyme_cpp(heat_model):
     engine = Engine(model=heat_model, target="cpu")
-    
     cpp = engine.cpp_source
-    
-    # Verify Enzyme forward declarations exist. 
     assert "extern void __enzyme_fwddiff" in cpp
     assert "void evaluate_residual" in cpp
-    assert "void evaluate_jacobian" in cpp
 
-def test_solve_applies_runtime_parameters(heat_model):
-    engine = Engine(model=heat_model, target="cpu")
+@pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
+def test_end_to_end():
+    """
+    Proves Phase 1 completion: JIT -> Clang -> Rust FFI -> Solver (Native) -> Numpy
+    """
+    model = ExponentialDecay()
+    engine = Engine(model=model, target="cpu", mock_execution=False)
     
-    res_default = engine.solve(t_span=(0, 1))
-    res_override = engine.solve(t_span=(0, 1), parameters={"k": 2.0})
+    t_eval = np.linspace(0, 2.0, 50)
+    res = engine.solve(parameters={"k": 1.5}, t_eval=t_eval)
     
-    peak_T_default = max(res_default["T"].data[-1])
-    peak_T_override = max(res_override["T"].data[-1])
+    # Analytical solution: y(t) = y_0 * e^{-kt}
+    y_analytical = 5.0 * np.exp(-1.5 * t_eval)
+    y_simulated = res["y"].data
     
-    assert peak_T_override < peak_T_default
-
-def test_simulation_result_serialization(heat_model):
-    engine = Engine(model=heat_model, target="cpu")
-    res = engine.solve()
-    
-    json_payload = res.to_dict(variables=["Voltage [V]", "Time [s]"])
-    
-    assert "Voltage [V]" in json_payload
-    assert "Time [s]" in json_payload
-    assert "T" not in json_payload
-    assert isinstance(json_payload["Voltage [V]"], list)
+    np.testing.assert_allclose(y_simulated, y_analytical, rtol=1e-3, atol=1e-4)

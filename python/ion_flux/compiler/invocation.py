@@ -64,11 +64,16 @@ class NativeRuntime:
         
         self.dll.evaluate_jacobian(y_arr, ydot_arr, p_arr, ctypes.c_double(c_j), jac_arr)
         
-        # Unflatten row-major matrix into a structured 2D array
+        # Correctly unpack the Fortran Column-Major dense layout required by SUNDIALS 
+        # into a standard Row-Major Python 2D list for assertions.
         jac_2d = []
         for row in range(self.n_states):
-            start = row * self.n_states
-            jac_2d.append(list(jac_arr[start : start + self.n_states]))
+            row_vals = []
+            for col in range(self.n_states):
+                # Column-major index math: (col * N) + row
+                row_vals.append(jac_arr[col * self.n_states + row])
+            jac_2d.append(row_vals)
+            
         return jac_2d
 
 
