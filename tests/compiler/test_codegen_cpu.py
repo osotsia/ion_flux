@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import ion_flux as fx
+from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp
 
 
@@ -39,22 +40,23 @@ def _evaluate_cpp_math(cpp_source: str, y: list, ydot: list, p: list) -> list:
 
 def test_codegen_emits_valid_dae_residual():
     model = SimpleDAE()
-    states = ["y0", "y1"]
-    params = ["p0"]
     
-    cpp = generate_cpp(model.ast(), states, params)
+    # Generate layout structurally rather than via string lists
+    states = [model.y0, model.y1]
+    params = [model.p0]
+    layout = MemoryLayout(states, params)
     
-    # Assert Forward-Mode Enzyme hook and correct algebraic structure
+    cpp = generate_cpp(model.ast(), layout)
+    
     assert "extern void __enzyme_fwddiff" in cpp
+    # y0 is alphabetically first (offset 0), y1 is second (offset 1)
     assert "res[0] = (ydot[0]) - (y[1]);" in cpp
     assert "res[1] = (y[1]) - ((p[0] * y[0]));" in cpp
 
-
 def test_numerical_jacobian_of_emitted_cpp():
     model = SimpleDAE()
-    states = ["y0", "y1"]
-    params = ["p0"]
-    cpp = generate_cpp(model.ast(), states, params)
+    layout = MemoryLayout([model.y0, model.y1], [model.p0])
+    cpp = generate_cpp(model.ast(), layout)
     
     y = [1.0, 2.0]
     ydot = [0.0, 0.0]

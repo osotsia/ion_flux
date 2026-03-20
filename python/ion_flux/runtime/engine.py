@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 
 from ion_flux.dsl.core import PDE, State, Parameter
+from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp
 from ion_flux.compiler.invocation import NativeCompiler
 
@@ -32,41 +33,48 @@ class SimulationResult:
 
 
 class Engine:
-    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = True, **kwargs):
+    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = True, jacobian_bandwidth: int = 0, **kwargs):
         self.model = model
         self.target = target
         self.mock_execution = mock_execution
         
-        self.state_names = sorted([name for name, attr in model.__dict__.items() if isinstance(attr, State)])
-        self.param_names = sorted([name for name, attr in model.__dict__.items() if isinstance(attr, Parameter)])
+        # 1. Introspect physical definitions to build contiguous memory arrays
+        states = [attr for name, attr in model.__dict__.items() if isinstance(attr, State)]
+        params = [attr for name, attr in model.__dict__.items() if isinstance(attr, Parameter)]
+        self.layout = MemoryLayout(states, params)
         
+        # 2. Lower to C++ string using the explicitly calculated memory layout
         ast_payload = model.ast()
-        self.cpp_source = generate_cpp(ast_payload, self.state_names, self.param_names)
+        self.cpp_source = generate_cpp(ast_payload, self.layout, bandwidth=jacobian_bandwidth)
         
+        # 3. Compile and Cache
         self.runtime = None
         if not self.mock_execution:
             compiler = NativeCompiler()
-            self.runtime = compiler.compile(self.cpp_source, len(self.state_names))
+            self.runtime = compiler.compile(self.cpp_source, self.layout.n_states)
             
         self.is_compiled = True
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    def _pack_parameters(self, overrides: dict) -> List[float]:
+        """Aligns dictionary parameters to the C-array layout schema."""
+        p_list = [0.0] * self.layout.n_params
+        for p_name, (offset, size) in self.layout.param_offsets.items():
+            val = overrides.get(p_name, getattr(self.model, p_name).default)
+            p_list[offset] = val
+        return p_list
+
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: dict = None) -> List[float]:
         if self.mock_execution or not self.runtime:
             raise RuntimeError("evaluate_residual requires native execution (mock_execution=False).")
-            
-        params = parameters or {}
-        p_list = [params.get(n, getattr(self.model, n).default) for n in self.param_names]
+        p_list = self._pack_parameters(parameters or {})
         return self.runtime.evaluate_residual(y, ydot, p_list)
 
     def evaluate_jacobian(self, y: List[float], ydot: List[float], c_j: float, parameters: dict = None) -> List[List[float]]:
-        """Queries the natively compiled Enzyme Analytical Jacobian binary."""
         if self.mock_execution or not self.runtime:
             raise RuntimeError("evaluate_jacobian requires native execution (mock_execution=False).")
-            
-        params = parameters or {}
-        p_list = [params.get(n, getattr(self.model, n).default) for n in self.param_names]
+        p_list = self._pack_parameters(parameters or {})
         return self.runtime.evaluate_jacobian(y, ydot, p_list, c_j)
 
     def solve(self, t_span: tuple = None, protocol=None, parameters: dict = None, threads: int = 1) -> SimulationResult:
