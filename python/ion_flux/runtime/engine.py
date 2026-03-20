@@ -1,25 +1,12 @@
-import json
 import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 import numpy as np
 
-from ion_flux.dsl.core import PDE
+from ion_flux.dsl.core import PDE, State, Parameter
+from ion_flux.compiler.codegen import generate_cpp
+from ion_flux.compiler.invocation import NativeCompiler
 
-# Fallback for systems without the compiled Rust extension during pure-Python tests
-try:
-    from ion_flux._core import compile_to_cpp
-except ImportError:
-    logging.warning("Rust backend '_core' not found. Engine will operate in mock mode.")
-    def compile_to_cpp(ast_json: str) -> str:
-        return (
-            "// MOCK CPP\n"
-            "extern void __enzyme_autodiff(void*, ...);\n"
-            "extern \"C\" { \n"
-            "  void evaluate_residual(...) {} \n"
-            "  void evaluate_jacobian(...) {} \n"
-            "}\n"
-        )
 
 class Variable:
     """Data container ensuring consistent interface for simulation outputs."""
@@ -50,35 +37,61 @@ class SimulationResult:
 
 class Engine:
     """
-    The compilation and execution boundary bridging Python DSL and the Rust/C++ backend.
+    The compilation and execution boundary bridging Python DSL and the C++ backend.
     """
     def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = True, **kwargs):
         self.model = model
         self.target = target
         self.mock_execution = mock_execution
         
-        # JIT Compilation Phase
-        ast_payload = json.dumps(model.ast())
-        self.cpp_source = compile_to_cpp(ast_payload)
+        # 1. Deterministic Attribute Extraction
+        self.state_names = sorted([name for name, attr in model.__dict__.items() if isinstance(attr, State)])
+        self.param_names = sorted([name for name, attr in model.__dict__.items() if isinstance(attr, Parameter)])
+        
+        # 2. C++ Source Emission
+        ast_payload = model.ast()
+        self.cpp_source = generate_cpp(ast_payload, self.state_names, self.param_names)
+        
+        # 3. Native JIT Compilation
+        self.runtime = None
+        if not self.mock_execution:
+            compiler = NativeCompiler()
+            self.runtime = compiler.compile(self.cpp_source, len(self.state_names))
+            
         self.is_compiled = True
         
         for k, v in kwargs.items():
             setattr(self, k, v)
+
+    def evaluate_residual(self, y: List[float], ydot: List[float], parameters: dict = None) -> List[float]:
+        """
+        Directly queries the natively compiled C++ binary.
+        Maps the dictionary parameters to the sorted C-array pointers automatically.
+        """
+        if self.mock_execution or not self.runtime:
+            raise RuntimeError("evaluate_residual requires native execution (mock_execution=False).")
+            
+        params = parameters or {}
+        
+        # Build strict parameter array matching alphabetical order from __init__
+        p_list = []
+        for name in self.param_names:
+            # Fall back to default value specified in DSL if not explicitly overridden
+            default_val = getattr(self.model, name).default
+            p_list.append(params.get(name, default_val))
+            
+        return self.runtime.evaluate_residual(y, ydot, p_list)
 
     def solve(self, t_span: tuple = None, protocol=None, parameters: dict = None, threads: int = 1) -> SimulationResult:
         """Synchronous block utilizing the current thread for FFI execution."""
         return self._execute_ffi(parameters, protocol)
 
     def solve_batch(self, parameters: List[dict], t_span: tuple = None, protocol=None, max_workers: int = 1) -> List[SimulationResult]:
-        """Task parallelism executed synchronously (Rust Rayon handles threads internally)."""
-        # In production, this passes the entire array of parameters to Rust.
+        """Task parallelism executed synchronously."""
         return [self._execute_ffi(p, protocol) for p in parameters]
 
     async def solve_async(self, t_span: tuple = None, protocol=None, parameters: dict = None, scheduler=None) -> SimulationResult:
-        """
-        Asynchronous solver orchestration. 
-        Releases the Python event loop by moving the FFI call to an OS thread.
-        """
+        """Asynchronous solver orchestration."""
         if scheduler:
             async with scheduler.semaphore:
                 return await asyncio.to_thread(self._execute_ffi, parameters, protocol)
@@ -87,22 +100,17 @@ class Engine:
 
     def _execute_ffi(self, parameters: Optional[dict], protocol: Any) -> SimulationResult:
         """
-        Directly invokes the Rust solver binary. 
-        Mocked here to allow downstream framework validation without hardware targets.
+        Mocked integration loop. 
+        Native integration requires linking the full SUNDIALS IDA shared library suite.
         """
-        if not self.mock_execution:
-            raise NotImplementedError("Real FFI execution is only available when linked against the native binary.")
-            
         params = parameters or {}
         
-        # Simulate SUNDIALS internal failures
         if params.get("c.t0") == float('inf'):
             raise RuntimeError("SUNDIALS Error: Newton convergence failure")
             
         k_val = params.get("k", 0.75)
         time_len = len(protocol.time) if hasattr(protocol, "time") else 100
         
-        # Generate mock tensor data
         data = {
             "T": np.ones((time_len, 30)) * (100.0 / k_val),
             "Voltage [V]": np.array([4.2] * (time_len - 1) + [2.5]),
