@@ -22,6 +22,7 @@ class NativeRuntime:
         except OSError as e:
             raise RuntimeError(f"Failed to load compiled binary at {lib_path}: {e}")
 
+        # Signature: void evaluate_residual(y, ydot, p, res)
         self.dll.evaluate_residual.argtypes = [
             ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double),
@@ -30,8 +31,17 @@ class NativeRuntime:
         ]
         self.dll.evaluate_residual.restype = None
 
+        # Signature: void evaluate_jacobian(y, ydot, p, c_j, jac_out)
+        self.dll.evaluate_jacobian.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_double,
+            ctypes.POINTER(ctypes.c_double),
+        ]
+        self.dll.evaluate_jacobian.restype = None
+
     def evaluate_residual(self, y: List[float], ydot: List[float], p: List[float]) -> List[float]:
-        """Executes the natively compiled residual function directly on the CPU."""
         if len(y) != self.n_states or len(ydot) != self.n_states:
             raise ValueError(f"Expected state vectors of length {self.n_states}.")
             
@@ -43,10 +53,27 @@ class NativeRuntime:
         self.dll.evaluate_residual(y_arr, ydot_arr, p_arr, res_arr)
         return list(res_arr)
 
+    def evaluate_jacobian(self, y: List[float], ydot: List[float], p: List[float], c_j: float) -> List[List[float]]:
+        if len(y) != self.n_states or len(ydot) != self.n_states:
+            raise ValueError(f"Expected state vectors of length {self.n_states}.")
+            
+        y_arr = (ctypes.c_double * self.n_states)(*y)
+        ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
+        p_arr = (ctypes.c_double * len(p))(*p)
+        jac_arr = (ctypes.c_double * (self.n_states * self.n_states))()
+        
+        self.dll.evaluate_jacobian(y_arr, ydot_arr, p_arr, ctypes.c_double(c_j), jac_arr)
+        
+        # Unflatten row-major matrix into a structured 2D array
+        jac_2d = []
+        for row in range(self.n_states):
+            start = row * self.n_states
+            jac_2d.append(list(jac_arr[start : start + self.n_states]))
+        return jac_2d
+
 
 class NativeCompiler:
     """Manages the Clang/LLVM toolchain invocation and caching of emitted C++ strings."""
-    
     def __init__(self, cache_dir: str = None):
         self.cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), "ion_flux_jit")
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -58,43 +85,31 @@ class NativeCompiler:
             logging.warning("No compatible C++ compiler found. Native execution will fail.")
 
     def _find_compiler(self) -> str:
-        """Locates the correct Clang binary, explicitly bypassing Apple Clang on macOS."""
         if sys.platform == "darwin":
-            # Prioritize Homebrew LLVM (Apple Silicon then Intel paths)
             for path in ["/opt/homebrew/opt/llvm/bin/clang++", "/usr/local/opt/llvm/bin/clang++"]:
                 if os.path.exists(path):
                     return path
-        
-        # Fallback for Linux / generic Conda environments
         return shutil.which("clang++") or shutil.which("g++")
 
     def _find_enzyme_plugin(self) -> str:
-        """Locates the Enzyme dynamic library required for Auto-Diff passes."""
         if sys.platform == "darwin":
             for base in ["/opt/homebrew/lib", "/usr/local/lib"]:
                 matches = glob.glob(os.path.join(base, "ClangEnzyme*.dylib"))
                 if matches:
                     return matches[0]
-                    
         elif sys.platform == "linux":
-            # Search common Conda/Apt locations for Linux
             conda_prefix = os.environ.get("CONDA_PREFIX", "")
             if conda_prefix:
                 matches = glob.glob(os.path.join(conda_prefix, "lib", "ClangEnzyme*.so"))
                 if matches:
                     return matches[0]
-            
             for base in ["/usr/lib", "/usr/local/lib"]:
                 matches = glob.glob(os.path.join(base, "ClangEnzyme*.so"))
                 if matches:
                     return matches[0]
-                    
         return ""
 
     def compile(self, cpp_source: str, n_states: int) -> NativeRuntime:
-        """
-        Compiles the C++ string to a shared object (.so / .dylib).
-        """
         if not self.compiler_cmd:
             raise RuntimeError("C++ toolchain is unavailable on this host.")
 
@@ -112,11 +127,11 @@ class NativeCompiler:
             
         cmd = [self.compiler_cmd, "-O3", "-fPIC", "-shared", "-o", lib_path, source_path]
         
-        # Inject the LLVM plugin if discovered
         if self.enzyme_plugin:
             cmd.insert(1, f"-fplugin={self.enzyme_plugin}")
+            cmd.insert(2, "-DENZYME_ACTIVE")
         else:
-            logging.warning("Enzyme plugin not found. Jacobian evaluation will fail at runtime.")
+            logging.warning("Enzyme plugin not found. Jacobian evaluation will return zeros.")
         
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)

@@ -18,7 +18,6 @@ def to_cpp(node: Dict[str, Any], states: List[str], params: List[str]) -> str:
         return str(node["value"])
         
     if t == "State": 
-        # Safely index into the flattened C-array based on deterministic ordering
         return f"y[{states.index(node['name'])}]"
         
     if t == "Parameter": 
@@ -65,8 +64,6 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], states: List[str], params: L
     
     for eq in ast_payload:
         lhs = eq["lhs"]
-        
-        # Initial Conditions do not belong in the SUNDIALS integration residual
         if lhs.get("type") == "InitialCondition":
             lines.append(f"    // IC for {extract_state_name(lhs)} ignored in integration loop")
             continue
@@ -78,12 +75,12 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], states: List[str], params: L
         res_idx += 1
         
     body = "\n".join(lines)
+    n_states = len(states)
     
-    # Boilerplate headers and macros ensure the C++ is highly strictly typed and 
-    # testable even if finite-volume expansion hasn't run yet.
     return f"""
 #include <cmath>
 #include <cstdlib>
+#include <vector>
 
 // Spatial Stencil Macros (0D Stubs)
 #define GRAD(x) (0.0)
@@ -92,8 +89,12 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], states: List[str], params: L
 #define BOUNDARY_RIGHT(x) (x)
 #define X_COORD (0.0)
 
-// Enzyme Automatic Differentiation hook (Forward/Reverse Mode)
-extern void __enzyme_autodiff(void*, ...);
+#ifdef ENZYME_ACTIVE
+// Dummy globals allow Enzyme to identify parameter modes without causing linker errors.
+int enzyme_dup = 1;
+int enzyme_const = 2;
+extern void __enzyme_fwddiff(void*, ...);
+#endif
 
 extern "C" {{
 
@@ -113,8 +114,35 @@ void evaluate_jacobian(
     double c_j, 
     double* jac_out
 ) {{
-    // Enzyme call: Automatically differentiates `evaluate_residual`
-    // __enzyme_autodiff((void*)evaluate_residual, ...);
+    int N = {n_states};
+    std::vector<double> dy(N, 0.0);
+    std::vector<double> dydot(N, 0.0);
+    std::vector<double> res_dummy(N, 0.0);
+    std::vector<double> dres(N, 0.0);
+
+    for (int col = 0; col < N; ++col) {{
+        // Seed tangents for Forward-Mode Column Evaluation
+        for (int i = 0; i < N; ++i) {{
+            dy[i] = (i == col) ? 1.0 : 0.0;
+            dydot[i] = (i == col) ? c_j : 0.0;
+            dres[i] = 0.0;
+        }}
+
+#ifdef ENZYME_ACTIVE
+        __enzyme_fwddiff(
+            (void*)evaluate_residual,
+            enzyme_dup, y, dy.data(),
+            enzyme_dup, ydot, dydot.data(),
+            enzyme_const, p,
+            enzyme_dup, res_dummy.data(), dres.data()
+        );
+#endif
+
+        // Write contiguous row-major flattened matrix for Python/SUNDIALS ingestion
+        for (int row = 0; row < N; ++row) {{
+            jac_out[row * N + col] = dres[row];
+        }}
+    }}
 }}
 
 }} // extern "C"

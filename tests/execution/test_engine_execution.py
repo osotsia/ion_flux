@@ -6,8 +6,7 @@ def test_engine_emits_enzyme_cpp(heat_model):
     cpp = engine.cpp_source
     
     # Verify Enzyme forward declarations exist. 
-    # (Matches either actual Rust emission or Fallback Mock)
-    assert "extern void __enzyme_autodiff" in cpp
+    assert "extern void __enzyme_fwddiff" in cpp
     assert "void evaluate_residual" in cpp
     assert "void evaluate_jacobian" in cpp
 
@@ -20,7 +19,6 @@ def test_solve_applies_runtime_parameters(heat_model):
     peak_T_default = max(res_default["T"].data[-1])
     peak_T_override = max(res_override["T"].data[-1])
     
-    # Validation against the numeric mock ensures runtime parsing correctly propagates
     assert peak_T_override < peak_T_default
 
 def test_simulation_result_serialization(heat_model):
@@ -31,5 +29,5 @@ def test_simulation_result_serialization(heat_model):
     
     assert "Voltage [V]" in json_payload
     assert "Time [s]" in json_payload
-    assert "T" not in json_payload  # Filtered correctly
+    assert "T" not in json_payload
     assert isinstance(json_payload["Voltage [V]"], list)

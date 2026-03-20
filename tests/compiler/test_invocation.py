@@ -3,17 +3,11 @@ import shutil
 import platform
 import ion_flux as fx
 from ion_flux.runtime.engine import Engine
-
+from ion_flux.compiler.invocation import NativeCompiler
 
 class CoupledDynamics(fx.PDE):
-    """
-    A non-linear testing system to validate C++ AST operations and parameter binding.
-    y0_dot = p_alpha * (y1 - y0)
-    0 = y1 - abs(y0) * y0^2 + p_beta
-    """
     y0 = fx.State()
     y1 = fx.State()
-    
     p_alpha = fx.Parameter(default=1.5)
     p_beta = fx.Parameter(default=0.0)
     
@@ -24,7 +18,6 @@ class CoupledDynamics(fx.PDE):
         }
 
 def _has_compiler() -> bool:
-    # Check standard paths or Homebrew macOS paths
     has_std = bool(shutil.which("clang++") or shutil.which("g++"))
     has_mac = platform.system() == "darwin" and (
         shutil.os.path.exists("/opt/homebrew/opt/llvm/bin/clang++") or 
@@ -32,44 +25,57 @@ def _has_compiler() -> bool:
     )
     return has_std or has_mac
 
+def _has_enzyme() -> bool:
+    return bool(NativeCompiler().enzyme_plugin)
+
 @pytest.mark.skipif(not _has_compiler(), reason="No C++ toolchain found on the host machine.")
 def test_native_compilation_and_execution():
     model = CoupledDynamics()
-    
-    # Engine invokes NativeCompiler directly when mock_execution=False
     engine = Engine(model=model, target="cpu", mock_execution=False)
     
-    # Test vectors
     y = [-2.0, 5.0]
     ydot = [0.0, 0.0]
     params = {"p_alpha": 2.0, "p_beta": 1.0}
     
-    # Execute compiled C++ function natively via ctypes
     res = engine.evaluate_residual(y, ydot, parameters=params)
-    
-    # Expected analytical results:
-    # ----------------------------
-    # Equation 0 (ODE): res[0] = ydot[0] - [ p_alpha * (y1 - y0) ]
-    # res[0] = 0.0 - [ 2.0 * (5.0 - (-2.0)) ]
-    # res[0] = 0.0 - [ 2.0 * 7.0 ] = -14.0
-    
-    # Equation 1 (DAE): res[1] = y1 - [ y1 - abs(y0) * (y0^2) + p_beta ]
-    # res[1] = 5.0 - [ 5.0 - abs(-2.0) * ((-2.0)^2) + 1.0 ]
-    # res[1] = 5.0 - [ 5.0 - 2.0 * 4.0 + 1.0 ]
-    # res[1] = 5.0 - [ 5.0 - 8.0 + 1.0 ] = 5.0 - [-2.0] = 7.0
     
     assert len(res) == 2
     assert res[0] == pytest.approx(-14.0, rel=1e-5)
     assert res[1] == pytest.approx(7.0, rel=1e-5)
 
+@pytest.mark.skipif(not _has_compiler() or not _has_enzyme(), reason="Enzyme plugin required for Analytical Jacobian.")
+def test_native_jacobian_execution():
+    model = CoupledDynamics()
+    engine = Engine(model=model, target="cpu", mock_execution=False)
+    
+    y = [-2.0, 5.0]
+    ydot = [0.0, 0.0]
+    params = {"p_alpha": 2.0, "p_beta": 1.0}
+    c_j = 0.5
+    
+    jac = engine.evaluate_jacobian(y, ydot, c_j, parameters=params)
+    
+    # Analytical Verification of LHS - RHS mapping:
+    # F0 = ydot[0] - [p_alpha * (y1 - y0)]
+    # F1 = y1 - [y1 - |y0| * y0^2 + p_beta] = |y0| * y0^2 - p_beta
+    # dF0/dy0 = p_alpha = 2.0; dF0/dydot0 = 1.0 => J00 = 2.0 + 0.5(1.0) = 2.5
+    # dF0/dy1 = -p_alpha = -2.0; dF0/dydot1 = 0.0 => J01 = -2.0
+    # dF1/dy0 (for y0 < 0, F1 = -y0^3 - p_beta) = -3y0^2 = -3(4) = -12.0 => J10 = -12.0
+    # dF1/dy1 = 0.0 => J11 = 0.0
+    
+    assert len(jac) == 2
+    assert len(jac[0]) == 2
+    
+    assert jac[0][0] == pytest.approx(2.5, rel=1e-5)
+    assert jac[0][1] == pytest.approx(-2.0, rel=1e-5)
+    assert jac[1][0] == pytest.approx(-12.0, rel=1e-5)
+    assert jac[1][1] == pytest.approx(0.0, rel=1e-5)
 
 @pytest.mark.skipif(not _has_compiler(), reason="No C++ toolchain found on the host machine.")
 def test_native_compiler_caching():
     model = CoupledDynamics()
     engine_1 = Engine(model=model, target="cpu", mock_execution=False)
     
-    # Compiling the exact same topology should bypass the Clang invocation and instantly load
-    # By deleting the source file, we prove that Engine_2 loaded the .so from cache
     import os
     import hashlib
     
@@ -81,6 +87,4 @@ def test_native_compiler_caching():
         os.remove(source_path)
         
     engine_2 = Engine(model=model, target="cpu", mock_execution=False)
-    
-    # Will throw an exception if the Clang sub-process attempted to run without the source file
     assert engine_2.runtime.lib_path == engine_1.runtime.lib_path
