@@ -3,25 +3,35 @@ import textwrap
 from .memory import MemoryLayout
 
 def extract_state_name(node: Dict[str, Any]) -> str:
-    """Recursively walks down AST wrappers to find the base State name."""
+    """Recursively walks down AST wrappers to find the base State name driving an equation."""
     t = node.get("type")
     if t == "State":
         return node["name"]
     if t in ("UnaryOp", "Boundary", "InitialCondition"):
         return extract_state_name(node["child"])
-    raise ValueError(f"Cannot extract state name from node: {node}")
+    raise ValueError(f"Cannot extract state name from LHS node: {node}")
 
-def to_cpp(node: Dict[str, Any], layout: MemoryLayout) -> str:
-    """Recursively lowers the Python AST dictionary into C++ code strings."""
+def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0") -> str:
+    """
+    Recursively lowers the Python AST into C++ code strings. 
+    The `idx` parameter acts as a compile-time string macro, allowing spatial 
+    operators (like grad) to offset the evaluation index of their entire subtree.
+    """
     t = node.get("type")
-    if t == "Scalar": return str(node["value"])
-    if t == "State": return f"y[{layout.get_state_offset(node['name'])}]"
-    if t == "Parameter": return f"p[{layout.get_param_offset(node['name'])}]"
     
+    # Base Cases
+    if t == "Scalar": return str(node["value"])
+    if t == "Parameter": return f"p[{layout.get_param_offset(node['name'])}]"
+    if t == "State": 
+        offset, size = layout.state_offsets[node["name"]]
+        return f"y[{offset} + CLAMP({idx}, {size})]"
+        
+    # Recursive Operations
     if t == "BinaryOp":
-        l = to_cpp(node["left"], layout)
-        r = to_cpp(node["right"], layout)
+        l = to_cpp(node["left"], layout, idx)
+        r = to_cpp(node["right"], layout, idx)
         op = node["op"]
+        
         # Standard Arithmetic
         if op == "add": return f"({l} + {r})"
         if op == "sub": return f"({l} - {r})"
@@ -29,7 +39,7 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout) -> str:
         if op == "div": return f"({l} / {r})"
         if op == "pow": return f"std::pow({l}, {r})"
         
-        # Piecewise bounds (casted to double to prevent C++ template deduction errors)
+        # Piecewise bounds
         if op == "max": return f"std::max((double)({l}), (double)({r}))"
         if op == "min": return f"std::min((double)({l}), (double)({r}))"
         
@@ -43,22 +53,38 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout) -> str:
         
     if t == "UnaryOp":
         op = node["op"]
-        c = to_cpp(node["child"], layout)
-        if op == "neg": return f"(-{c})"
-        if op == "abs": return f"std::abs({c})"
-        if op == "exp": return f"std::exp({c})"
-        if op == "log": return f"std::log({c})"
-        if op == "sin": return f"std::sin({c})"
-        if op == "cos": return f"std::cos({c})"
-        if op == "dt": return f"ydot[{layout.get_state_offset(node['child']['name'])}]"
+        child = node["child"]
         
-        # Spatial operators (Mocked via stubs for 0D compilation, expanded in Data Parallel mode)
-        if op == "grad": return f"GRAD({c})"
-        if op == "div": return f"DIV({c})"
-        if op == "coords": return "X_COORD"
+        # Standard Math
+        if op == "neg": return f"(-{to_cpp(child, layout, idx)})"
+        if op == "abs": return f"std::abs({to_cpp(child, layout, idx)})"
+        if op == "exp": return f"std::exp({to_cpp(child, layout, idx)})"
+        if op == "log": return f"std::log({to_cpp(child, layout, idx)})"
+        if op == "sin": return f"std::sin({to_cpp(child, layout, idx)})"
+        if op == "cos": return f"std::cos({to_cpp(child, layout, idx)})"
         
-    if t == "Boundary": return f"BOUNDARY_{node['side'].upper()}({to_cpp(node['child'], layout)})"
-    if t == "InitialCondition": return to_cpp(node["child"], layout)
+        # Differential Time State
+        if op == "dt": 
+            offset, size = layout.state_offsets[child["name"]]
+            return f"ydot[{offset} + CLAMP({idx}, {size})]"
+            
+        # Spatial Operators
+        if op in ("grad", "div"):
+            right = to_cpp(child, layout, f"({idx})+1")
+            left = to_cpp(child, layout, f"({idx})-1")
+            return f"(({right}) - ({left})) / (2.0 * dx)"
+            
+        if op == "integral":
+            state_name = extract_state_name(child)
+            size = layout.state_offsets[state_name][1]
+            sum_expr = to_cpp(child, layout, "j")
+            return f"[&]() {{ double s = 0.0; for(int j=0; j<{size}; ++j) s += {sum_expr}; return s * dx; }}()"
+            
+        if op == "coords": 
+            return f"({idx} * dx)"
+        
+    if t == "Boundary": return to_cpp(node["child"], layout, idx)
+    if t == "InitialCondition": return to_cpp(node["child"], layout, idx)
     
     raise ValueError(f"Unknown AST node type: {t}")
 
@@ -66,19 +92,49 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout) -> str:
 def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, bandwidth: int = 0) -> str:
     """Emits the C++ residual function and the Enzyme LLVM intrinsic hooks for the Jacobian."""
     lines = []
-    res_idx = 0
+    
+    # Separate Bulk PDEs from Boundary Condition Overrides
+    bulk_eqs = []
+    boundary_eqs = []
     
     for eq in ast_payload:
         lhs = eq["lhs"]
         if lhs.get("type") == "InitialCondition":
-            lines.append(f"    // IC ignored in integration loop")
             continue
-            
-        lhs_cpp = to_cpp(lhs, layout)
-        rhs_cpp = to_cpp(eq["rhs"], layout)
-        lines.append(f"    res[{res_idx}] = ({lhs_cpp}) - ({rhs_cpp});")
-        res_idx += 1
+        if lhs.get("type") == "Boundary":
+            boundary_eqs.append(eq)
+        else:
+            bulk_eqs.append(eq)
+
+    # 1. Generate Bulk Spatial Loops
+    for eq in bulk_eqs:
+        state_name = extract_state_name(eq["lhs"])
+        offset, size = layout.state_offsets[state_name]
         
+        if size > 1:
+            lines.append(f"    for (int i = 0; i < {size}; ++i) {{")
+            lhs_cpp = to_cpp(eq["lhs"], layout, "i")
+            rhs_cpp = to_cpp(eq["rhs"], layout, "i")
+            lines.append(f"        res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});")
+            lines.append(f"    }}")
+        else:
+            lhs_cpp = to_cpp(eq["lhs"], layout, "0")
+            rhs_cpp = to_cpp(eq["rhs"], layout, "0")
+            lines.append(f"    res[{offset}] = ({lhs_cpp}) - ({rhs_cpp});")
+
+    # 2. Generate Boundary Overrides
+    if boundary_eqs:
+        lines.append(f"    // Boundary Condition Overrides")
+        for eq in boundary_eqs:
+            state_name = extract_state_name(eq["lhs"])
+            offset, size = layout.state_offsets[state_name]
+            side = eq["lhs"]["side"]
+            idx = "0" if side == "left" else f"{size - 1}"
+            
+            lhs_cpp = to_cpp(eq["lhs"]["child"], layout, idx)
+            rhs_cpp = to_cpp(eq["rhs"], layout, idx)
+            lines.append(f"    res[{offset} + {idx}] = ({lhs_cpp}) - ({rhs_cpp});")
+
     body = "\n".join(lines)
     n_states = layout.n_states
     
@@ -130,11 +186,9 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, bandwi
 #include <vector>
 #include <algorithm>
 
-#define GRAD(x) (0.0)
-#define DIV(x) (0.0)
-#define BOUNDARY_LEFT(x) (x)
-#define BOUNDARY_RIGHT(x) (x)
-#define X_COORD (0.0)
+// Macro to clamp spatial indices safely to boundaries. 
+// Bound parameter explicitly cast to int to avoid template deduction conflicts.
+#define CLAMP(idx, bound) (std::max(0, std::min((int)(idx), (int)(bound) - 1)))
 
 #ifdef ENZYME_ACTIVE
 int enzyme_dup = 1;
@@ -145,6 +199,8 @@ extern void __enzyme_fwddiff(void*, ...);
 extern "C" {{
 
 void evaluate_residual(const double* y, const double* ydot, const double* p, double* res) {{
+    double dx = 1e-6; // Topology scale stub.
+
 {body}
 }}
 
