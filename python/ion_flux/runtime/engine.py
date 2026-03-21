@@ -9,7 +9,7 @@ from ion_flux.compiler.codegen import generate_cpp, extract_state_name
 from ion_flux.compiler.invocation import NativeCompiler
 
 try:
-    from ion_flux._core import solve_ida_native, solve_ida_sundials
+    from ion_flux._core import solve_ida_native
     RUST_FFI_AVAILABLE = True
     FFI_IMPORT_ERROR = None
 except ImportError as e:
