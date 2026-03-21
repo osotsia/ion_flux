@@ -119,8 +119,10 @@ class UnaryOp(Node):
         self.kwargs = kwargs
     def to_dict(self) -> Dict[str, Any]: 
         d = {"type": "UnaryOp", "op": self.op, "child": self.child.to_dict()}
+        # Only serialize explicit keyword arguments to avoid stringifying `None`
         for k, v in self.kwargs.items():
-            d[k] = v.name if hasattr(v, "name") else str(v)
+            if v is not None:
+                d[k] = v.name if hasattr(v, "name") else str(v)
         return d
     def left(self, domain: Optional["Domain"] = None) -> "Boundary":
         return Boundary(self, "left", domain=domain)

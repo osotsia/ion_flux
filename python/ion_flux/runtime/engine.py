@@ -59,7 +59,7 @@ class _ParamHandle:
 
 class Engine:
     """The central orchestrator for compilation, execution routing, and autodiff graphs."""
-    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = True, jacobian_bandwidth: int = 0, **kwargs):
+    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = True, jacobian_bandwidth: Optional[int] = None, **kwargs):
         self.model = model
         self.target = target
         self.mock_execution = mock_execution
@@ -71,10 +71,17 @@ class Engine:
         self.layout = MemoryLayout(states, params)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
         
+        # Determine Sparse Bandwidth automatically based on topology.
+        # A 1D grad/div operation on a central difference grid produces a pentadiagonal matrix (bandwidth = 2).
+        if jacobian_bandwidth is None:
+            self.jacobian_bandwidth = 2 if any(s.domain for s in states) else 0
+        else:
+            self.jacobian_bandwidth = jacobian_bandwidth
+        
         # JIT Compilation Pipeline
         if hasattr(model, "ast"):
             self.ast_payload = model.ast()
-            self.cpp_source = generate_cpp(self.ast_payload, self.layout, bandwidth=jacobian_bandwidth)
+            self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, bandwidth=self.jacobian_bandwidth)
             
             self.runtime = None
             if not self.mock_execution:
@@ -171,7 +178,9 @@ class Engine:
         p_list = self._pack_parameters(parameters or {})
         
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
-        y_res = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist())
+        
+        # Pass the extracted bandwidth to the Rust native solver to unlock O(N) sparse matrix solves
+        y_res = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth)
         
         data = {"Time [s]": t_eval_arr}
         for state_name, (offset, _) in self.layout.state_offsets.items():

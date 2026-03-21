@@ -11,11 +11,10 @@ def extract_state_name(node: Dict[str, Any]) -> str:
         return extract_state_name(node["child"])
     raise ValueError(f"Cannot extract state name from LHS node: {node}")
 
-def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0") -> str:
+def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol: str = "1.0") -> str:
     """
     Recursively lowers the Python AST into C++ code strings. 
-    The `idx` parameter acts as a compile-time string macro, allowing spatial 
-    operators (like grad) to offset the evaluation index of their entire subtree.
+    Injects spatial awareness by routing physical `dx` symbols to differential operators.
     """
     t = node.get("type")
     
@@ -28,8 +27,8 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0") -> str:
         
     # Recursive Operations
     if t == "BinaryOp":
-        l = to_cpp(node["left"], layout, idx)
-        r = to_cpp(node["right"], layout, idx)
+        l = to_cpp(node["left"], layout, idx, dx_symbol)
+        r = to_cpp(node["right"], layout, idx, dx_symbol)
         op = node["op"]
         
         # Standard Arithmetic
@@ -55,89 +54,100 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0") -> str:
         op = node["op"]
         child = node["child"]
         
-        # Standard Math
-        if op == "neg": return f"(-{to_cpp(child, layout, idx)})"
-        if op == "abs": return f"std::abs({to_cpp(child, layout, idx)})"
-        if op == "exp": return f"std::exp({to_cpp(child, layout, idx)})"
-        if op == "log": return f"std::log({to_cpp(child, layout, idx)})"
-        if op == "sin": return f"std::sin({to_cpp(child, layout, idx)})"
-        if op == "cos": return f"std::cos({to_cpp(child, layout, idx)})"
+        if op == "neg": return f"(-{to_cpp(child, layout, idx, dx_symbol)})"
+        if op == "abs": return f"std::abs({to_cpp(child, layout, idx, dx_symbol)})"
+        if op == "exp": return f"std::exp({to_cpp(child, layout, idx, dx_symbol)})"
+        if op == "log": return f"std::log({to_cpp(child, layout, idx, dx_symbol)})"
+        if op == "sin": return f"std::sin({to_cpp(child, layout, idx, dx_symbol)})"
+        if op == "cos": return f"std::cos({to_cpp(child, layout, idx, dx_symbol)})"
         
-        # Differential Time State
         if op == "dt": 
             offset, size = layout.state_offsets[child["name"]]
             return f"ydot[{offset} + CLAMP({idx}, {size})]"
             
-        # Spatial Operators
+        # Physical Spatial Operators (Central Difference Collocated Grid)
         if op in ("grad", "div"):
-            right = to_cpp(child, layout, f"({idx})+1")
-            left = to_cpp(child, layout, f"({idx})-1")
-            return f"(({right}) - ({left})) / (2.0 * dx)"
+            target_dx = f"dx_{node.get('axis', 'default')}" if "axis" in node else dx_symbol
+            right = to_cpp(child, layout, f"({idx})+1", target_dx)
+            left = to_cpp(child, layout, f"({idx})-1", target_dx)
+            return f"(({right}) - ({left})) / (2.0 * {target_dx})"
             
         if op == "integral":
             state_name = extract_state_name(child)
             size = layout.state_offsets[state_name][1]
-            sum_expr = to_cpp(child, layout, "j")
-            return f"[&]() {{ double s = 0.0; for(int j=0; j<{size}; ++j) s += {sum_expr}; return s * dx; }}()"
+            target_dx = f"dx_{node.get('over', 'default')}" if "over" in node else dx_symbol
+            sum_expr = to_cpp(child, layout, "j", target_dx)
+            return f"[&]() {{ double s = 0.0; for(int j=0; j<{size}; ++j) s += {sum_expr}; return s * {target_dx}; }}()"
             
         if op == "coords": 
-            return f"({idx} * dx)"
+            return f"({idx} * {dx_symbol})"
         
-    if t == "Boundary": return to_cpp(node["child"], layout, idx)
-    if t == "InitialCondition": return to_cpp(node["child"], layout, idx)
+    if t == "Boundary": return to_cpp(node["child"], layout, idx, dx_symbol)
+    if t == "InitialCondition": return to_cpp(node["child"], layout, idx, dx_symbol)
     
     raise ValueError(f"Unknown AST node type: {t}")
 
 
-def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, bandwidth: int = 0) -> str:
-    """Emits the C++ residual function and the Enzyme LLVM intrinsic hooks for the Jacobian."""
+def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states: List[Any], bandwidth: int = 0) -> str:
+    """Emits the Topology-Aware C++ residual and Enzyme LLVM intrinsics."""
     lines = []
     
-    # Separate Bulk PDEs from Boundary Condition Overrides
-    bulk_eqs = []
-    boundary_eqs = []
-    
-    for eq in ast_payload:
-        lhs = eq["lhs"]
-        if lhs.get("type") == "InitialCondition":
-            continue
-        if lhs.get("type") == "Boundary":
-            boundary_eqs.append(eq)
-        else:
-            bulk_eqs.append(eq)
+    # 1. Generate Physical Constants (dx mappings from Domain Topology)
+    lines.append("    // --- Physical Domain Constants ---")
+    lines.append("    double dx_default = 1.0;")
+    for state in states:
+        if state.domain:
+            L = state.domain.bounds[1] - state.domain.bounds[0]
+            N = state.domain.resolution
+            dx = L / (N - 1) if N > 1 else L
+            lines.append(f"    double dx_{state.domain.name} = {dx};")
+    lines.append("")
 
-    # 1. Generate Bulk Spatial Loops
+    bulk_eqs = [eq for eq in ast_payload if eq["lhs"].get("type") not in ("InitialCondition", "Boundary")]
+    boundary_eqs = [eq for eq in ast_payload if eq["lhs"].get("type") == "Boundary"]
+
+    # 2. Generate Bulk Spatial Loops
+    lines.append("    // --- Bulk PDE Residuals ---")
     for eq in bulk_eqs:
         state_name = extract_state_name(eq["lhs"])
         offset, size = layout.state_offsets[state_name]
         
+        # Determine driving domain for this equation to pass the correct dx symbol
+        state_obj = next(s for s in states if s.name == state_name)
+        dx_sym = f"dx_{state_obj.domain.name}" if state_obj.domain else "dx_default"
+        
         if size > 1:
             lines.append(f"    for (int i = 0; i < {size}; ++i) {{")
-            lhs_cpp = to_cpp(eq["lhs"], layout, "i")
-            rhs_cpp = to_cpp(eq["rhs"], layout, "i")
+            lhs_cpp = to_cpp(eq["lhs"], layout, "i", dx_sym)
+            rhs_cpp = to_cpp(eq["rhs"], layout, "i", dx_sym)
             lines.append(f"        res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});")
             lines.append(f"    }}")
         else:
-            lhs_cpp = to_cpp(eq["lhs"], layout, "0")
-            rhs_cpp = to_cpp(eq["rhs"], layout, "0")
+            lhs_cpp = to_cpp(eq["lhs"], layout, "0", dx_sym)
+            rhs_cpp = to_cpp(eq["rhs"], layout, "0", dx_sym)
             lines.append(f"    res[{offset}] = ({lhs_cpp}) - ({rhs_cpp});")
 
-    # 2. Generate Boundary Overrides
+    # 3. Generate Boundary Overrides
     if boundary_eqs:
-        lines.append(f"    // Boundary Condition Overrides")
+        lines.append("")
+        lines.append(f"    // --- Boundary Condition Overrides ---")
         for eq in boundary_eqs:
             state_name = extract_state_name(eq["lhs"])
             offset, size = layout.state_offsets[state_name]
             side = eq["lhs"]["side"]
             idx = "0" if side == "left" else f"{size - 1}"
             
-            lhs_cpp = to_cpp(eq["lhs"]["child"], layout, idx)
-            rhs_cpp = to_cpp(eq["rhs"], layout, idx)
+            state_obj = next(s for s in states if s.name == state_name)
+            dx_sym = f"dx_{state_obj.domain.name}" if state_obj.domain else "dx_default"
+            
+            lhs_cpp = to_cpp(eq["lhs"]["child"], layout, idx, dx_sym)
+            rhs_cpp = to_cpp(eq["rhs"], layout, idx, dx_sym)
             lines.append(f"    res[{offset} + {idx}] = ({lhs_cpp}) - ({rhs_cpp});")
 
     body = "\n".join(lines)
     n_states = layout.n_states
     
+    # CPR Graph Coloring for Sparse Analytical Jacobians
     if bandwidth > 0:
         jacobian_logic = textwrap.dedent(f"""\
             int bw = {bandwidth};
@@ -186,8 +196,7 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, bandwi
 #include <vector>
 #include <algorithm>
 
-// Macro to clamp spatial indices safely to boundaries. 
-// Bound parameter explicitly cast to int to avoid template deduction conflicts.
+// Macro to clamp spatial indices safely to boundaries
 #define CLAMP(idx, bound) (std::max(0, std::min((int)(idx), (int)(bound) - 1)))
 
 #ifdef ENZYME_ACTIVE
@@ -199,8 +208,6 @@ extern void __enzyme_fwddiff(void*, ...);
 extern "C" {{
 
 void evaluate_residual(const double* y, const double* ydot, const double* p, double* res) {{
-    double dx = 1e-6; // Topology scale stub.
-
 {body}
 }}
 
