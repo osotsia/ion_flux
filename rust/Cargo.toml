@@ -11,3 +11,5 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.21.0", features = ["extension-module"] }
 numpy = "0.21.0"
 libloading = "0.8.0"
+
+rayon = "1.10" # multithreading

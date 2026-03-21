@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Union
+from typing import List, Union, Any
 from ion_flux.dsl.core import Condition
 
 class ConstantCurrent:
@@ -28,21 +28,24 @@ class ProtocolStep:
     pass
 
 class CC(ProtocolStep):
-    __slots__ = ["rate", "until"]
-    def __init__(self, rate: float, until: Union[Condition, float]):
+    __slots__ = ["rate", "until", "time"]
+    def __init__(self, rate: float, until: Union[Condition, float] = float('inf'), time: float = float('inf')):
         self.rate = float(rate)
-        self.until = until
+        self.until = Condition(until) if isinstance(until, str) else until
+        self.time = float(time)
 
 class CV(ProtocolStep):
-    __slots__ = ["voltage", "until"]
-    def __init__(self, voltage: float, until: Union[Condition, float]):
+    __slots__ = ["voltage", "until", "time"]
+    def __init__(self, voltage: float, until: Union[Condition, float] = float('inf'), time: float = float('inf')):
         self.voltage = float(voltage)
-        self.until = until
+        self.until = Condition(until) if isinstance(until, str) else until
+        self.time = float(time)
 
 class Rest(ProtocolStep):
-    __slots__ = ["time"]
+    __slots__ = ["time", "until"]
     def __init__(self, time: float):
         self.time = float(time)
+        self.until = None
 
 class Sequence:
     """Declarative state machine for hot-swapping constraints during a single solve."""

@@ -8,7 +8,7 @@ def extract_state_names(node: Dict[str, Any]) -> List[str]:
     if t == "State":
         return [node["name"]]
     names = []
-    if t in ("UnaryOp", "Boundary", "InitialCondition"):
+    if t in ("UnaryOp", "Boundary", "DomainBoundary", "InitialCondition"):
         names.extend(extract_state_names(node["child"]))
     elif t == "BinaryOp":
         names.extend(extract_state_names(node["left"]))
@@ -162,8 +162,7 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
     
     raise ValueError(f"Unknown AST node type: {t}")
 
-def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states: List[Any], bandwidth: int = 0) -> str:
-    """Emits the Topology-Aware C++ residual and Enzyme LLVM intrinsics."""
+def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
     lines = []
     state_map = {s.name: s for s in states}
     
@@ -203,9 +202,12 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states
         state_obj = state_map[state_name]
         dx_sym = f"dx_{state_obj.domain.name}" if state_obj.domain and not hasattr(state_obj.domain, "domains") else "dx_default"
         
+        # Level 5: OpenMP Data Parallelism injection
+        omp_pragma = "    #pragma omp parallel for\n" if ("omp" in target and size > 50) else ""
+
         if hasattr(state_obj.domain, "domains") and len(state_obj.domain.domains) == 2:
             d_mac, d_mic = state_obj.domain.domains[0], state_obj.domain.domains[1]
-            lines.append(f"    for (int i_mac = 0; i_mac < {d_mac.resolution}; ++i_mac) {{")
+            lines.append(omp_pragma + f"    for (int i_mac = 0; i_mac < {d_mac.resolution}; ++i_mac) {{")
             lines.append(f"        for (int i_mic = 0; i_mic < {d_mic.resolution}; ++i_mic) {{")
             lines.append(f"            int i = i_mac * {d_mic.resolution} + i_mic;")
             lhs_cpp = to_cpp(eq["lhs"], layout, "i", dx_sym, state_map, dynamic_domains)
@@ -214,7 +216,7 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states
             lines.append(f"        }}")
             lines.append(f"    }}")
         elif size > 1:
-            lines.append(f"    for (int i = 0; i < {size}; ++i) {{")
+            lines.append(omp_pragma + f"    for (int i = 0; i < {size}; ++i) {{")
             lhs_cpp = to_cpp(eq["lhs"], layout, "i", dx_sym, state_map, dynamic_domains)
             rhs_cpp = to_cpp(eq["rhs"], layout, "i", dx_sym, state_map, dynamic_domains)
             lines.append(f"        res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});")

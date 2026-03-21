@@ -1,5 +1,6 @@
 from typing import Dict, Any, Union, List, Optional
 import copy
+import re
 
 class Node:
     """Base class for all AST nodes. Implements mathematical tracing via operator overloading."""
@@ -228,9 +229,28 @@ class CompositeDomain:
 
 class Condition:
     """Compiled Boolean trigger for event detection and protocol hot-swapping."""
-    __slots__ = ["expression"]
+    __slots__ = ["expression", "_compiled_logic"]
     def __init__(self, expression: Union[str, Node]):
         self.expression = expression
+        match = re.search(r"([A-Za-z0-9_]+)\s*(>=|<=|>|<|==|!=)\s*([0-9.-]+)", str(expression))
+        if match:
+            self._compiled_logic = (match.group(1), match.group(2), float(match.group(3)))
+        else:
+            self._compiled_logic = None
+
+    def evaluate(self, session: Any) -> bool:
+        if not self._compiled_logic: return False
+        var, op, val = self._compiled_logic
+        try: current_val = session.get(var)
+        except KeyError: return False
+        if op == ">=": return current_val >= val
+        if op == "<=": return current_val <= val
+        if op == ">": return current_val > val
+        if op == "<": return current_val < val
+        if op == "==": return current_val == val
+        if op == "!=": return current_val != val
+        return False
+
     def __repr__(self) -> str:
         return f"Condition({self.expression})"
 
