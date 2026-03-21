@@ -71,23 +71,41 @@ class Engine:
         self.layout = MemoryLayout(states, params)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
         
+        # Extract AST early to inspect for non-local operators
+        if hasattr(model, "ast"):
+            self.ast_payload = model.ast()
+        else:
+            self.ast_payload = []
+
         # Determine Sparse Bandwidth automatically based on topology.
-        # A 1D grad/div operation on a central difference grid produces a pentadiagonal matrix (bandwidth = 2).
         if jacobian_bandwidth is None:
-            self.jacobian_bandwidth = 2 if any(s.domain for s in states) else 0
+            has_spatial = any(s.domain is not None for s in states)
+            has_scalar = any(s.domain is None for s in states)
+            
+            def _has_integral(node: Any) -> bool:
+                if isinstance(node, dict):
+                    if node.get("type") == "UnaryOp" and node.get("op") == "integral":
+                        return True
+                    return any(_has_integral(v) for v in node.values())
+                elif isinstance(node, list):
+                    return any(_has_integral(v) for v in node)
+                return False
+                
+            if (has_spatial and has_scalar) or _has_integral(self.ast_payload):
+                self.jacobian_bandwidth = 0
+            else:
+                self.jacobian_bandwidth = 2 if has_spatial else 0
         else:
             self.jacobian_bandwidth = jacobian_bandwidth
         
         # JIT Compilation Pipeline
         if hasattr(model, "ast"):
-            self.ast_payload = model.ast()
             self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, bandwidth=self.jacobian_bandwidth)
             
             self.runtime = None
             if not self.mock_execution:
                 self.runtime = NativeCompiler().compile(self.cpp_source, self.layout.n_states)
         else:
-            self.ast_payload = []
             self.runtime = None
             
         for k, v in kwargs.items():
@@ -122,8 +140,10 @@ class Engine:
         def _mark_differentials(node: Any) -> None:
             if isinstance(node, dict):
                 if node.get("type") == "UnaryOp" and node.get("op") == "dt":
-                    offset = self.layout.get_state_offset(node["child"]["name"])
-                    id_arr[offset] = 1.0
+                    state_name = extract_state_name(node["child"], self.layout)
+                    offset, size = self.layout.state_offsets[state_name]
+                    for i in range(size):
+                        id_arr[offset + i] = 1.0
                 for v in node.values():
                     _mark_differentials(v)
             elif isinstance(node, list):
@@ -132,13 +152,28 @@ class Engine:
                     
         _mark_differentials(self.ast_payload)
         
+        # Override boundary conditions as algebraic (0.0)
+        # Because the compiled C++ residual forces `res[idx] = LHS - RHS` at the boundary without `ydot`
+        for eq in self.ast_payload:
+            lhs = eq["lhs"]
+            if lhs.get("type") == "Boundary":
+                state_name = extract_state_name(lhs, self.layout)
+                offset, size = self.layout.state_offsets[state_name]
+                if lhs["side"] == "left":
+                    id_arr[offset] = 0.0
+                elif lhs["side"] == "right":
+                    id_arr[offset + size - 1] = 0.0
+        
         # Seed Initial Conditions
         for eq in self.ast_payload:
             lhs = eq["lhs"]
             if lhs.get("type") == "InitialCondition":
-                offset = self.layout.get_state_offset(extract_state_name(lhs))
+                state_name = extract_state_name(lhs, self.layout)
+                offset, size = self.layout.state_offsets[state_name]
                 if eq["rhs"]["type"] == "Scalar":
-                    y0[offset] = eq["rhs"]["value"]
+                    val = eq["rhs"]["value"]
+                    for i in range(size):
+                        y0[offset + i] = val
                     
         return y0, ydot0, id_arr
 
@@ -183,8 +218,11 @@ class Engine:
         y_res = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth)
         
         data = {"Time [s]": t_eval_arr}
-        for state_name, (offset, _) in self.layout.state_offsets.items():
-            data[state_name] = y_res[:, offset]
+        for state_name, (offset, size) in self.layout.state_offsets.items():
+            if size == 1:
+                data[state_name] = y_res[:, offset]
+            else:
+                data[state_name] = y_res[:, offset:offset+size]
             
         return SimulationResult(data, parameters or {}, status="completed")
 

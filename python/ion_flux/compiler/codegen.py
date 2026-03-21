@@ -2,19 +2,31 @@ from typing import List, Dict, Any
 import textwrap
 from .memory import MemoryLayout
 
-def extract_state_name(node: Dict[str, Any]) -> str:
-    """Recursively walks down AST wrappers to find the base State name driving an equation."""
+def extract_state_names(node: Dict[str, Any]) -> List[str]:
+    """Recursively walks down AST wrappers to find ALL State names driving an equation."""
     t = node.get("type")
     if t == "State":
-        return node["name"]
-    if t in ("UnaryOp", "Boundary", "DomainBoundary", "InitialCondition"):
-        return extract_state_name(node["child"])
-    if t == "BinaryOp":
-        try:
-            return extract_state_name(node["left"])
-        except ValueError:
-            return extract_state_name(node["right"])
-    raise ValueError(f"Cannot extract state name from LHS node: {node}")
+        return [node["name"]]
+    names = []
+    if t in ("UnaryOp", "Boundary", "InitialCondition"):
+        names.extend(extract_state_names(node["child"]))
+    elif t == "BinaryOp":
+        names.extend(extract_state_names(node["left"]))
+        names.extend(extract_state_names(node["right"]))
+        
+    # Preserve deterministic discovery order while removing duplicates
+    seen = set()
+    return [x for x in names if not (x in seen or seen.add(x))]
+
+def extract_state_name(node: Dict[str, Any], layout: MemoryLayout) -> str:
+    """Finds the primary State name driving an equation, prioritizing spatial domains."""
+    names = extract_state_names(node)
+    if not names:
+        raise ValueError(f"Cannot extract state name from LHS node: {node}")
+    for name in names:
+        if layout.state_offsets[name][1] > 1:
+            return name
+    return names[0]
 
 def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol: str = "1.0", state_map: Dict[str, Any] = None, dynamic_domains: Dict[str, Any] = None) -> str:
     """
@@ -30,7 +42,6 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
         offset, size = layout.state_offsets[node["name"]]
         return f"y[{offset} + CLAMP({idx}, {size})]"
         
-    # Recursive Operations
     if t == "BinaryOp":
         l = to_cpp(node["left"], layout, idx, dx_symbol, state_map, dynamic_domains)
         r = to_cpp(node["right"], layout, idx, dx_symbol, state_map, dynamic_domains)
@@ -62,7 +73,7 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
         if op == "cos": return f"std::cos({to_cpp(child, layout, idx, dx_symbol, state_map, dynamic_domains)})"
         
         if op == "dt": 
-            state_name = extract_state_name(child)
+            state_name = extract_state_name(child, layout)
             offset, size = layout.state_offsets[state_name]
             base_dt = f"ydot[{offset} + CLAMP({idx}, {size})]"
             
@@ -75,7 +86,7 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
                     if d.name in dynamic_domains:
                         binding = dynamic_domains[d.name]
                         if binding["side"] == "right":
-                            L_state = extract_state_name(binding["rhs"])
+                            L_state = extract_state_name(binding["rhs"], layout)
                             L_offset = layout.state_offsets[L_state][0]
                             v_mesh = f"((({idx}) * dx_{d.name}) / std::max(1e-12, y[{L_offset}])) * ydot[{L_offset}]"
                             grad_c = f"(((y[{offset} + CLAMP(({idx})+1, {size})]) - (y[{offset} + CLAMP(({idx})-1, {size})])) / (2.0 * dx_{d.name}))"
@@ -115,7 +126,7 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
                 return f"(({right}) - ({left})) / (2.0 * {target_dx})"
             
         if op == "integral":
-            state_name = extract_state_name(child)
+            state_name = extract_state_name(child, layout)
             size = layout.state_offsets[state_name][1]
             target_dx = f"dx_{node.get('over')}" if node.get('over') else dx_symbol
             sum_expr = to_cpp(child, layout, "j", target_dx, state_map, dynamic_domains)
@@ -124,7 +135,29 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
         if op == "coords": 
             return f"({idx} * {dx_symbol})"
         
-    if t in ("Boundary", "InitialCondition"): 
+    if t == "Boundary":
+        try:
+            state_name = extract_state_name(node, layout)
+            _, size = layout.state_offsets[state_name]
+            side = node["side"]
+            
+            state_obj = state_map.get(state_name) if state_map else None
+            if state_obj and hasattr(state_obj.domain, "domains") and len(state_obj.domain.domains) == 2:
+                d_mac, d_mic = state_obj.domain.domains[0], state_obj.domain.domains[1]
+                bc_domain = node.get("domain")
+                if bc_domain == d_mic.name:
+                    if str(idx) == "0":
+                        b_idx = f"{d_mic.resolution - 1}" if side == "right" else "0"
+                    else:
+                        b_idx = f"{idx} * {d_mic.resolution}" if side == "left" else f"{idx} * {d_mic.resolution} + {d_mic.resolution - 1}"
+                    return to_cpp(node["child"], layout, b_idx, dx_symbol, state_map, dynamic_domains)
+                    
+            b_idx = "0" if side == "left" else f"{size - 1}"
+            return to_cpp(node["child"], layout, b_idx, dx_symbol, state_map, dynamic_domains)
+        except ValueError:
+            return to_cpp(node["child"], layout, idx, dx_symbol, state_map, dynamic_domains)
+
+    if t == "InitialCondition": 
         return to_cpp(node["child"], layout, idx, dx_symbol, state_map, dynamic_domains)
     
     raise ValueError(f"Unknown AST node type: {t}")
@@ -152,7 +185,7 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states
     for d in all_domains.values():
         denom = max(d.resolution - 1, 1)
         if d.name in dynamic_domains:
-            L_state = extract_state_name(dynamic_domains[d.name]["rhs"])
+            L_state = extract_state_name(dynamic_domains[d.name]["rhs"], layout)
             offset = layout.state_offsets[L_state][0]
             lines.append(f"    double dx_{d.name} = y[{offset}] / {denom}.0;")
         else:
@@ -165,7 +198,7 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states
 
     lines.append("    // --- Bulk PDE Residuals ---")
     for eq in bulk_eqs:
-        state_name = extract_state_name(eq["lhs"])
+        state_name = extract_state_name(eq["lhs"], layout)
         offset, size = layout.state_offsets[state_name]
         state_obj = state_map[state_name]
         dx_sym = f"dx_{state_obj.domain.name}" if state_obj.domain and not hasattr(state_obj.domain, "domains") else "dx_default"
@@ -195,7 +228,7 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states
         lines.append("")
         lines.append(f"    // --- Boundary Condition Overrides ---")
         for eq in boundary_eqs:
-            state_name = extract_state_name(eq["lhs"])
+            state_name = extract_state_name(eq["lhs"], layout)
             offset, size = layout.state_offsets[state_name]
             side = eq["lhs"]["side"]
             bc_domain = eq["lhs"].get("domain")
