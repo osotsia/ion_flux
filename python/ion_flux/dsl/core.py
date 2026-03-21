@@ -1,8 +1,10 @@
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, List, Optional
 import copy
 
 class Node:
-    """Base class for all AST nodes. Implements mathematical tracing."""
+    """Base class for all AST nodes. Implements mathematical tracing via operator overloading."""
+    
+    # Standard Arithmetic
     def __add__(self, other): return BinaryOp("add", self, _wrap(other))
     def __radd__(self, other): return BinaryOp("add", _wrap(other), self)
     def __sub__(self, other): return BinaryOp("sub", self, _wrap(other))
@@ -15,14 +17,30 @@ class Node:
     def __rpow__(self, other): return BinaryOp("pow", _wrap(other), self)
     def __neg__(self): return UnaryOp("neg", self)
     
+    # Relational Operators (Overrides default object behavior)
+    def __lt__(self, other): return BinaryOp("lt", self, _wrap(other))
+    def __le__(self, other): return BinaryOp("le", self, _wrap(other))
+    def __gt__(self, other): return BinaryOp("gt", self, _wrap(other))
+    def __ge__(self, other): return BinaryOp("ge", self, _wrap(other))
+    def __eq__(self, other): return BinaryOp("eq", self, _wrap(other))
+    def __ne__(self, other): return BinaryOp("ne", self, _wrap(other))
+
+    def __hash__(self) -> int:
+        """
+        Restores identity-based hashing.
+        Required because overriding __eq__ automatically sets __hash__ to None in Python,
+        but we need Nodes to be hashable to act as dictionary keys in the PDE math() definition.
+        """
+        return id(self)
+
     @property
-    def left(self): return Boundary(self, "left")
+    def left(self) -> "Boundary": return Boundary(self, "left")
     
     @property
-    def right(self): return Boundary(self, "right")
+    def right(self) -> "Boundary": return Boundary(self, "right")
     
     @property
-    def t0(self): return InitialCondition(self)
+    def t0(self) -> "InitialCondition": return InitialCondition(self)
 
     def to_dict(self) -> Dict[str, Any]: 
         raise NotImplementedError("Subclasses must implement to_dict()")
@@ -34,140 +52,174 @@ def _wrap(val: Union[int, float, Node]) -> Node:
         return Scalar(float(val))
     if isinstance(val, Node):
         return val
-    raise TypeError(f"Cannot wrap type {type(val)} into an AST Node.")
+    raise TypeError(f"Cannot wrap type {type(val).__name__} into an AST Node. Expected float, int, or Node.")
 
 
 class Scalar(Node):
+    __slots__ = ["value"]
     def __init__(self, value: float): 
         self.value = value
-        
-    def to_dict(self): 
+    def to_dict(self) -> Dict[str, Any]: 
         return {"type": "Scalar", "value": self.value}
-        
-    def __repr__(self):
-        return f"{self.value}"
+    def __repr__(self) -> str:
+        return str(self.value)
 
 
 class State(Node):
-    def __init__(self, domain=None, name: str = ""):
+    __slots__ = ["domain", "name"]
+    def __init__(self, domain: Optional["Domain"] = None, name: str = ""):
         self.domain = domain
         self.name = name
-        
-    def to_dict(self): 
+    def to_dict(self) -> Dict[str, Any]: 
         return {"type": "State", "name": self.name}
-        
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.name or "<Unbound State>"
 
 
 class Parameter(Node):
+    __slots__ = ["default", "name"]
     def __init__(self, default: float, name: str = ""):
         self.default = default
         self.name = name
-        
-    def to_dict(self): 
+    def to_dict(self) -> Dict[str, Any]: 
         return {"type": "Parameter", "name": self.name, "default": self.default}
-        
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.name or f"<Unbound Param: {self.default}>"
 
 
 class BinaryOp(Node):
+    __slots__ = ["op", "left_node", "right_node"]
+    
+    _SYM_MAP = {
+        "add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "**",
+        "lt": "<", "le": "<=", "gt": ">", "ge": ">=", "eq": "==", "ne": "!="
+    }
+    
     def __init__(self, op: str, left_node: Node, right_node: Node):
         self.op = op
         self.left_node = left_node
         self.right_node = right_node
-        
-    def to_dict(self): 
+    def to_dict(self) -> Dict[str, Any]: 
         return {
             "type": "BinaryOp", 
             "op": self.op, 
             "left": self.left_node.to_dict(), 
             "right": self.right_node.to_dict()
         }
-        
-    def __repr__(self):
-        return f"({self.left_node} {self.op} {self.right_node})"
+    def __repr__(self) -> str:
+        symbol = self._SYM_MAP.get(self.op, self.op)
+        return f"({self.left_node} {symbol} {self.right_node})"
 
 
 class UnaryOp(Node):
-    def __init__(self, op: str, child: Node):
+    __slots__ = ["op", "child", "kwargs"]
+    def __init__(self, op: str, child: Node, **kwargs):
         self.op = op
         self.child = child
-        
-    def to_dict(self): 
-        return {"type": "UnaryOp", "op": self.op, "child": self.child.to_dict()}
-        
-    def __repr__(self):
+        self.kwargs = kwargs
+    def to_dict(self) -> Dict[str, Any]: 
+        d = {"type": "UnaryOp", "op": self.op, "child": self.child.to_dict()}
+        for k, v in self.kwargs.items():
+            d[k] = v.name if hasattr(v, "name") else str(v)
+        return d
+    def left(self, domain: Optional["Domain"] = None) -> "Boundary":
+        return Boundary(self, "left", domain=domain)
+    def right(self, domain: Optional["Domain"] = None) -> "Boundary":
+        return Boundary(self, "right", domain=domain)
+    def __repr__(self) -> str:
         return f"{self.op}({self.child})"
 
 
 class Boundary(Node):
-    def __init__(self, child: Node, side: str):
+    __slots__ = ["child", "side", "domain"]
+    def __init__(self, child: Node, side: str, domain: Optional["Domain"] = None):
         self.child = child
         self.side = side
-        
-    def to_dict(self): 
-        return {"type": "Boundary", "side": self.side, "child": self.child.to_dict()}
-        
-    def __repr__(self):
+        self.domain = domain
+    def to_dict(self) -> Dict[str, Any]: 
+        d = {"type": "Boundary", "side": self.side, "child": self.child.to_dict()}
+        if self.domain:
+            d["domain"] = self.domain.name
+        return d
+    def __repr__(self) -> str:
         return f"{self.child}.{self.side}"
 
 
 class InitialCondition(Node):
+    __slots__ = ["child"]
     def __init__(self, child: Node):
         self.child = child
-        
-    def to_dict(self): 
+    def to_dict(self) -> Dict[str, Any]: 
         return {"type": "InitialCondition", "child": self.child.to_dict()}
-        
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.child}.t0"
 
 
 class Domain:
-    def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian"):
+    """Topology-agnostic spatial domain. Overloads multiplication for pseudo-dimensions."""
+    __slots__ = ["bounds", "resolution", "coord_sys", "name"]
+    def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian", name: str = ""):
         self.bounds = bounds
         self.resolution = resolution
         self.coord_sys = coord_sys
+        self.name = name
         
     @property
     def coords(self) -> Node:
         return UnaryOp("coords", Scalar(0.0))
+        
+    def __mul__(self, other: "Domain") -> "CompositeDomain":
+        return CompositeDomain([self, other])
+        
+    def __repr__(self) -> str:
+        return self.name or f"Domain({self.bounds})"
+
+
+class CompositeDomain:
+    """Represents a hierarchical cross-product of multiple topologies."""
+    __slots__ = ["domains", "name"]
+    def __init__(self, domains: List[Domain], name: str = ""):
+        self.domains = domains
+        self.name = name or "_x_".join([d.name for d in domains if d.name])
+        
+    def __repr__(self) -> str:
+        return self.name or f"CompositeDomain({[d.name for d in self.domains]})"
+
+
+class Condition:
+    """Compiled Boolean trigger for event detection and protocol hot-swapping."""
+    __slots__ = ["expression"]
+    def __init__(self, expression: Union[str, Node]):
+        self.expression = expression
+    def __repr__(self) -> str:
+        return f"Condition({self.expression})"
 
 
 class PDE:
-    """
-    Declarative base class for defining Partial Differential Equations.
-    Introspects class attributes to bind AST variables to their defined names.
-    """
+    """Declarative base class for defining Partial Differential Equations."""
     def __init__(self, **kwargs):
         self._bind_declarations()
         
-    def _bind_declarations(self):
+    def _bind_declarations(self) -> None:
         """
-        Deep-copies class-level States and Parameters to the instance level.
-        Prevents state-leakage between concurrent PDE instances.
+        Isolates class-level Nodes to the instance level to prevent state leakage
+        across concurrent PDE instantiations, injecting variable names intrinsically.
         """
         for name in dir(self.__class__):
             if name.startswith("__"):
                 continue
             
             attr = getattr(self.__class__, name)
-            if isinstance(attr, (State, Parameter)):
-                # Clone the node to ensure instance-level isolation
+            if isinstance(attr, (State, Parameter, Domain, CompositeDomain)):
                 clone = copy.copy(attr)
                 clone.name = name
                 setattr(self, name, clone)
 
     def math(self) -> Dict[Node, Node]:
-        """Defines the equations governing the PDE system."""
-        raise NotImplementedError("Models must implement the math() method.")
+        raise NotImplementedError("PDE subclasses must implement the math() method.")
 
-    def ast(self) -> list:
-        """Serializes the mathematical intent into a flat list of dictionaries."""
-        equations = self.math()
+    def ast(self) -> List[Dict[str, Any]]:
         return [
             {"lhs": lhs.to_dict(), "rhs": _wrap(rhs).to_dict()} 
-            for lhs, rhs in equations.items()
+            for lhs, rhs in self.math().items()
         ]

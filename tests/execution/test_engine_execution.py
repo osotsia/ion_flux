@@ -23,6 +23,42 @@ def test_engine_emits_enzyme_cpp(heat_model):
     assert "extern void __enzyme_fwddiff" in cpp
     assert "void evaluate_residual" in cpp
 
+def test_stateful_session_execution():
+    engine = Engine(model=ExponentialDecay(), target="cpu", mock_execution=True)
+    session = engine.start_session(parameters={"k": 1.0})
+    
+    assert session.time == 0.0
+    session.step(dt=0.1)
+    assert session.time == 0.1
+    assert session.get("Voltage") < 4.2
+    
+    session.reach_steady_state()
+    eis = session.solve_eis(frequencies=np.array([10.0]), input_var="i_app", output_var="Voltage")
+    assert len(eis) == 1
+
+def test_differentiable_graph_metrics():
+    engine = Engine(model=ExponentialDecay(), target="cpu", mock_execution=True)
+    res = engine.solve(requires_grad=["k"])
+    
+    loss = fx.metrics.rmse(res["Voltage [V]"].data, np.array([4.0]*100), engine=engine)
+    loss.backward()
+    
+    # Validate the AD hook properly propagated to the engine's ParamHandle
+    assert engine.parameters["k"].grad != 0.0
+
+def test_stateless_binary_deployment(tmp_path):
+    import os
+    engine = Engine(model=ExponentialDecay(), target="cpu", mock_execution=False)
+    if not engine.runtime:
+        pytest.skip("Compilation environment absent.")
+        
+    export_file = tmp_path / "model.so"
+    engine.export_binary(str(export_file))
+    
+    stateless_engine = Engine.load(str(export_file), target="cpu:serial")
+    assert stateless_engine.target == "cpu:serial"
+    assert stateless_engine.mock_execution is True
+
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
 def test_end_to_end():
     """
