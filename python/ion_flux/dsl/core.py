@@ -74,6 +74,9 @@ class State(Node):
         return {"type": "State", "name": self.name}
     def __repr__(self) -> str:
         return self.name or "<Unbound State>"
+    def __set_name__(self, owner, name):
+        if not self.name:
+            self.name = name
 
 
 class Parameter(Node):
@@ -85,6 +88,9 @@ class Parameter(Node):
         return {"type": "Parameter", "name": self.name, "default": self.default}
     def __repr__(self) -> str:
         return self.name or f"<Unbound Param: {self.default}>"
+    def __set_name__(self, owner, name):
+        if not self.name:
+            self.name = name
 
 
 class BinaryOp(Node):
@@ -157,6 +163,17 @@ class InitialCondition(Node):
         return f"{self.child}.t0"
 
 
+class DomainBoundary(Node):
+    __slots__ = ["domain", "side"]
+    def __init__(self, domain: "Domain", side: str):
+        self.domain = domain
+        self.side = side
+    def to_dict(self) -> Dict[str, Any]: 
+        return {"type": "DomainBoundary", "domain": self.domain.name, "side": self.side}
+    def __repr__(self) -> str:
+        return f"{self.domain.name}.{self.side}"
+
+
 class Domain:
     """Topology-agnostic spatial domain. Overloads multiplication for pseudo-dimensions."""
     __slots__ = ["bounds", "resolution", "coord_sys", "name"]
@@ -169,12 +186,24 @@ class Domain:
     @property
     def coords(self) -> Node:
         return UnaryOp("coords", Scalar(0.0))
+
+    @property
+    def left(self) -> DomainBoundary:
+        return DomainBoundary(self, "left")
+
+    @property
+    def right(self) -> DomainBoundary:
+        return DomainBoundary(self, "right")
         
     def __mul__(self, other: "Domain") -> "CompositeDomain":
         return CompositeDomain([self, other])
         
     def __repr__(self) -> str:
         return self.name or f"Domain({self.bounds})"
+
+    def __set_name__(self, owner, name):
+        if not self.name:
+            self.name = name
 
 
 class CompositeDomain:
@@ -184,8 +213,17 @@ class CompositeDomain:
         self.domains = domains
         self.name = name or "_x_".join([d.name for d in domains if d.name])
         
+    @property
+    def resolution(self) -> int:
+        import math
+        return math.prod(d.resolution for d in self.domains)
+        
     def __repr__(self) -> str:
         return self.name or f"CompositeDomain({[d.name for d in self.domains]})"
+
+    def __set_name__(self, owner, name):
+        if not self.name:
+            self.name = name
 
 
 class Condition:

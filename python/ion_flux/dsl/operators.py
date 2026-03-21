@@ -8,11 +8,11 @@ def dt(state: Node) -> UnaryOp:
 
 def grad(state: Node, axis: Optional[Domain] = None) -> UnaryOp: 
     """Topology-agnostic spatial gradient. Defaults to dominant domain if axis is None."""
-    return UnaryOp("grad", state, axis=axis)
+    return UnaryOp("grad", state, axis=axis.name if axis else None)
 
 def div(expr: Node, axis: Optional[Domain] = None) -> UnaryOp: 
     """Topology-agnostic spatial divergence."""
-    return UnaryOp("div", expr, axis=axis)
+    return UnaryOp("div", expr, axis=axis.name if axis else None)
 
 def integral(expr: Node, over: Optional[Domain] = None) -> UnaryOp:
     """Definite integral over a specified spatial domain."""
