@@ -96,30 +96,50 @@ def to_cpp(node: Dict[str, Any], layout: MemoryLayout, idx: str = "0", dx_symbol
             return base_dt
             
         if op == "grad":
-            target_dx = f"dx_{node.get('axis')}" if node.get('axis') else dx_symbol
-            right = to_cpp(child, layout, f"({idx})+1", target_dx, state_map, dynamic_domains)
-            left = to_cpp(child, layout, f"({idx})-1", target_dx, state_map, dynamic_domains)
+            axis_name = node.get("axis")
+            target_dx = f"dx_{axis_name}" if axis_name else dx_symbol
+            stride = "1"
+            
+            if axis_name and state_map:
+                try:
+                    state_name = extract_state_name(child, layout)
+                    s_domain = state_map.get(state_name).domain
+                    if s_domain and hasattr(s_domain, "domains") and len(s_domain.domains) == 2:
+                        if s_domain.domains[0].name == axis_name:
+                            stride = str(s_domain.domains[1].resolution)
+                except ValueError:
+                    pass
+                    
+            right = to_cpp(child, layout, f"({idx}) + {stride}", target_dx, state_map, dynamic_domains)
+            left = to_cpp(child, layout, f"({idx}) - {stride}", target_dx, state_map, dynamic_domains)
             return f"(({right}) - ({left})) / (2.0 * {target_dx})"
             
         if op == "div":
             axis_name = node.get("axis")
             target_dx = f"dx_{axis_name}" if axis_name else dx_symbol
-            
+            stride = "1"
             coord_sys = "cartesian"
-            if state_map and axis_name:
-                for s in state_map.values():
-                    if s.domain:
-                        ds = s.domain.domains if hasattr(s.domain, "domains") else [s.domain]
+            
+            if axis_name and state_map:
+                try:
+                    state_name = extract_state_name(child, layout)
+                    s_domain = state_map.get(state_name).domain
+                    if s_domain:
+                        ds = s_domain.domains if hasattr(s_domain, "domains") else [s_domain]
+                        if len(ds) == 2 and ds[0].name == axis_name:
+                            stride = str(ds[1].resolution)
                         for d in ds:
                             if d.name == axis_name:
                                 coord_sys = getattr(d, "coord_sys", "cartesian")
+                except ValueError:
+                    pass
             
-            right = to_cpp(child, layout, f"({idx})+1", target_dx, state_map, dynamic_domains)
-            left = to_cpp(child, layout, f"({idx})-1", target_dx, state_map, dynamic_domains)
+            right = to_cpp(child, layout, f"({idx}) + {stride}", target_dx, state_map, dynamic_domains)
+            left = to_cpp(child, layout, f"({idx}) - {stride}", target_dx, state_map, dynamic_domains)
             
             if coord_sys == "spherical":
-                r_right = f"((({idx})+1) * {target_dx})"
-                r_left = f"((({idx})-1) * {target_dx})"
+                r_right = f"((({idx}) + {stride}) * {target_dx})"
+                r_left = f"((({idx}) - {stride}) * {target_dx})"
                 r_center = f"(std::max(1e-12, (double)({idx}) * {target_dx}))"
                 return f"((({r_right})*({r_right}) * ({right})) - (({r_left})*({r_left}) * ({left}))) / (({r_center})*({r_center}) * 2.0 * {target_dx})"
             else:
@@ -309,6 +329,7 @@ def generate_cpp(ast_payload: List[Dict[str, Any]], layout: MemoryLayout, states
 int enzyme_dup = 1;
 int enzyme_const = 2;
 extern void __enzyme_fwddiff(void*, ...);
+extern void __enzyme_autodiff(void*, ...);
 #endif
 
 extern "C" {{
@@ -325,6 +346,23 @@ void evaluate_jacobian(const double* y, const double* ydot, const double* p, dou
     std::vector<double> dres(N, 0.0);
 
 {textwrap.indent(jacobian_logic, '    ')}
+}}
+
+void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* lambda_vec, double* dp_out, double* dy_out) {{
+    int N = {n_states};
+    int N_P = {layout.n_params};
+    std::vector<double> res_dummy(N, 0.0);
+    std::vector<double> ydot_dummy(N, 0.0);
+    for(int i=0; i<N_P; ++i) dp_out[i] = 0.0;
+    for(int i=0; i<N; ++i) dy_out[i] = 0.0;
+
+#ifdef ENZYME_ACTIVE
+    __enzyme_autodiff((void*)evaluate_residual, 
+        enzyme_dup, y, dy_out, 
+        enzyme_dup, ydot, ydot_dummy.data(), 
+        enzyme_dup, p, dp_out, 
+        enzyme_dup, res_dummy.data(), (double*)lambda_vec);
+#endif
 }}
 
 }} // extern "C"

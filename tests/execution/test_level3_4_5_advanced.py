@@ -107,7 +107,10 @@ def test_native_eis_frequency_domain_solver():
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
 def test_discrete_adjoint_backward_propagation():
-    """Validates reverse tracking of local sensitivities through the integration history."""
+    """
+    Validates reverse tracking of continuous parameter sensitivities via Enzyme VJPs 
+    and an unconditionally stable implicit backward integration scheme.
+    """
     engine = Engine(model=AdjointDecay(), target="cpu", mock_execution=False)
     res = engine.solve(t_span=(0, 1.0), parameters={"k": 2.0}, requires_grad=["k"])
     
@@ -116,6 +119,7 @@ def test_discrete_adjoint_backward_propagation():
     
     grad_k = engine.parameters["k"].grad
     assert isinstance(grad_k, float)
+    assert not np.isnan(grad_k)
     assert grad_k < 0.0 # High k accelerates curve towards 0 target, lowering overall error
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")

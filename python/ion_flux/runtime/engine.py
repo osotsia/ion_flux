@@ -1,13 +1,15 @@
 import asyncio
 import logging
 import shutil
+import json
+import os
 from typing import Dict, Any, List, Optional, Tuple, Sequence
 import numpy as np
 
 from ion_flux.dsl.core import PDE, State, Parameter
 from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp, extract_state_name
-from ion_flux.compiler.invocation import NativeCompiler
+from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
 from ion_flux.runtime.session import Session
 
 try:
@@ -100,18 +102,48 @@ class Engine:
 
     @classmethod
     def load(cls, binary_path: str, target: str = "cpu:serial") -> "Engine":
-        """0ms Serverless cold-start instantiation from a pre-compiled object block."""
+        """0ms Serverless cold-start instantiation from a pre-compiled object block and layout manifest."""
+        meta_path = binary_path + ".meta.json"
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(f"Missing layout manifest at {meta_path}. Ensure it was exported correctly.")
+            
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+            
         engine = cls.__new__(cls)
         engine.target = target
-        engine.mock_execution = True
-        engine.layout = None 
-        engine.parameters = {}
+        engine.mock_execution = False
+        engine.layout = MemoryLayout.from_dict(meta["layout"])
+        engine.parameters = {name: _ParamHandle(name, val) for name, val in meta["parameters"].items()}
+        engine.jacobian_bandwidth = meta.get("jacobian_bandwidth", 0)
+        engine._metadata_cache = (
+            meta["metadata_cache"]["y0"],
+            meta["metadata_cache"]["ydot0"],
+            meta["metadata_cache"]["id_arr"]
+        )
+        engine.runtime = NativeRuntime(binary_path, engine.layout.n_states)
         return engine
 
     def export_binary(self, export_path: str) -> None:
-        """Serializes the compiled JIT artifact for stateless cloud deployment."""
+        """Serializes the compiled JIT artifact and memory manifest for stateless cloud deployment."""
         if not getattr(self, "runtime", None) or not hasattr(self.runtime, "lib_path"):
             raise RuntimeError("Engine has not compiled a native binary. Cannot export.")
+            
+        y0, ydot0, id_arr = self._extract_metadata()
+        meta = {
+            "layout": {
+                "state_offsets": self.layout.state_offsets,
+                "param_offsets": self.layout.param_offsets,
+                "n_states": self.layout.n_states,
+                "n_params": self.layout.n_params
+            },
+            "parameters": {name: p.value for name, p in self.parameters.items()},
+            "jacobian_bandwidth": getattr(self, "jacobian_bandwidth", 0),
+            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr}
+        }
+        with open(export_path + ".meta.json", "w") as f:
+            json.dump(meta, f)
+            
         shutil.copy(self.runtime.lib_path, export_path)
 
     def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None) -> Session:
@@ -119,6 +151,9 @@ class Engine:
         return Session(engine=self, parameters=parameters or {}, soc=soc)
 
     def _extract_metadata(self) -> Tuple[List[float], List[float], List[float]]:
+        if hasattr(self, "_metadata_cache"):
+            return self._metadata_cache
+            
         y0 = [0.0] * self.layout.n_states
         ydot0 = [0.0] * self.layout.n_states
         id_arr = [0.0] * self.layout.n_states

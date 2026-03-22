@@ -41,6 +41,17 @@ class NativeRuntime:
         ]
         self.dll.evaluate_jacobian.restype = None
 
+        # Signature: void evaluate_vjp(y, ydot, p, lambda, dp_out, dy_out)
+        self.dll.evaluate_vjp.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+        ]
+        self.dll.evaluate_vjp.restype = None
+
     def evaluate_residual(self, y: List[float], ydot: List[float], p: List[float]) -> List[float]:
         if len(y) != self.n_states or len(ydot) != self.n_states:
             raise ValueError(f"Expected state vectors of length {self.n_states}.")
@@ -131,6 +142,9 @@ class NativeCompiler:
             f.write(cpp_source)
             
         cmd = [self.compiler_cmd, "-O3", "-fPIC", "-shared", "-o", lib_path, source_path]
+        
+        if "#pragma omp" in cpp_source:
+            cmd.append("-fopenmp")
         
         if self.enzyme_plugin:
             cmd.insert(1, f"-fplugin={self.enzyme_plugin}")

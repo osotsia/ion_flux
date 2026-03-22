@@ -5,6 +5,7 @@ use rayon::prelude::*;
 
 type NativeResFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *mut c_double);
 type NativeJacFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, c_double, *mut c_double);
+type NativeVjpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *mut c_double, *mut c_double);
 
 /// Solves a dense square linear system J * dx = b in-place using Gaussian elimination.
 /// O(N^3) time complexity. J is expected in Column-Major layout.
@@ -262,43 +263,47 @@ pub fn discrete_adjoint_native<'py>(
     let mut p_grad = vec![0.0; n_params];
 
     let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT library") };
-    let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
     let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
+    let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").unwrap() };
 
     let mut lambda = vec![0.0; n];
     
     for step in (1..n_steps).rev() {
         let dt = t_eval[step] - t_eval[step - 1];
+        let c_j = 1.0 / dt;
         let y = &y_traj[step];
-        let mut res_base = vec![0.0; n];
         
-        unsafe { res_fn(y.as_ptr(), vec![0.0; n].as_ptr(), p_list.as_ptr(), res_base.as_mut_ptr()) };
-        for i in 0..n { lambda[i] += dl_dy[step][i]; }
-
-        let eps = 1e-6;
-        for p_idx in 0..n_params {
-            let mut p_pert = p_list.clone();
-            p_pert[p_idx] += eps;
-            let mut res_pert = vec![0.0; n];
-            unsafe { res_fn(y.as_ptr(), vec![0.0; n].as_ptr(), p_pert.as_ptr(), res_pert.as_mut_ptr()) };
-            
-            let mut dp_dot = 0.0;
-            for i in 0..n { dp_dot += lambda[i] * ((res_pert[i] - res_base[i]) / eps); }
-            p_grad[p_idx] -= dp_dot * dt;
+        let mut ydot = vec![0.0; n];
+        for i in 0..n {
+            if id_arr[i] == 1.0 { ydot[i] = (y_traj[step][i] - y_traj[step - 1][i]) / dt; }
         }
         
+        // 1. Evaluate Forward Jacobian J = dF/dy + c_j * dF/dydot
         let mut jac = vec![0.0; n * n];
-        unsafe { jac_fn(y.as_ptr(), vec![0.0; n].as_ptr(), p_list.as_ptr(), 0.0, jac.as_mut_ptr()) };
-        let mut lambda_next = vec![0.0; n];
+        unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), c_j, jac.as_mut_ptr()) };
         
+        // 2. Transpose Jacobian (J^T) since SUNDIALS emits Column-Major (jac[col * n + row])
+        let mut jac_t = vec![0.0; n * n];
         for row in 0..n {
-            for col in 0..n {
-                if id_arr[row] == 1.0 { 
-                    lambda_next[col] += lambda[row] * (if row == col { 1.0 } else { -jac[col * n + row] * dt }); 
-                }
-            }
+            for col in 0..n { jac_t[row * n + col] = jac[col * n + row]; }
         }
-        lambda = lambda_next;
+        
+        // 3. Form Adjoint RHS = -dL/dy + c_j * diag(id_arr) * lambda_prev
+        let mut rhs = vec![0.0; n];
+        for i in 0..n { rhs[i] = -dl_dy[step][i] + lambda[i] * id_arr[i] * c_j; }
+        
+        // 4. Implicitly solve J^T * lambda_next = RHS
+        solve_dense_system(n, &mut jac_t, &mut rhs).unwrap();
+        lambda = rhs;
+        
+        // 5. Native Reverse-Mode Enzyme Vector-Jacobian Product (VJP) mapping
+        let mut dp_out = vec![0.0; n_params];
+        let mut dy_out = vec![0.0; n];
+        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr()) };
+        
+        // 6. Accumulate exact continuous parameter sensitivities
+        for p_idx in 0..n_params { p_grad[p_idx] += dp_out[p_idx]; }
     }
+    
     Ok(numpy::ndarray::Array1::from_vec(p_grad).to_pyarray_bound(py))
 }

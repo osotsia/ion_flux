@@ -1,4 +1,4 @@
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 from ion_flux.dsl.core import State, Parameter
 
 class MemoryLayout:
@@ -25,6 +25,16 @@ class MemoryLayout:
             size = 1 # Parameters are strictly scalars in this architecture
             self.param_offsets[p.name] = (self.n_params, size)
             self.n_params += size
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MemoryLayout":
+        """Reconstructs the precise memory topology from a serialized JSON manifest."""
+        obj = cls([], [])
+        obj.state_offsets = data["state_offsets"]
+        obj.param_offsets = data["param_offsets"]
+        obj.n_states = data["n_states"]
+        obj.n_params = data["n_params"]
+        return obj
 
     def get_state_offset(self, name: str) -> int:
         if name not in self.state_offsets:

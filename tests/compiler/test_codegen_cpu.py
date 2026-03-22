@@ -49,7 +49,7 @@ def test_codegen_emits_valid_spatial_loops_and_boundaries():
     # Check spatial loops and dynamic DX injection 
     # Match the exact line emitted by the string builder in codegen.py
     assert "for (int i = 0; i < 5; ++i) {" in cpp
-    assert "res[0 + i] = (ydot[0 + CLAMP(i, 5)]) - (((y[0 + CLAMP((i)+1, 5)]) - (y[0 + CLAMP((i)-1, 5)])) / (2.0 * dx_rod));" in cpp
+    assert "res[0 + i] = (ydot[0 + CLAMP(i, 5)]) - (((y[0 + CLAMP((i) + 1, 5)]) - (y[0 + CLAMP((i) - 1, 5)])) / (2.0 * dx_rod));" in cpp
     
     # Check that the boundary condition overrides were appended at the end
     assert "Boundary Condition Overrides" in cpp

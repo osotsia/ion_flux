@@ -21,7 +21,9 @@ def test_engine_emits_enzyme_cpp(heat_model):
     engine = Engine(model=heat_model, target="cpu")
     cpp = engine.cpp_source
     assert "extern void __enzyme_fwddiff" in cpp
+    assert "extern void __enzyme_autodiff" in cpp
     assert "void evaluate_residual" in cpp
+    assert "void evaluate_vjp" in cpp
 
 def test_stateful_session_execution():
     engine = Engine(model=ExponentialDecay(), target="cpu", mock_execution=True)
@@ -55,9 +57,24 @@ def test_stateless_binary_deployment(tmp_path):
     export_file = tmp_path / "model.so"
     engine.export_binary(str(export_file))
     
+    # Verify JSON meta-manifest generated side-by-side
+    assert os.path.exists(str(export_file) + ".meta.json")
+    
     stateless_engine = Engine.load(str(export_file), target="cpu:serial")
     assert stateless_engine.target == "cpu:serial"
-    assert stateless_engine.mock_execution is True
+    
+    # Validate the engine is fully operational without the original AST
+    assert stateless_engine.mock_execution is False
+    assert stateless_engine.layout.n_states == engine.layout.n_states
+    assert stateless_engine.layout.get_param_offset("k") == 0
+    
+    y = [5.0]
+    ydot = [-10.0]
+    p = stateless_engine._pack_parameters({})
+    res = stateless_engine.runtime.evaluate_residual(y, ydot, p)
+    
+    # ydot - (-k * y) -> -10.0 - (-2.0 * 5.0) = 0.0
+    assert res[0] == pytest.approx(0.0)
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
 def test_end_to_end():
