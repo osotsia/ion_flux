@@ -75,6 +75,28 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
         {textwrap.indent(jacobian_logic, '    ')}
         }}
 
+        // Matrix-Free Exact Jacobian-Vector Product via Enzyme Forward-Mode AD
+        void evaluate_jvp(const double* y, const double* ydot, const double* p, double c_j, const double* v, double* jvp_out) {{
+            int N = {n_states};
+            std::vector<double> dy(N, 0.0);
+            std::vector<double> dydot(N, 0.0);
+            std::vector<double> res_dummy(N, 0.0);
+
+            for (int i = 0; i < N; ++i) {{
+                dy[i] = v[i];
+                dydot[i] = c_j * v[i];
+                jvp_out[i] = 0.0;
+            }}
+
+        #ifdef ENZYME_ACTIVE
+            __enzyme_fwddiff((void*)evaluate_residual, 
+                enzyme_dup, y, dy.data(), 
+                enzyme_dup, ydot, dydot.data(), 
+                enzyme_const, p, 
+                enzyme_dup, res_dummy.data(), jvp_out);
+        #endif
+        }}
+
         void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* lambda_vec, double* dp_out, double* dy_out) {{
             int N = {n_states};
             int N_P = {n_params};

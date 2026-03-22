@@ -105,21 +105,23 @@ class Engine:
         
         self.ast_payload = model.ast() if hasattr(model, "ast") else []
 
-        # Determine Sparse Bandwidth automatically based on topology.
+        # Map -1 to trigger Matrix-Free Krylov Iterative solver natively in Rust
         if jacobian_bandwidth is None:
-            has_spatial = any(s.domain is not None for s in states)
-            has_scalar = any(s.domain is None for s in states)
-            
-            def _has_integral(node: Any) -> bool:
-                if isinstance(node, dict):
-                    if node.get("type") == "UnaryOp" and node.get("op") == "integral": return True
-                    return any(_has_integral(v) for v in node.values())
-                elif isinstance(node, list):
-                    return any(_has_integral(v) for v in node)
-                return False
+            if any(getattr(s.domain, "coord_sys", "") == "unstructured" for s in states):
+                self.jacobian_bandwidth = -1 
+            else:
+                has_spatial = any(s.domain is not None for s in states)
+                has_scalar = any(s.domain is None for s in states)
                 
-            if (has_spatial and has_scalar) or _has_integral(self.ast_payload): self.jacobian_bandwidth = 0
-            else: self.jacobian_bandwidth = 2 if has_spatial else 0
+                def _has_integral(node: Any) -> bool:
+                    if isinstance(node, dict):
+                        if node.get("type") == "UnaryOp" and node.get("op") == "integral": return True
+                        return any(_has_integral(v) for v in node.values())
+                    elif isinstance(node, list): return any(_has_integral(v) for v in node)
+                    return False
+                    
+                if (has_spatial and has_scalar) or _has_integral(self.ast_payload): self.jacobian_bandwidth = 0
+                else: self.jacobian_bandwidth = 2 if has_spatial else 0
         else:
             self.jacobian_bandwidth = jacobian_bandwidth
         

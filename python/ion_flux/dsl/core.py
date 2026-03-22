@@ -191,28 +191,46 @@ class Domain:
             import json
             with open(mesh_data, "r") as f: mesh_data = json.load(f)
                 
-        nodes, elements = np.array(mesh_data["nodes"]), np.array(mesh_data["elements"])
+        nodes = np.array(mesh_data["nodes"], dtype=float)
+        elements = np.array(mesh_data["elements"], dtype=int)
         resolution = len(nodes)
         
         from collections import defaultdict
-        adjacency = defaultdict(float)
+        K_global = defaultdict(float)
+        V_nodes = np.zeros(resolution, dtype=float)
+        
         for el in elements:
-            for i in range(len(el)):
-                for j in range(i+1, len(el)):
-                    n1, n2 = el[i], el[j]
-                    dist = np.linalg.norm(nodes[n1] - nodes[n2])
-                    weight = 1.0 / max(dist, 1e-12)
-                    adjacency[(n1, n2)] += weight
-                    adjacency[(n2, n1)] += weight
-                    
+            if len(el) != 4: continue
+            
+            p = nodes[el]
+            J_mat = np.array([p[1]-p[0], p[2]-p[0], p[3]-p[0]]).T
+            detJ = np.linalg.det(J_mat)
+            vol = abs(detJ) / 6.0
+            if vol < 1e-15: continue
+            
+            invJ = np.linalg.inv(J_mat)
+            gradN = np.zeros((4, 3))
+            gradN[1:4, :] = invJ.T
+            gradN[0, :] = -np.sum(invJ.T, axis=0)
+            
+            K_local = vol * (gradN @ gradN.T)
+            
+            for i in range(4):
+                V_nodes[el[i]] += vol / 4.0
+                for j in range(4):
+                    if i != j:
+                        K_global[(el[i], el[j])] -= K_local[i, j]
+                        
         row_ptr = [0] * (resolution + 1)
         col_ind, weights = [], []
+        
         for i in range(resolution):
             row_ptr[i] = len(col_ind)
+            vol_i = max(V_nodes[i], 1e-15)
             for j in range(resolution):
-                if (i, j) in adjacency:
+                if (i, j) in K_global:
                     col_ind.append(j)
-                    weights.append(adjacency[(i, j)])
+                    weights.append(K_global[(i, j)] / vol_i)
         row_ptr[resolution] = len(col_ind)
         
         surface_masks = {}

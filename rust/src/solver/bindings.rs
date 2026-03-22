@@ -12,7 +12,7 @@ pub fn solve_ida_native<'py>(
     id_py: Vec<f64>,
     p_list: Vec<f64>,
     t_eval: Vec<f64>,
-    bandwidth: usize,
+    bandwidth: isize, // Supports -1 for Matrix-Free Krylov JFNK Iterative Solver
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py, ydot0_py, id_py, p_list)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
@@ -35,7 +35,7 @@ pub fn solve_batch_native<'py>(
     id: Vec<f64>,
     p_batch: Vec<Vec<f64>>,
     t_eval: Vec<f64>,
-    bandwidth: usize,
+    bandwidth: isize,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
         let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone())

@@ -46,10 +46,10 @@ def test_unstructured_3d_fem_mesh_codegen(mesh_3d_tetrahedron):
     assert " > 0.5 ?" in cpp
 
 
-def test_unstructured_execution_mock(mesh_3d_tetrahedron):
+def test_unstructured_execution_matrix_free_jfnk(mesh_3d_tetrahedron):
     """
-    Simulates a full initialization of an execution block utilizing unstructured grid layouts.
-    Bypasses true execution assuming compiler dependencies might be stripped on runner.
+    Tests full native execution utilizing the newly implemented Rust Matrix-Free GMRES 
+    Krylov subspace solver to evaluate J*v products directly.
     """
     class UnstructuredModel(fx.PDE):
         mesh = fx.Domain.from_mesh(mesh_3d_tetrahedron, name="mesh3d", surfaces={"top": [2, 3]})
@@ -59,16 +59,22 @@ def test_unstructured_execution_mock(mesh_3d_tetrahedron):
         def math(self):
             return {
                 fx.dt(self.c): fx.div(self.D * fx.grad(self.c)),
-                self.c.boundary("top"): 100.0, # Target specific surfaces
+                self.c.boundary("top"): 100.0,
                 self.c.t0: 100.0
             }
 
-    engine = Engine(model=UnstructuredModel(), target="cpu", mock_execution=True)
-    res = engine.solve()
+    # Set cache=False to force LLVM to re-emit the analytical evaluate_jvp function newly added to templates.
+    engine = Engine(model=UnstructuredModel(), target="cpu", mock_execution=False, cache=False)
+    
+    if getattr(engine, "mock_execution", False):
+        pytest.skip("Native compiler toolchain not present on this host.")
+
+    # Validation that the orchestrator automatically mapped the model correctly to GMRES
+    assert engine.jacobian_bandwidth == -1
+
+    res = engine.solve(t_span=(0, 1.0))
 
     assert res.status == "completed"
-    
-    # Ensure Memory Layout and mock routing handled multi-dimensional structures successfully 
-    # instead of strictly flat variables, preventing the KeyError
     assert "c" in res._data
+    # Confirms the 4-node tetrahedron mesh mapped dynamically back out correctly to Numpy
     assert res["c"].data.shape[1] == 4
