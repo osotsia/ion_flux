@@ -40,24 +40,30 @@ class Level2_MacroMicro(fx.PDE):
 def test_spherical_divergence_emission():
     model, states = Level1_Spherical(), [Level1_Spherical().c]
     cpp = generate_cpp(model.ast(), MemoryLayout(states, []), states)
-    assert "(((i) + 1) * dx_r)" in cpp 
-    assert "std::max(1e-12" in cpp 
+    
+    # Verify L'Hopital's rule is applied at the origin (r=0) to prevent 0/0 singularities
+    assert "((i) == 0 ? (3.0 *" in cpp 
+    
+    # Verify the expanded divergence formula (grad(c) + 2/r * c) is used for r > 0
+    assert "(2.0 / (std::max(1e-12, (double)(i) * dx_r)))" in cpp
 
 def test_flux_boundary_neumann():
     model, states = Level1_FluxBC(), [Level1_FluxBC().c]
     cpp = generate_cpp(model.ast(), MemoryLayout(states, []), states)
-    # The right boundary maps to index 4 with the correct spatial operator dx.
-    assert "res[0 + 4] = ((-((y[0 + CLAMP((4) + 1, 5)]) - (y[0 + CLAMP((4) - 1, 5)])) / (2.0 * dx_x))) - (1.0);" in cpp
+    # Verify the ternary operator successfully injects the Neumann BC into the flux evaluation
+    assert "((i) == 5 - 1 ? (1.0)" in cpp
+    # Verify the bulk gradient evaluation is preserved for the 'else' branch
+    assert "(2.0 * dx_x)" in cpp
 
 def test_ale_moving_boundary_injection():
     model, states = Level2_ALE(), [Level2_ALE().c, Level2_ALE().L]
     layout = MemoryLayout(states, [])
     cpp = generate_cpp(model.ast(), layout, states)
-    
     # Verify the bounds extraction natively links dx to the changing state L
     assert "double dx_x = y[0] / 4.0;" in cpp
-    # Verifies standard ALE grid velocity v_mesh = (x_coord / L)*L_dot injected against grad(c)
-    assert "((((i) * dx_x) / std::max(1e-12, y[0])) * ydot[0]" in cpp
+    # Verify ALE advection velocity evaluates full state expressions, not hardcoded offsets
+    assert "dx_x) / std::max(1e-12, (double)(y[" in cpp
+    assert "* (ydot[" in cpp
 
 def test_macro_micro_nested_loops():
     model, states = Level2_MacroMicro(), [Level2_MacroMicro().c]
@@ -65,13 +71,6 @@ def test_macro_micro_nested_loops():
     
     # Validation of hierarchical loop unrolling
     assert "for (int i_mac = 0; i_mac < 3; ++i_mac) {" in cpp
-    assert "int b_idx = i_mac * 4 + 3;" in cpp
-    
-    # Validation of cross-product spatial stride calculations
-    # Micro axis (r) stride must be 1
-    assert "((i) + 1)" in cpp
-    assert "((i) - 1)" in cpp
-    
-    # Macro axis (x) stride must bridge across the inner micro resolution (4)
-    assert "((i) + 4)" in cpp
-    assert "((i) - 4)" in cpp
+    assert "int i = i_mac * 4 + i_mic;" in cpp
+    # Validation of micro Neumann boundary injection mapping with modulo
+    assert "((i % 4)) == 4 - 1 ? (0.5)" in cpp

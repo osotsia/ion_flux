@@ -209,11 +209,21 @@ class Engine:
         
         for eq in self.ast_payload:
             lhs = eq["lhs"]
-            if lhs.get("type") == "Boundary":
+            # BUG 3 SYNC: Only set id_arr to 0.0 for true Dirichlet state overrides.
+            # Neumann flux boundaries injected into the PDE natively retain id_arr = 1.0
+            if lhs.get("type") == "Boundary" and lhs["child"].get("type") == "State":
                 state_name = extract_state_name(lhs, self.layout)
                 offset, size = self.layout.state_offsets[state_name]
-                if lhs["side"] == "left": id_arr[offset] = 0.0
-                elif lhs["side"] == "right": id_arr[offset + size - 1] = 0.0
+                state_obj = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
+                
+                if state_obj and hasattr(state_obj.domain, "domains") and len(state_obj.domain.domains) == 2 and lhs.get("domain") == state_obj.domain.domains[1].name:
+                    d_mac, d_mic = state_obj.domain.domains[0], state_obj.domain.domains[1]
+                    for i_mac in range(d_mac.resolution):
+                        b_idx = i_mac * d_mic.resolution if lhs["side"] == "left" else i_mac * d_mic.resolution + d_mic.resolution - 1
+                        id_arr[offset + b_idx] = 0.0
+                else:
+                    if lhs["side"] == "left": id_arr[offset] = 0.0
+                    elif lhs["side"] == "right": id_arr[offset + size - 1] = 0.0
                 
         def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
             t = node.get("type")
