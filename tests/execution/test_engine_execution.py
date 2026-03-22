@@ -36,7 +36,7 @@ def test_engine_emits_enzyme_cpp(heat_model):
 
 def test_spatial_initial_condition_evaluation():
     engine = Engine(model=SpatiallyVaryingHeatIC(), target="cpu", mock_execution=True)
-    y0, _, _ = engine._extract_metadata()
+    y0, _, _, _ = engine._extract_metadata()
     # Coordinates for boundaries (0, 2) over 5 points -> dx = 2.0 / 4 = 0.5
     # T0 = 2 * coords -> [0.0, 1.0, 2.0, 3.0, 4.0]
     expected = [0.0, 1.0, 2.0, 3.0, 4.0]
@@ -53,7 +53,7 @@ def test_stateful_session_execution():
     
     session.reach_steady_state()
     eis = session.solve_eis(frequencies=np.array([10.0]), input_var="i_app", output_var="Voltage")
-    assert len(eis) == 1
+    assert len(eis["Z_real"].data) == 1
 
 def test_differentiable_graph_metrics():
     engine = Engine(model=ExponentialDecay(), target="cpu", mock_execution=True)

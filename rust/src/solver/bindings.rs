@@ -13,8 +13,9 @@ pub fn solve_ida_native<'py>(
     p_list: Vec<f64>,
     t_eval: Vec<f64>,
     bandwidth: isize, // Supports -1 for Matrix-Free Krylov JFNK Iterative Solver
+    spatial_diag: Vec<f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py, ydot0_py, id_py, p_list)?;
+    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py, ydot0_py, id_py, p_list, spatial_diag)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     
     for i in 0..handle.n { out_traj[i] = handle.y[i]; }
@@ -36,9 +37,10 @@ pub fn solve_batch_native<'py>(
     p_batch: Vec<Vec<f64>>,
     t_eval: Vec<f64>,
     bandwidth: isize,
+    spatial_diag: Vec<f64>,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
-        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone())
+        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone())
             .map_err(|e| e.to_string())?;
             
         let mut out_traj = vec![0.0; t_eval.len() * handle.n];

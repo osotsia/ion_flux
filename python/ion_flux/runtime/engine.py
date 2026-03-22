@@ -24,11 +24,12 @@ except ImportError as e:
 
 class Variable:
     """Wrapper mapping flat FFI arrays back into intuitive multidimensional structures."""
-    __slots__ = ["data", "result"]
-    def __init__(self, data: np.ndarray, result: Optional[Any] = None): 
+    __slots__ = ["data", "result", "name"]
+    def __init__(self, data: np.ndarray, result: Optional[Any] = None, name: str = ""): 
         self.data = data
         self.result = result
-    def __repr__(self) -> str: return f"<Variable: shape={self.data.shape}>"
+        self.name = name
+    def __repr__(self) -> str: return f"<Variable: {self.name} shape={self.data.shape}>"
 
 
 class SimulationResult:
@@ -42,7 +43,7 @@ class SimulationResult:
 
     def __getitem__(self, key: str) -> Variable:
         if key not in self._data: raise KeyError(f"Variable '{key}' not found.")
-        return Variable(self._data[key], result=self)
+        return Variable(self._data[key], result=self, name=key)
         
     def to_dict(self, variables: Optional[List[str]] = None) -> Dict[str, Any]:
         keys = variables or self._data.keys()
@@ -64,22 +65,31 @@ class TelemetryReport:
     def __init__(self, n_states: int, bandwidth: int):
         self.model_len = n_states
         
+        # Correct L1 hit-rate mapping reflecting actual hardware footprints
         if n_states <= 1:
             self.avg_jump_distance = 0.0
             self.l1_cache_hit_estimate = 1.0
             self.sparsity = 0.0
         else:
-            self.avg_jump_distance = float(bandwidth) if bandwidth > 0 else float(n_states)
             total_elements = n_states ** 2
-            active_elements = min(total_elements, n_states * (2 * bandwidth + 1)) if bandwidth > 0 else total_elements
+            if bandwidth == 0:
+                self.avg_jump_distance = float(n_states)
+                active_elements = total_elements
+            elif bandwidth == -1:
+                self.avg_jump_distance = 5.0  # Common average for 3D unstructured nodes
+                active_elements = n_states * 5
+            else:
+                self.avg_jump_distance = float(bandwidth)
+                active_elements = min(total_elements, n_states * (2 * bandwidth + 1))
+                
             self.sparsity = 1.0 - (active_elements / total_elements)
+            working_set_bytes = active_elements * 8
             
-            # Realistic L1 Cache Heuristic (Assuming 32KB = ~4096 double-precision floats)
-            if total_elements <= 4096:
+            if working_set_bytes <= 32768: # Standard 32KB L1 Data Cache
                 self.l1_cache_hit_estimate = 0.99
             else:
-                cache_line_doubles = 8.0
-                penalty = min(self.avg_jump_distance / cache_line_doubles, 1.0)
+                cache_lines = working_set_bytes / 64.0
+                penalty = min((self.avg_jump_distance * n_states) / cache_lines, 1.0)
                 self.l1_cache_hit_estimate = max(0.01, 1.0 - penalty)
 
     def __repr__(self) -> str:
@@ -159,7 +169,8 @@ class Engine:
         engine._metadata_cache = (
             meta["metadata_cache"]["y0"],
             meta["metadata_cache"]["ydot0"],
-            meta["metadata_cache"]["id_arr"]
+            meta["metadata_cache"]["id_arr"],
+            meta["metadata_cache"].get("spatial_diag", [0.0] * engine.layout.n_states)
         )
         engine.runtime = NativeRuntime(binary_path, engine.layout.n_states)
         return engine
@@ -168,7 +179,7 @@ class Engine:
         if not getattr(self, "runtime", None) or not hasattr(self.runtime, "lib_path"):
             raise RuntimeError("Engine has not compiled a native binary. Cannot export.")
             
-        y0, ydot0, id_arr = self._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
         meta = {
             "layout": {
                 "state_offsets": self.layout.state_offsets,
@@ -181,7 +192,7 @@ class Engine:
             },
             "parameters": {name: p.value for name, p in self.parameters.items()},
             "jacobian_bandwidth": getattr(self, "jacobian_bandwidth", 0),
-            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr}
+            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr, "spatial_diag": spatial_diag}
         }
         with open(export_path + ".meta.json", "w") as f:
             json.dump(meta, f)
@@ -197,14 +208,31 @@ class Engine:
         """Initializes a stateful memory session for HIL/SIL control loops."""
         return Session(engine=self, parameters=parameters or {}, soc=soc)
 
-    def _extract_metadata(self) -> Tuple[List[float], List[float], List[float]]:
+    def _extract_metadata(self) -> Tuple[List[float], List[float], List[float], List[float]]:
         if hasattr(self, "_metadata_cache"):
             return self._metadata_cache
             
         y0 = [0.0] * self.layout.n_states
         ydot0 = [0.0] * self.layout.n_states
         id_arr = [0.0] * self.layout.n_states
+        spatial_diag = [0.0] * self.layout.n_states
         
+        # Extract the discrete spatial stiffness term directly from the topology to feed the GMRES Preconditioner
+        for state_name, (offset, size) in self.layout.state_offsets.items():
+            state_obj = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
+            if state_obj and getattr(state_obj, "domain", None):
+                if getattr(state_obj.domain, "csr_data", None):
+                    csr = state_obj.domain.csr_data
+                    rp, w = csr["row_ptr"], csr["weights"]
+                    for i in range(size):
+                        spatial_diag[offset + i] = abs(sum(w[int(rp[i]):int(rp[i+1])]))
+                else:
+                    ds = state_obj.domain.domains if hasattr(state_obj.domain, "domains") else [state_obj.domain]
+                    dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
+                    val = 2.0 / max(dx ** 2, 1e-12)
+                    for i in range(size):
+                        spatial_diag[offset + i] = val
+
         def _mark_differentials(node: Any) -> None:
             if isinstance(node, dict):
                 if node.get("type") == "UnaryOp" and node.get("op") == "dt":
@@ -219,8 +247,6 @@ class Engine:
         
         for eq in self.ast_payload:
             lhs = eq["lhs"]
-            # BUG 3 SYNC: Only set id_arr to 0.0 for true Dirichlet state overrides.
-            # Neumann flux boundaries injected into the PDE natively retain id_arr = 1.0
             if lhs.get("type") == "Boundary" and lhs["child"].get("type") == "State":
                 state_name = extract_state_name(lhs, self.layout)
                 offset, size = self.layout.state_offsets[state_name]
@@ -269,7 +295,7 @@ class Engine:
                 for i in range(size):
                     y0[offset + i] = _eval_ic(eq["rhs"], i, dx)
                     
-        return y0, ydot0, id_arr
+        return y0, ydot0, id_arr, spatial_diag
 
     def _pack_parameters(self, overrides: Dict[str, float]) -> List[float]:
         p_list = [0.0] * self.layout.p_length
@@ -306,6 +332,7 @@ class Engine:
             data_hist = {"Time [s]": []}
             for k in self.layout.state_offsets.keys(): data_hist[k] = []
             raw_y_hist = []
+            raw_p_hist = []
 
             for step in protocol.steps:
                 target_condition = getattr(step, "until", None)
@@ -319,7 +346,8 @@ class Engine:
                     if "mode" in self.parameters: inputs["mode"] = 0.0
                     if "v_target" in self.parameters: inputs["v_target"] = step.voltage
                 
-                dt_step = 1.0 
+                # If gradients requested, limit macro integration step sizes to capture high-res history for Adjoint solver
+                dt_step = 0.5 if requires_grad else 1.0 
                 t_max = getattr(step, "time", float('inf'))
                 t_elapsed = 0.0
                 
@@ -346,6 +374,8 @@ class Engine:
                         data_hist["Time [s]"].append(session.time)
                         y = session.handle.get_state() if session.handle else session._mock_y
                         raw_y_hist.append(y)
+                        if requires_grad: raw_p_hist.append(self._pack_parameters(session.parameters))
+                        
                         for k, (offset, size) in self.layout.state_offsets.items():
                             data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
                         break
@@ -354,6 +384,8 @@ class Engine:
                     data_hist["Time [s]"].append(session.time)
                     y = session.handle.get_state() if session.handle else session._mock_y
                     raw_y_hist.append(y)
+                    if requires_grad: raw_p_hist.append(self._pack_parameters(session.parameters))
+                    
                     for k, (offset, size) in self.layout.state_offsets.items():
                         data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
 
@@ -361,17 +393,27 @@ class Engine:
             
             trajectory = None
             if requires_grad:
-                trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), "requires_grad": requires_grad}
+                trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), "_p_traj": raw_p_hist, "requires_grad": requires_grad}
             
             return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
             
         if not RUST_FFI_AVAILABLE: raise RuntimeError(f"Native solver missing. FFI Error: {FFI_IMPORT_ERROR}")
             
-        y0, ydot0, id_arr = self._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
         p_list = self._pack_parameters(parameters or {})
         
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
-        y_res = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth)
+        
+        # Interpolate execution mesh for smooth gradients
+        if requires_grad:
+            dt_max = 0.5
+            fine_t = [t_eval_arr[0]]
+            for t_next in t_eval_arr[1:]:
+                while fine_t[-1] + dt_max < t_next: fine_t.append(fine_t[-1] + dt_max)
+                fine_t.append(t_next)
+            t_eval_arr = np.array(fine_t)
+            
+        y_res = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag)
         
         data = {"Time [s]": t_eval_arr}
         for state_name, (offset, size) in self.layout.state_offsets.items():
@@ -380,19 +422,24 @@ class Engine:
             
         trajectory = None
         if requires_grad: 
-            trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res, "requires_grad": requires_grad}
+            trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res, "_p_traj": [p_list]*len(t_eval_arr), "requires_grad": requires_grad}
         return SimulationResult(data, parameters or {}, status="completed", engine=self, trajectory=trajectory)
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 
                     protocol: Any = None, max_workers: int = 1) -> List[SimulationResult]:
+        
+        # Eliminate thread oversubscription by muting OpenMP during Rayon task parallelism
+        if max_workers > 1 and "omp" in self.target:
+            os.environ["OMP_NUM_THREADS"] = "1"
+            
         if self.mock_execution or not RUST_FFI_AVAILABLE:
             return [self.solve(t_span=t_span, protocol=protocol, parameters=p) for p in parameters]
 
-        y0, ydot0, id_arr = self._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
         
-        y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth)
+        y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag)
         
         results = []
         for p, y_res in zip(parameters, y_res_batch):

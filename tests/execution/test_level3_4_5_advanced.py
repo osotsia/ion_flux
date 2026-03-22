@@ -101,7 +101,10 @@ def test_native_eis_frequency_domain_solver():
     assert session.get("V") == pytest.approx(10.0)
     
     w_arr = np.array([0.01, 1.0, 100.0]) * 2 * np.pi
-    Z_sim = session.solve_eis(np.array([0.01, 1.0, 100.0]), input_var="i_app", output_var="V")
+    Z_res = session.solve_eis(np.array([0.01, 1.0, 100.0]), input_var="i_app", output_var="V")
+    
+    # Reconstruct the complex array from the Differentiable SimulationResult output
+    Z_sim = Z_res["Z_real"].data + 1j * Z_res["Z_imag"].data
     
     # Analytical Z(w) = R / (1 + j w R C)
     Z_analytical = 10.0 / (1 + 1j * w_arr * 1.0)

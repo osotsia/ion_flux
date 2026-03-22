@@ -10,13 +10,13 @@ pub fn discrete_adjoint_native<'py>(
     y_traj: Vec<Vec<f64>>,
     t_eval: Vec<f64>,
     id_arr: Vec<f64>,
-    p_list: Vec<f64>,
+    p_traj: Vec<Vec<f64>>, 
     dl_dy: Vec<Vec<f64>>,
-    bandwidth: isize, // Upgraded to isize to allow -1 (Matrix-Free Adjoint)
+    bandwidth: isize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let n_steps = y_traj.len();
     let n = y_traj[0].len();
-    let n_params = p_list.len();
+    let n_params = p_traj[0].len();
     let mut p_grad = vec![0.0; n_params];
 
     let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT library") };
@@ -30,6 +30,7 @@ pub fn discrete_adjoint_native<'py>(
         let dt = t_eval[step] - t_eval[step - 1];
         let c_j = 1.0 / dt;
         let y = &y_traj[step];
+        let p_list = &p_traj[step];
         
         let mut ydot = vec![0.0; n];
         for i in 0..n {
@@ -39,14 +40,14 @@ pub fn discrete_adjoint_native<'py>(
         let mut rhs = vec![0.0; n];
         for i in 0..n { rhs[i] = -dl_dy[step][i] + lambda[i] * id_arr[i] * c_j; }
         
-        // BUG 5 FINALLY FIXED: Matrix-Free Adjoint Solve bypassing O(N^2) memory entirely
+        // Matrix-Free Adjoint Solve bypassing O(N^2) memory entirely
         if bandwidth == -1 {
             let y_ptr = y.as_ptr();
             let ydot_ptr = ydot.as_ptr();
             let p_ptr = p_list.as_ptr();
             
             // J^T v = (dF/dy)^T v + c_j * (dF/dydot)^T v 
-            let jvp_T = |v: &[f64], out: &mut [f64]| {
+            let jvp_t = |v: &[f64], out: &mut [f64]| {
                 let mut dp_dummy = vec![0.0; n_params];
                 let mut dy_out = vec![0.0; n];
                 let mut dydot_out = vec![0.0; n];
@@ -58,7 +59,7 @@ pub fn discrete_adjoint_native<'py>(
                 for i in 0..n { out[i] = v[i] / (c_j * id_arr[i] + 1.0); }
             };
             
-            solve_gmres(n, &mut rhs, jvp_T, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            solve_gmres(n, &mut rhs, jvp_t, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             
         } else {
             let mut jac = vec![0.0; n * n];

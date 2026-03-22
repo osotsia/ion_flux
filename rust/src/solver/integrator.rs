@@ -20,6 +20,7 @@ impl BdfIntegrator {
         ydot: &mut [f64],
         p: &[f64],
         id: &[f64],
+        spatial_diag: &[f64],
         target_dt: f64,
         res_fn: NativeResFn,
         jac_fn: NativeJacFn,
@@ -89,9 +90,9 @@ impl BdfIntegrator {
                         unsafe { jvp(y_ptr, ydot_ptr, p_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
                     };
                     
-                    // Lumped Mass Matrix Preconditioner stabilizes highly stiff GMRES convergences automatically.
+                    // Perfect O(1) algebraic stabilization capturing spatial mesh stiffness without expensive explicit Jacobians.
                     let precond = |v: &[f64], out: &mut [f64]| {
-                        for i in 0..n { out[i] = v[i] / (c_j * id[i] + 1.0); }
+                        for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
                     };
                     
                     solve_gmres(n, &mut dy, jvp_closure, precond)?;
@@ -147,6 +148,7 @@ mod tests {
         let mut ydot = vec![0.0];
         let id = vec![1.0];
         let p = vec![];
+        let spatial_diag = vec![0.0];
 
         let mut y_prev = vec![1.0];
         let mut y_prev2 = vec![1.0];
@@ -154,7 +156,7 @@ mod tests {
         let mut order = 1;
 
         for _ in 0..10 {
-            integrator.step(1, 0, &mut y, &mut ydot, &p, &id, 0.1, mock_res, mock_jac, None, 
+            integrator.step(1, 0, &mut y, &mut ydot, &p, &id, &spatial_diag, 0.1, mock_res, mock_jac, None, 
                 &mut y_prev, &mut y_prev2, &mut dt_prev, &mut order).unwrap();
         }
         

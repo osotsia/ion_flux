@@ -19,21 +19,20 @@ class Session:
         self.time = 0.0
         self._history = {"Time [s]": [0.0]}
         
-        y0, ydot0, id_arr = engine._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag = engine._extract_metadata()
         p_list = engine._pack_parameters(self.parameters)
         self.id_arr = np.array(id_arr)
         
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
             self.handle = SolverHandle(
                 engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                y0, ydot0, id_arr, p_list
+                y0, ydot0, id_arr, p_list, spatial_diag
             )
         else:
             self.handle = None
             self._mock_y = np.array(y0)
 
     def set_parameter(self, param_name: str, value: float) -> None:
-        # BUG 15 FIX: Session overrides its own local dict, NOT the global Engine parameters
         self.parameters[param_name] = value 
         if self.handle:
             offset = self.engine.layout.get_param_offset(param_name)
@@ -88,47 +87,53 @@ class Session:
         return condition.evaluate(self)
 
     def reach_steady_state(self) -> None:
-        # Level 10: Explicit Newton Root-Finding ensures proper evaluation zero-point for EIS analysis
         if self.handle: 
             self.handle.reach_steady_state()
             self.time += 1000.0
         else:
             self.time += 1000.0
 
-    def solve_eis(self, frequencies: np.ndarray, input_var: str, output_var: str) -> np.ndarray:
+    def solve_eis(self, frequencies: np.ndarray, input_var: str, output_var: str) -> Any:
         """Extracts the analytical Jacobian directly from Enzyme and algebraically solves the transfer function."""
-        if not self.handle:
-            w = np.asarray(frequencies) * 2 * np.pi
-            return 0.05 + (0.1 / (1 + 1j * w * 0.1)) + (0.01 / np.sqrt(1j * w))
-            
-        N = self.engine.layout.n_states
-        J_steady = self.handle.get_jacobian(0.0)
-        
-        p_val = self.parameters.get(input_var, 0.0)
-        eps = 1e-6
-        y = self.handle.get_state()
-        ydot = np.zeros_like(y)
-        
-        res_base = np.array(self.engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters=self.parameters))
-        p_pert = self.parameters.copy()
-        p_pert[input_var] = p_val + eps
-        res_pert = np.array(self.engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters=p_pert))
-        B = -(res_pert - res_base) / eps
-        
-        out_offset = self.engine.layout.get_state_offset(output_var)
-        C = np.zeros(N)
-        C[out_offset] = 1.0 
+        from ion_flux.runtime.engine import SimulationResult
         
         w_arr = np.asarray(frequencies) * 2 * np.pi
-        Z = np.zeros_like(w_arr, dtype=np.complex128)
-        M = np.diag(self.id_arr)
         
-        for i, w in enumerate(w_arr):
-            A = 1j * w * M + J_steady
-            try:
-                X = scipy.linalg.solve(A, B)
-                Z[i] = np.dot(C, X)
-            except scipy.linalg.LinAlgError:
-                Z[i] = np.nan
-                
-        return Z
+        if not self.handle:
+            Z = 0.05 + (0.1 / (1 + 1j * w_arr * 0.1)) + (0.01 / np.sqrt(1j * w_arr))
+        else:
+            N = self.engine.layout.n_states
+            J_steady = self.handle.get_jacobian(0.0)
+            
+            p_val = self.parameters.get(input_var, 0.0)
+            eps = 1e-6
+            y = self.handle.get_state()
+            ydot = np.zeros_like(y)
+            
+            res_base = np.array(self.engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters=self.parameters))
+            p_pert = self.parameters.copy()
+            p_pert[input_var] = p_val + eps
+            res_pert = np.array(self.engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters=p_pert))
+            B = -(res_pert - res_base) / eps
+            
+            out_offset = self.engine.layout.get_state_offset(output_var)
+            C = np.zeros(N)
+            C[out_offset] = 1.0 
+            
+            Z = np.zeros_like(w_arr, dtype=np.complex128)
+            M = np.diag(self.id_arr)
+            
+            for i, w in enumerate(w_arr):
+                A = 1j * w * M + J_steady
+                try:
+                    X = scipy.linalg.solve(A, B)
+                    Z[i] = np.dot(C, X)
+                except scipy.linalg.LinAlgError:
+                    Z[i] = np.nan
+                    
+        data = {"Z_real": Z.real, "Z_imag": Z.imag, "Frequencies": frequencies}
+        trajectory = {
+            "type": "eis", "w_arr": w_arr, 
+            "input_var": input_var, "output_var": output_var
+        }
+        return SimulationResult(data, self.parameters, engine=self.engine, trajectory=trajectory)

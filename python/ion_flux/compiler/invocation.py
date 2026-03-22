@@ -149,7 +149,8 @@ class NativeCompiler:
             if sys.platform == "darwin":
                 cmd.extend(["-lomp", "-Wl,-rpath,/opt/homebrew/lib", "-Wl,-rpath,/usr/local/lib"])
             elif sys.platform == "linux":
-                cmd.append("-lgomp")
+                # Statically link OpenMP to guarantee zero-dependency Serverless/AWS Lambda execution
+                cmd.extend(["-static-libgcc", "-static-libstdc++", "-Wl,-Bstatic", "-lgomp", "-Wl,-Bdynamic"])
         
         if self.enzyme_plugin:
             cmd.insert(1, f"-fplugin={self.enzyme_plugin}")

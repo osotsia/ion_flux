@@ -30,6 +30,32 @@ class Loss:
         req_grad = self._trajectory.get("requires_grad", list(self._engine.parameters.keys()))
         self.grads = {}
         
+        # Native Differentiable EIS (Frequency Domain)
+        if self._trajectory.get("type") == "eis":
+            w_arr = self._trajectory["w_arr"]
+            input_var = self._trajectory["input_var"]
+            output_var = self._trajectory["output_var"]
+            eis_target_key = self._trajectory.get("_eis_target_key", "Z_real")
+            eps = 1e-5
+            
+            for p_name in req_grad:
+                if p_name in self._engine.parameters:
+                    p_fwd = self._parameters.copy()
+                    p_fwd[p_name] += eps
+                    s_fwd = self._engine.start_session(parameters=p_fwd)
+                    s_fwd.reach_steady_state()
+                    Z_fwd = s_fwd.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
+                    
+                    p_bwd = self._parameters.copy()
+                    p_bwd[p_name] -= eps
+                    s_bwd = self._engine.start_session(parameters=p_bwd)
+                    s_bwd.reach_steady_state()
+                    Z_bwd = s_bwd.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
+                    
+                    dZ_dp = (Z_fwd[eis_target_key] - Z_bwd[eis_target_key]) / (2 * eps)
+                    self.grads[p_name] = float(np.sum(self._dl_dy_mapped * dZ_dp))
+            return self.grads
+
         if not RUST_FFI_AVAILABLE or getattr(self._engine, "mock_execution", False):
             for p_name in req_grad:
                 if p_name in self._engine.parameters:
@@ -39,17 +65,19 @@ class Loss:
         t_eval = self._trajectory["Time [s]"]
         y_traj = self._trajectory["_y_raw"]
         
+        # Extract the dynamic parameter trajectory to perfectly sync Sequence protocol mutations
+        p_list_default = self._engine._pack_parameters(self._parameters)
+        p_traj = self._trajectory.get("_p_traj", [p_list_default] * len(y_traj))
+        
         dl_dy = self._dl_dy_mapped if self._dl_dy_mapped is not None else np.zeros_like(y_traj)
         
-        y0, ydot0, id_arr = self._engine._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag = self._engine._extract_metadata()
         
         # Pack parameters strictly using the thread-local state captured during the forward solve
-        p_list = self._engine._pack_parameters(self._parameters)
-        
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
         p_grad = discrete_adjoint_native(
             self._engine.runtime.lib_path,
-            y_traj.tolist(), t_eval.tolist(), id_arr, p_list, dl_dy.tolist(), bw
+            y_traj.tolist(), t_eval.tolist(), id_arr, p_traj, dl_dy.tolist(), bw
         )
         
         for p_name in req_grad:
@@ -78,6 +106,7 @@ def rmse(predicted: Union[np.ndarray, Any], target: np.ndarray, engine: Optional
         engine = engine or predicted.result.engine
         trajectory = predicted.result.trajectory
         parameters = predicted.result.parameters
+        state_name = getattr(predicted, "name", state_name)
     else:
         trajectory = getattr(engine, "_current_trajectory", None) if engine else None
         parameters = {k: v.value for k, v in engine.parameters.items()} if engine else {}
@@ -93,18 +122,21 @@ def rmse(predicted: Union[np.ndarray, Any], target: np.ndarray, engine: Optional
     
     dl_dy_mapped = None
     if engine and trajectory:
-        y_traj = trajectory["_y_raw"]
-        dl_dy_mapped = np.zeros_like(y_traj)
-        
-        if state_name in engine.layout.state_offsets:
-            offset, size = engine.layout.state_offsets[state_name]
-            grad_multiplier = 1.0 / (len(diff) * max(val, 1e-12))
+        if trajectory.get("type") == "eis":
+            dl_dy_mapped = diff / (len(diff) * max(val, 1e-12))
+            trajectory["_eis_target_key"] = state_name
+        else:
+            y_traj = trajectory["_y_raw"]
+            dl_dy_mapped = np.zeros_like(y_traj)
             
-            for i in range(size):
-                if size == 1:
-                    dl_dy_mapped[:, offset + i] = (grad_multiplier * diff)
-                else:
-                    # FIX: Correctly index the specific spatial column of the multi-dimensional diff array
-                    dl_dy_mapped[:, offset + i] = (grad_multiplier * diff[:, i]) / size
+            if state_name in engine.layout.state_offsets:
+                offset, size = engine.layout.state_offsets[state_name]
+                grad_multiplier = 1.0 / (len(diff) * max(val, 1e-12))
+                
+                for i in range(size):
+                    if size == 1:
+                        dl_dy_mapped[:, offset + i] = (grad_multiplier * diff)
+                    else:
+                        dl_dy_mapped[:, offset + i] = (grad_multiplier * diff[:, i]) / size
             
     return Loss(val, engine=engine, trajectory=trajectory, dl_dy_mapped=dl_dy_mapped, parameters=parameters)

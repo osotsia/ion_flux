@@ -17,6 +17,7 @@ pub struct SolverHandle {
     pub ydot: Vec<f64>,
     pub id: Vec<f64>,
     pub p: Vec<f64>,
+    pub spatial_diag: Vec<f64>,
     pub y_prev: Vec<f64>,
     pub y_prev2: Vec<f64>,
     pub dt_prev: f64,
@@ -26,7 +27,7 @@ pub struct SolverHandle {
 #[pymethods]
 impl SolverHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p: Vec<f64>) -> PyResult<Self> {
+    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p: Vec<f64>, spatial_diag: Vec<f64>) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
         let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
@@ -41,7 +42,7 @@ impl SolverHandle {
 
         let mut handle = SolverHandle { 
             _lib: lib, res_fn, jac_fn, jvp_fn, n, bw, 
-            t: 0.0, y: y0, ydot: ydot0, id, p,
+            t: 0.0, y: y0, ydot: ydot0, id, p, spatial_diag,
             y_prev, y_prev2, dt_prev: 0.0, order: 1,
         };
         handle.initialize_ic()?;
@@ -59,7 +60,7 @@ impl SolverHandle {
     pub fn step(&mut self, dt: f64) -> PyResult<()> {
         let integrator = BdfIntegrator::default();
         integrator.step(
-            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, dt, 
+            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, &self.spatial_diag, dt, 
             self.res_fn, self.jac_fn, self.jvp_fn,
             &mut self.y_prev, &mut self.y_prev2, &mut self.dt_prev, &mut self.order
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
@@ -94,7 +95,7 @@ impl SolverHandle {
                     unsafe { jvp(y_ptr, ydot_ptr, p_ptr, 0.0, v.as_ptr(), out.as_mut_ptr()) };
                 };
                 let precond = |v: &[f64], out: &mut [f64]| {
-                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + 1.0); }
+                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + self.spatial_diag[i] + 1.0); }
                 };
                 solve_gmres(self.n, &mut dy, jvp_closure, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             } else {
@@ -156,7 +157,7 @@ impl SolverHandle {
                 };
                 
                 let precond = |v: &[f64], out: &mut [f64]| {
-                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + 1.0); }
+                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + self.spatial_diag[i] + 1.0); }
                 };
                 
                 solve_gmres(self.n, &mut rhs, jvp_closure, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
