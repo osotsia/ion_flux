@@ -55,6 +55,21 @@ class Session:
         self.time += dt
         self._history["Time [s]"].append(self.time)
 
+    def checkpoint(self) -> None:
+        if self.handle:
+            self._ckpt = self.handle.clone_state()
+        else:
+            self._ckpt = (self.time, self._mock_y.copy())
+            
+    def restore(self) -> None:
+        if not hasattr(self, "_ckpt"): return
+        if self.handle:
+            self.handle.restore_state(*self._ckpt)
+            self.time = self._ckpt[0]
+        else:
+            self.time = self._ckpt[0]
+            self._mock_y = self._ckpt[1].copy()
+
     def triggered(self, condition: Any) -> bool:
         if condition is None or isinstance(condition, (int, float)):
             return False
@@ -67,8 +82,12 @@ class Session:
         return condition.evaluate(self)
 
     def reach_steady_state(self) -> None:
-        if self.handle: self.handle.step(1000.0)
-        self.time += 1000.0
+        # Level 10: Explicit Newton Root-Finding ensures proper evaluation zero-point for EIS analysis
+        if self.handle: 
+            self.handle.reach_steady_state()
+            self.time += 1000.0
+        else:
+            self.time += 1000.0
 
     def solve_eis(self, frequencies: np.ndarray, input_var: str, output_var: str) -> np.ndarray:
         """Extracts the analytical Jacobian directly from Enzyme and algebraically solves the transfer function."""

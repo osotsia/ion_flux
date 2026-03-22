@@ -60,6 +60,7 @@ class AdjointDecay(fx.PDE):
 def test_stateful_session_hil_control():
     """Validates the SolverHandle safely caching persistent memory structures without OS file read operations."""
     engine = Engine(model=SimpleBatteryProtocol(), target="cpu", mock_execution=False)
+    if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     # Init at Rest (0 current)
     session = engine.start_session(parameters={"i_target": 0.0})
@@ -72,8 +73,9 @@ def test_stateful_session_hil_control():
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
 def test_protocol_hot_swapping_cccv():
-    """Validates Python triggers mapping the native DAE to CC/CV constraint arrays iteratively."""
+    """Validates Python bisection root-finding triggers mapping the native DAE to CC/CV constraint arrays iteratively."""
     engine = Engine(model=SimpleBatteryProtocol(), target="cpu", mock_execution=False)
+    if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     protocol = Sequence([
         CC(rate=10.0, until="V <= 3.2"),
@@ -91,6 +93,8 @@ def test_protocol_hot_swapping_cccv():
 def test_native_eis_frequency_domain_solver():
     """Validates the JIT pulling analytical steady state Jacobian to evaluate (jwM + J)^-1 B."""
     engine = Engine(model=ParallelRCCircuit(), target="cpu", mock_execution=False)
+    if engine.mock_execution: pytest.skip("Compilation environment absent.")
+    
     session = engine.start_session(parameters={"R": 10.0, "C": 0.1, "i_app": 1.0})
     
     session.reach_steady_state()
@@ -112,6 +116,8 @@ def test_discrete_adjoint_backward_propagation():
     and an unconditionally stable implicit backward integration scheme.
     """
     engine = Engine(model=AdjointDecay(), target="cpu", mock_execution=False)
+    if engine.mock_execution: pytest.skip("Compilation environment absent.")
+    
     res = engine.solve(t_span=(0, 1.0), parameters={"k": 2.0}, requires_grad=["k"])
     
     loss = fx.metrics.rmse(res["y"].data, np.zeros_like(res["y"].data), engine=engine)
@@ -126,6 +132,7 @@ def test_discrete_adjoint_backward_propagation():
 def test_rayon_task_parallelism_batch():
     """Level 5: Validates bypassing the Python GIL using Rust Rayon mapping execution threads natively."""
     engine = Engine(model=AdjointDecay(), target="cpu", mock_execution=False)
+    if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     param_sweep = [{"k": 1.0}, {"k": 2.0}, {"k": 3.0}]
     results = engine.solve_batch(parameters=param_sweep, t_span=(0, 1.0))

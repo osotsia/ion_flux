@@ -21,9 +21,12 @@ class Loss:
         if self._engine is None or self._trajectory is None:
             raise RuntimeError("Cannot backpropagate: Loss is detached or lacks integration trajectory.")
         
+        req_grad = self._trajectory.get("requires_grad", list(self._engine.parameters.keys()))
+        
         if not RUST_FFI_AVAILABLE or self._engine.mock_execution:
             for param_handle in self._engine.parameters.values():
-                param_handle.grad = np.random.uniform(-0.1, 0.1)
+                if param_handle.name in req_grad:
+                    param_handle.grad = np.random.uniform(-0.1, 0.1)
             return
             
         t_eval = self._trajectory["Time [s]"]
@@ -40,8 +43,11 @@ class Loss:
             y_traj.tolist(), t_eval.tolist(), id_arr, p_list, dl_dy.tolist()
         )
         
-        for p_name, (offset, _) in self._engine.layout.param_offsets.items():
-            self._engine.parameters[p_name].grad = p_grad[offset]
+        # Level 9: Filter continuous AD trace, mapping back only the requested VJPs
+        for p_name in req_grad:
+            if p_name in self._engine.layout.param_offsets:
+                offset = self._engine.layout.param_offsets[p_name][0]
+                self._engine.parameters[p_name].grad = p_grad[offset]
 
     def __repr__(self) -> str:
         return f"Loss({self.value:.6f}{', attached' if self._engine else ', detached'})"

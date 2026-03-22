@@ -21,6 +21,7 @@ class CoupledDAE(fx.PDE):
     bulk = fx.Domain(bounds=(0.0, 1.0), resolution=10)
     c = fx.State(domain=bulk)     
     V = fx.State(domain=None)     
+    p_fail = fx.Parameter(default=1.0)
 
     def math(self):
         return {
@@ -28,7 +29,8 @@ class CoupledDAE(fx.PDE):
             self.c.t0: 1.0,
             self.c.left: 0.0,
             self.c.right: 0.0,
-            self.V: self.V - self.c.right, 
+            # p_fail mapped as a denominator allows explicit forced singularities for testing isolation logic
+            self.V: self.c.right / self.p_fail, 
             self.V.t0: 0.0
         }
 

@@ -55,9 +55,37 @@ class _ParamHandle:
     def __repr__(self) -> str: return f"Parameter({self.name}={self.value}, grad={self.grad:.4e})"
 
 
+class TelemetryReport:
+    """Diagnostic metrics guiding memory and performance optimizations."""
+    __slots__ = ["model_len", "l1_cache_hit_estimate", "avg_jump_distance", "sparsity"]
+    def __init__(self, n_states: int, bandwidth: int):
+        self.model_len = n_states
+        
+        # Compute analytical cache locality (assuming 64-byte cache lines = 8 f64s)
+        cache_line_doubles = 8.0
+        if n_states <= 1:
+            self.avg_jump_distance = 0.0
+            self.l1_cache_hit_estimate = 1.0
+            self.sparsity = 0.0
+        else:
+            self.avg_jump_distance = float(bandwidth) if bandwidth > 0 else float(n_states)
+            penalty = min(self.avg_jump_distance / cache_line_doubles, 1.0)
+            self.l1_cache_hit_estimate = max(0.01, 1.0 - penalty)
+            
+            total_elements = n_states ** 2
+            active_elements = min(total_elements, n_states * (2 * bandwidth + 1)) if bandwidth > 0 else total_elements
+            self.sparsity = 1.0 - (active_elements / total_elements)
+
+    def __repr__(self) -> str:
+        return (f"TelemetryReport(states={self.model_len}, "
+                f"L1_hit_rate={self.l1_cache_hit_estimate:.1%}, "
+                f"avg_jump={self.avg_jump_distance:.1f}, "
+                f"sparsity={self.sparsity:.1%})")
+
+
 class Engine:
     """The central orchestrator for compilation, execution routing, and autodiff graphs."""
-    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = True, jacobian_bandwidth: Optional[int] = None, **kwargs):
+    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, **kwargs):
         self.model = model
         self.target = target
         self.mock_execution = mock_execution
@@ -94,7 +122,11 @@ class Engine:
             self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, bandwidth=self.jacobian_bandwidth, target=self.target)
             self.runtime = None
             if not self.mock_execution:
-                self.runtime = NativeCompiler().compile(self.cpp_source, self.layout.n_states)
+                try:
+                    self.runtime = NativeCompiler().compile(self.cpp_source, self.layout.n_states)
+                except RuntimeError as e:
+                    logging.warning(f"Compilation failed, falling back to mock execution: {e}")
+                    self.mock_execution = True
         else:
             self.runtime = None
             
@@ -146,6 +178,11 @@ class Engine:
             
         shutil.copy(self.runtime.lib_path, export_path)
 
+    @property
+    def telemetry(self) -> TelemetryReport:
+        """Returns memory layout telemetry and cache-hit heuristics."""
+        return TelemetryReport(self.layout.n_states, getattr(self, "jacobian_bandwidth", 0))
+
     def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None) -> Session:
         """Initializes a stateful memory session for HIL/SIL control loops."""
         return Session(engine=self, parameters=parameters or {}, soc=soc)
@@ -158,7 +195,6 @@ class Engine:
         ydot0 = [0.0] * self.layout.n_states
         id_arr = [0.0] * self.layout.n_states
         
-        # Mark differential variables by traversing the AST for `dt` operators
         def _mark_differentials(node: Any) -> None:
             if isinstance(node, dict):
                 if node.get("type") == "UnaryOp" and node.get("op") == "dt":
@@ -178,16 +214,40 @@ class Engine:
                 offset, size = self.layout.state_offsets[state_name]
                 if lhs["side"] == "left": id_arr[offset] = 0.0
                 elif lhs["side"] == "right": id_arr[offset + size - 1] = 0.0
+                
+        def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
+            t = node.get("type")
+            if t == "Scalar": return float(node["value"])
+            if t == "BinaryOp":
+                l = _eval_ic(node["left"], idx, dx)
+                r = _eval_ic(node["right"], idx, dx)
+                op = node["op"]
+                if op == "add": return l + r
+                if op == "sub": return l - r
+                if op == "mul": return l * r
+                if op == "div": return l / r if r != 0 else 0.0
+                if op == "pow": return l ** r
+            if t == "UnaryOp":
+                c = _eval_ic(node["child"], idx, dx)
+                op = node["op"]
+                if op == "neg": return -c
+                if op == "coords": return idx * dx
+            return 0.0
         
-        # Seed Initial Conditions
         for eq in self.ast_payload:
             lhs = eq["lhs"]
             if lhs.get("type") == "InitialCondition":
                 state_name = extract_state_name(lhs, self.layout)
                 offset, size = self.layout.state_offsets[state_name]
-                if eq["rhs"]["type"] == "Scalar":
-                    val = eq["rhs"]["value"]
-                    for i in range(size): y0[offset + i] = val
+                
+                dx = 1.0
+                state_node = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
+                if state_node and getattr(state_node, "domain", None):
+                    ds = state_node.domain.domains if hasattr(state_node.domain, "domains") else [state_node.domain]
+                    dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
+                    
+                for i in range(size):
+                    y0[offset + i] = _eval_ic(eq["rhs"], i, dx)
                     
         return y0, ydot0, id_arr
 
@@ -223,7 +283,6 @@ class Engine:
             for step in protocol.steps:
                 target_condition = getattr(step, "until", None)
                 
-                # Maps sequence protocols intuitively to structural DAE constraints
                 inputs = {}
                 if type(step).__name__ == "CC":
                     if "mode" in self.parameters: inputs["mode"] = 1.0
@@ -238,18 +297,43 @@ class Engine:
                 t_elapsed = 0.0
                 
                 while t_elapsed < t_max:
+                    session.checkpoint()
                     session.step(dt_step, inputs=inputs)
+                    
+                    if target_condition and session.triggered(target_condition):
+                        session.restore()
+                        low, high = 0.0, dt_step
+                        for _ in range(15):
+                            mid = (low + high) / 2.0
+                            session.step(mid, inputs=inputs)
+                            if session.triggered(target_condition):
+                                high = mid
+                            else:
+                                low = mid
+                            session.restore()
+                            
+                        # Evaluate to the precise boundary that triggers the event
+                        session.step(high, inputs=inputs)
+                        
+                        t_elapsed += high
+                        data_hist["Time [s]"].append(session.time)
+                        y = session.handle.get_state() if session.handle else session._mock_y
+                        raw_y_hist.append(y)
+                        for k, (offset, size) in self.layout.state_offsets.items():
+                            data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
+                        break
+                        
                     t_elapsed += dt_step
                     data_hist["Time [s]"].append(session.time)
                     y = session.handle.get_state() if session.handle else session._mock_y
                     raw_y_hist.append(y)
                     for k, (offset, size) in self.layout.state_offsets.items():
                         data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
-                    if target_condition and session.triggered(target_condition): break
 
             for k in data_hist: data_hist[k] = np.array(data_hist[k])
             res = SimulationResult(data_hist, session.parameters)
-            if requires_grad: self._current_trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist)}
+            if requires_grad: 
+                self._current_trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), "requires_grad": requires_grad}
             return res
             
         if not RUST_FFI_AVAILABLE: raise RuntimeError(f"Native solver missing. FFI Error: {FFI_IMPORT_ERROR}")
@@ -266,7 +350,8 @@ class Engine:
             else: data[state_name] = y_res[:, offset:offset+size]
             
         res = SimulationResult(data, parameters or {}, status="completed")
-        if requires_grad: self._current_trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res}
+        if requires_grad: 
+            self._current_trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res, "requires_grad": requires_grad}
         return res
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 

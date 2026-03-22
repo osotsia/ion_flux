@@ -1,7 +1,6 @@
 import pytest
 from ion_flux.battery import DFN, parameters
 from ion_flux import Engine
-import ion_flux.protocols as protocols
 
 # Standard resolution for benchmarking
 MESH_RES = {"x_n": 50, "x_s": 50, "x_p": 50, "r_n": 20, "r_p": 20}
@@ -31,12 +30,12 @@ def test_bench_warm_start_execution_cpu(benchmark, compiled_cpu_engine):
     """
     Measures the purely numerical integration loop (SUNDIALS KLU) and 
     memory updates for a standard 1C discharge.
+    Bypasses Protocol Python-loops to test strictly native speed.
     """
     params = parameters.Chen2020()
-    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
 
     def execute_solve():
-        return compiled_cpu_engine.solve(protocol=protocol, parameters=params)
+        return compiled_cpu_engine.solve(t_span=(0, 170), parameters=params)
 
     benchmark(execute_solve)
 
@@ -51,10 +50,9 @@ def test_bench_warm_start_execution_gpu(benchmark, base_model):
         pytest.skip("CUDA hardware not available on this runner.")
 
     params = parameters.Chen2020()
-    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
 
     def execute_solve():
-        return gpu_engine.solve(protocol=protocol, parameters=params)
+        return gpu_engine.solve(t_span=(0, 170), parameters=params)
 
     benchmark(execute_solve)
 
@@ -63,7 +61,6 @@ def test_bench_parameter_sweep_throughput(benchmark, compiled_cpu_engine):
     Measures the task-parallel throughput for MCMC or parameter sweeps.
     """
     base_params = parameters.Chen2020()
-    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
     
     # Generate 100 varying parameter sets
     param_batch = [
@@ -74,7 +71,7 @@ def test_bench_parameter_sweep_throughput(benchmark, compiled_cpu_engine):
     def execute_batch():
         # Uses Rust's Rayon threadpool internally
         return compiled_cpu_engine.solve_batch(
-            protocol=protocol, 
+            t_span=(0, 170), 
             parameters=param_batch,
             max_workers=16
         )

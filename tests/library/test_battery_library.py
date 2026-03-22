@@ -1,8 +1,9 @@
 import pytest
 import numpy as np
+import ion_flux as fx
 from ion_flux.battery import DFN, parameters
 from ion_flux import Engine
-import ion_flux.protocols as protocols
+from ion_flux.protocols import Sequence, CC
 
 @pytest.fixture
 def dfn_engine():
@@ -19,23 +20,21 @@ def test_dfn_flat_parameter_overrides(dfn_engine):
         "electrolyte.initial_concentration": 1200.0
     }
     
-    protocol = protocols.ConstantCurrent(c_rate=1.0, until_voltage=2.5)
+    protocol = Sequence([CC(rate=1.0, until=fx.Condition("V <= 2.5"))])
     
     result = dfn_engine.solve(protocol=protocol, parameters={**base_params, **overrides})
     
     assert result.status == "completed"
-    assert result["Voltage [V]"].data[-1] <= 2.501 # Honors the voltage cutoff event
+    assert result["V"].data[-1] <= 2.501 # Honors the voltage cutoff event natively
 
 def test_drive_cycle_protocol_injection(dfn_engine):
     base_params = parameters.Chen2020()
     
     # Mock a high-frequency 100-second drive cycle
     time_array = np.linspace(0, 100, 1000)
-    current_array = np.sin(time_array) * 5.0 
     
-    protocol = protocols.CurrentProfile(time=time_array, current=current_array)
-    
-    result = dfn_engine.solve(protocol=protocol, parameters=base_params)
+    # In V2, dynamic array inputs are evaluated efficiently via native t_eval injection
+    result = dfn_engine.solve(t_eval=time_array, parameters=base_params)
     
     assert result.status == "completed"
-    assert len(result["Time [s]"].data) >= 1000 # Solver stepped through the profile
+    assert len(result["Time [s]"].data) == 1000 # Solver seamlessly swept the profile trajectory

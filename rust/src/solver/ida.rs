@@ -20,7 +20,6 @@ fn solve_dense_system(n: usize, jac: &mut [f64], b: &mut [f64]) -> Result<(), St
                 pivot_row = i;
             }
         }
-        // Scaled to accommodate SI units natively without normalization (e.g. D_s = 1e-16)
         if max_val < 1e-25 { return Err("Singular Jacobian matrix.".to_string()); }
         
         if pivot_row != k {
@@ -103,20 +102,80 @@ impl SolverHandle {
         Ok(handle)
     }
 
-    pub fn step(&mut self, dt: f64) -> PyResult<()> {
-        let micro_steps = 100;
-        let sub_dt = dt / (micro_steps as f64);
-        let c_j = 1.0 / sub_dt;
-        
-        let mut res = vec![0.0; self.n];
-        let mut jac = vec![0.0; self.n * self.n];
-        let mut dy = vec![0.0; self.n];
+    pub fn clone_state(&self) -> (f64, Vec<f64>, Vec<f64>) {
+        (self.t, self.y.clone(), self.ydot.clone())
+    }
 
-        for _ in 0..micro_steps {
+    pub fn restore_state(&mut self, t: f64, y: Vec<f64>, ydot: Vec<f64>) {
+        self.t = t;
+        self.y = y;
+        self.ydot = ydot;
+    }
+
+    pub fn step(&mut self, dt: f64) -> PyResult<()> {
+        let mut t_local = 0.0;
+        let mut sub_dt = dt.min(1e-3);
+        
+        // --- SCALAR FAST PATH ---
+        // Bypasses dense vector allocations, bound-checked iteration, and matrix inversions for N=1 models
+        if self.n == 1 {
+            while t_local < dt {
+                if t_local + sub_dt > dt { sub_dt = dt - t_local; }
+                let c_j = 1.0 / sub_dt;
+                
+                let mut res = 0.0;
+                let mut jac = 0.0;
+                let y_prev = self.y[0];
+                let mut converged = false;
+                let mut iters = 0;
+                
+                for iter in 0..10 {
+                    iters = iter;
+                    self.ydot[0] = if self.id[0] == 1.0 { (self.y[0] - y_prev) / sub_dt } else { 0.0 };
+                    unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), &mut res) };
+                    
+                    if res.abs() < 1e-6 { 
+                        converged = true; 
+                        break; 
+                    }
+                    
+                    unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), c_j, &mut jac) };
+                    
+                    if jac.abs() < 1e-25 { return Err(pyo3::exceptions::PyRuntimeError::new_err("Singular Jacobian matrix.")); }
+                    
+                    self.y[0] -= res / jac;
+                }
+                
+                if converged {
+                    t_local += sub_dt;
+                    if iters < 4 { sub_dt *= 1.5; }
+                } else {
+                    self.y[0] = y_prev;
+                    sub_dt *= 0.25;
+                    if sub_dt < 1e-10 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Newton method failed to converge at t={}", self.t + t_local)));
+                    }
+                }
+            }
+            self.t += dt;
+            return Ok(());
+        }
+
+        // --- STANDARD VECTORIZED PATH ---
+        while t_local < dt {
+            if t_local + sub_dt > dt { sub_dt = dt - t_local; }
+            let c_j = 1.0 / sub_dt;
+            
+            let mut res = vec![0.0; self.n];
+            let mut jac = vec![0.0; self.n * self.n];
+            let mut dy = vec![0.0; self.n];
+            
             let y_prev = self.y.clone();
             let mut converged = false;
-
-            for _iter in 0..20 {
+            let mut iters = 0;
+            
+            for iter in 0..10 {
+                iters = iter;
                 for i in 0..self.n { 
                     self.ydot[i] = if self.id[i] == 1.0 { (self.y[i] - y_prev[i]) / sub_dt } else { 0.0 }; 
                 }
@@ -135,14 +194,81 @@ impl SolverHandle {
 
                 unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), c_j, jac.as_mut_ptr()) };
                 
-                if self.bw > 0 { solve_banded_system(self.n, self.bw, &mut jac, &mut dy).unwrap(); }
-                else { solve_dense_system(self.n, &mut jac, &mut dy).unwrap(); }
+                if self.bw > 0 { 
+                    solve_banded_system(self.n, self.bw, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+                } else { 
+                    solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+                }
 
                 for i in 0..self.n { self.y[i] += dy[i]; }
             }
-            if !converged { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Newton method failed at t={}", self.t))); }
+            
+            if converged {
+                t_local += sub_dt;
+                if iters < 4 { sub_dt *= 1.5; }
+            } else {
+                self.y = y_prev;
+                sub_dt *= 0.25;
+                if sub_dt < 1e-10 {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("Newton method failed to converge at t={}", self.t + t_local)));
+                }
+            }
         }
         self.t += dt;
+        Ok(())
+    }
+
+    pub fn reach_steady_state(&mut self) -> PyResult<()> {
+        if self.n == 1 {
+            self.ydot[0] = 0.0;
+            let mut res = 0.0;
+            let mut jac = 0.0;
+            let mut converged = false;
+            
+            for _ in 0..100 {
+                unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), &mut res) };
+                if res.abs() < 1e-8 {
+                    converged = true;
+                    break;
+                }
+                unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, &mut jac) };
+                if jac.abs() < 1e-25 { return Err(pyo3::exceptions::PyRuntimeError::new_err("Singular Jacobian matrix.")); }
+                self.y[0] -= res / jac;
+            }
+            if !converged { return Err(pyo3::exceptions::PyRuntimeError::new_err("Steady state Newton failed to converge.")); }
+            return Ok(());
+        }
+
+        for i in 0..self.n { self.ydot[i] = 0.0; }
+        
+        let mut res = vec![0.0; self.n];
+        let mut jac = vec![0.0; self.n * self.n];
+        let mut dy = vec![0.0; self.n];
+        
+        let mut converged = false;
+        for _ in 0..100 {
+            unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
+            let mut max_res = 0.0;
+            for i in 0..self.n {
+                if res[i].abs() > max_res { max_res = res[i].abs(); }
+                dy[i] = -res[i];
+            }
+            if max_res < 1e-8 {
+                converged = true;
+                break;
+            }
+            unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
+            
+            if self.bw > 0 { 
+                solve_banded_system(self.n, self.bw, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+            } else { 
+                solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+            }
+            
+            for i in 0..self.n { self.y[i] += dy[i]; }
+        }
+        
+        if !converged { return Err(pyo3::exceptions::PyRuntimeError::new_err("Steady state Newton failed to converge.")); }
         Ok(())
     }
 
@@ -168,6 +294,25 @@ impl SolverHandle {
 
 impl SolverHandle {
     fn initialize_ic(&mut self) -> PyResult<()> {
+        if self.n == 1 {
+            let mut res = 0.0;
+            let mut jac = 0.0;
+            for _ in 0..20 {
+                unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), &mut res) };
+                if self.id[0] == 0.0 && res.abs() < 1e-8 { break; }
+                
+                unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, &mut jac) };
+                
+                if self.id[0] == 1.0 {
+                    break; // Differential variable ICs remain unchanged.
+                } else {
+                    if jac.abs() < 1e-25 { return Err(pyo3::exceptions::PyRuntimeError::new_err("Singular Jacobian matrix during IC init.")); }
+                    self.y[0] -= res / jac;
+                }
+            }
+            return Ok(());
+        }
+
         let mut res = vec![0.0; self.n];
         let mut jac = vec![0.0; self.n * self.n];
         let mut dy = vec![0.0; self.n];
@@ -186,8 +331,11 @@ impl SolverHandle {
                     for col in 0..self.n { jac[col * self.n + i] = if col == i { 1.0 } else { 0.0 }; }
                 }
             }
-            if self.bw > 0 { solve_banded_system(self.n, self.bw, &mut jac, &mut dy).unwrap(); }
-            else { solve_dense_system(self.n, &mut jac, &mut dy).unwrap(); }
+            if self.bw > 0 { 
+                solve_banded_system(self.n, self.bw, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+            } else { 
+                solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+            }
             for i in 0..self.n { self.y[i] += dy[i]; }
         }
         Ok(())
@@ -228,20 +376,24 @@ pub fn solve_batch_native<'py>(
     t_eval: Vec<f64>,
     bandwidth: usize,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
-    let results: Vec<Vec<f64>> = p_batch.par_iter().map(|p| {
-        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone()).unwrap();
+    let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
+        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone())
+            .map_err(|e| e.to_string())?;
+            
         let mut out_traj = vec![0.0; t_eval.len() * handle.n];
         for i in 0..handle.n { out_traj[i] = handle.y[i]; }
+        
         for step in 1..t_eval.len() {
             let dt = t_eval[step] - t_eval[step - 1];
-            handle.step(dt).unwrap();
+            handle.step(dt).map_err(|e| e.to_string())?;
             for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
         }
-        out_traj
+        Ok(out_traj)
     }).collect();
 
+    let unwrapped_results = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();
-    for res in results {
+    for res in unwrapped_results {
         py_results.push(numpy::ndarray::Array2::from_shape_vec((t_eval.len(), y0.len()), res).unwrap().to_pyarray_bound(py));
     }
     Ok(py_results)
@@ -293,7 +445,7 @@ pub fn discrete_adjoint_native<'py>(
         for i in 0..n { rhs[i] = -dl_dy[step][i] + lambda[i] * id_arr[i] * c_j; }
         
         // 4. Implicitly solve J^T * lambda_next = RHS
-        solve_dense_system(n, &mut jac_t, &mut rhs).unwrap();
+        solve_dense_system(n, &mut jac_t, &mut rhs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         lambda = rhs;
         
         // 5. Native Reverse-Mode Enzyme Vector-Jacobian Product (VJP) mapping
