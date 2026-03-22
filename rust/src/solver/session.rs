@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use super::{NativeResFn, NativeJacFn};
-use super::integrator::Bdf1Integrator;
+use super::integrator::BdfIntegrator;
 use super::linalg::{solve_dense_system, solve_banded_system};
 
 #[pyclass(unsendable)]
@@ -16,6 +16,12 @@ pub struct SolverHandle {
     pub ydot: Vec<f64>,
     pub id: Vec<f64>,
     pub p: Vec<f64>,
+    
+    // BDF2 High-Order Integration History
+    pub y_prev: Vec<f64>,
+    pub y_prev2: Vec<f64>,
+    pub dt_prev: f64,
+    pub order: usize,
 }
 
 #[pymethods]
@@ -26,26 +32,76 @@ impl SolverHandle {
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
         let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
         
-        let mut handle = SolverHandle { _lib: lib, res_fn, jac_fn, n, bw, t: 0.0, y: y0, ydot: ydot0, id, p };
+        let y_prev = y0.clone();
+        let y_prev2 = y0.clone();
+
+        let mut handle = SolverHandle { 
+            _lib: lib, 
+            res_fn, 
+            jac_fn, 
+            n, 
+            bw, 
+            t: 0.0, 
+            y: y0, 
+            ydot: ydot0, 
+            id, 
+            p,
+            y_prev,
+            y_prev2,
+            dt_prev: 0.0,
+            order: 1,
+        };
         handle.initialize_ic()?;
         Ok(handle)
     }
 
-    pub fn clone_state(&self) -> (f64, Vec<f64>, Vec<f64>) {
-        (self.t, self.y.clone(), self.ydot.clone())
+    pub fn clone_state(&self) -> (f64, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64, usize) {
+        (
+            self.t, 
+            self.y.clone(), 
+            self.ydot.clone(), 
+            self.y_prev.clone(), 
+            self.y_prev2.clone(), 
+            self.dt_prev, 
+            self.order
+        )
     }
 
-    pub fn restore_state(&mut self, t: f64, y: Vec<f64>, ydot: Vec<f64>) {
+    pub fn restore_state(
+        &mut self, 
+        t: f64, 
+        y: Vec<f64>, 
+        ydot: Vec<f64>, 
+        y_prev: Vec<f64>, 
+        y_prev2: Vec<f64>, 
+        dt_prev: f64, 
+        order: usize
+    ) {
         self.t = t;
         self.y = y;
         self.ydot = ydot;
+        self.y_prev = y_prev;
+        self.y_prev2 = y_prev2;
+        self.dt_prev = dt_prev;
+        self.order = order;
     }
 
     pub fn step(&mut self, dt: f64) -> PyResult<()> {
-        let integrator = Bdf1Integrator::default();
+        let integrator = BdfIntegrator::default();
         integrator.step(
-            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, 
-            dt, self.res_fn, self.jac_fn
+            self.n, 
+            self.bw, 
+            &mut self.y, 
+            &mut self.ydot, 
+            &self.p, 
+            &self.id, 
+            dt, 
+            self.res_fn, 
+            self.jac_fn,
+            &mut self.y_prev,
+            &mut self.y_prev2,
+            &mut self.dt_prev,
+            &mut self.order
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         
         self.t += dt;
@@ -53,7 +109,7 @@ impl SolverHandle {
     }
 
     pub fn reach_steady_state(&mut self) -> PyResult<()> {
-        for i in 0..self.n { self.ydot[i] = 0.0; } // BUG 10 FIX: True steady-state forces ydot=0
+        for i in 0..self.n { self.ydot[i] = 0.0; } // True steady-state forces ydot=0
         
         let mut res = vec![0.0; self.n];
         let mut jac = vec![0.0; self.n * self.n];
@@ -72,14 +128,25 @@ impl SolverHandle {
             unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
             
             if self.bw > 0 { 
-                solve_banded_system(self.n, self.bw, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+                solve_banded_system(self.n, self.bw, &mut jac, &mut dy)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
             } else { 
-                solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+                solve_dense_system(self.n, &mut jac, &mut dy)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
             }
             for i in 0..self.n { self.y[i] += dy[i]; }
         }
         
-        if !converged { return Err(pyo3::exceptions::PyRuntimeError::new_err("Steady state Newton failed to converge.")); }
+        if !converged { 
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("Steady state Newton failed to converge.")); 
+        }
+
+        // Reset history buffers upon reaching a new equilibrium
+        self.y_prev.copy_from_slice(&self.y);
+        self.y_prev2.copy_from_slice(&self.y);
+        self.dt_prev = 0.0;
+        self.order = 1;
+
         Ok(())
     }
 
@@ -111,7 +178,12 @@ impl SolverHandle {
 
         for _ in 0..20 {
             unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
-            let max_res = res.iter().enumerate().filter(|(i, _)| self.id[*i] == 0.0).map(|(_, v)| v.abs()).fold(0.0, f64::max);
+            let max_res = res.iter()
+                .enumerate()
+                .filter(|(i, _)| self.id[*i] == 0.0)
+                .map(|(_, v)| v.abs())
+                .fold(0.0, f64::max);
+                
             if max_res < 1e-8 { break; }
 
             unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
@@ -123,11 +195,22 @@ impl SolverHandle {
                     for col in 0..self.n { jac[col * self.n + i] = if col == i { 1.0 } else { 0.0 }; }
                 }
             }
-            if self.bw > 0 { solve_banded_system(self.n, self.bw, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
-            else { solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; }
+            if self.bw > 0 { 
+                solve_banded_system(self.n, self.bw, &mut jac, &mut dy)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+            } else { 
+                solve_dense_system(self.n, &mut jac, &mut dy)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; 
+            }
             
             for i in 0..self.n { self.y[i] += dy[i]; }
         }
+
+        self.y_prev.copy_from_slice(&self.y);
+        self.y_prev2.copy_from_slice(&self.y);
+        self.dt_prev = 0.0;
+        self.order = 1;
+
         Ok(())
     }
 }
