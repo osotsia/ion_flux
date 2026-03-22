@@ -119,8 +119,9 @@ def test_discrete_adjoint_backward_propagation():
     if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     res = engine.solve(t_span=(0, 1.0), parameters={"k": 2.0}, requires_grad=["k"])
-    
-    loss = fx.metrics.rmse(res["y"].data, np.zeros_like(res["y"].data), engine=engine)
+       
+    # FIXED: Pass state_name="y" so the loss maps the gradient seed to the correct memory offset
+    loss = fx.metrics.rmse(res["y"].data, np.zeros_like(res["y"].data), engine=engine, state_name="y")
     loss.backward()
     
     grad_k = engine.parameters["k"].grad

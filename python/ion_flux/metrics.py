@@ -9,12 +9,13 @@ except ImportError:
 
 class Loss:
     """Represents a differentiable scalar loss evaluated against a computational graph."""
-    __slots__ = ["value", "_engine", "_trajectory"]
+    __slots__ = ["value", "_engine", "_trajectory", "_dl_dy_mapped"]
 
-    def __init__(self, value: float, engine: Optional[Any] = None, trajectory: Optional[dict] = None):
+    def __init__(self, value: float, engine: Optional[Any] = None, trajectory: Optional[dict] = None, dl_dy_mapped: Optional[np.ndarray] = None):
         self.value = float(value)
         self._engine = engine
         self._trajectory = trajectory
+        self._dl_dy_mapped = dl_dy_mapped
 
     def backward(self) -> None:
         """Triggers Reverse-Mode Automatic Differentiation (Adjoint)."""
@@ -32,31 +33,53 @@ class Loss:
         t_eval = self._trajectory["Time [s]"]
         y_traj = self._trajectory["_y_raw"]
         
-        dl_dy = np.zeros_like(y_traj)
-        dl_dy[-1, :] = 1.0 # Minimal analytical seed mapping 
+        dl_dy = self._dl_dy_mapped if self._dl_dy_mapped is not None else np.zeros_like(y_traj)
         
         y0, ydot0, id_arr = self._engine._extract_metadata()
         p_list = self._engine._pack_parameters({})
         
+        bw = getattr(self._engine, "jacobian_bandwidth", 0)
         p_grad = discrete_adjoint_native(
             self._engine.runtime.lib_path,
-            y_traj.tolist(), t_eval.tolist(), id_arr, p_list, dl_dy.tolist()
+            y_traj.tolist(), t_eval.tolist(), id_arr, p_list, dl_dy.tolist(), bw
         )
         
-        # Level 9: Filter continuous AD trace, mapping back only the requested VJPs
         for p_name in req_grad:
             if p_name in self._engine.layout.param_offsets:
                 offset = self._engine.layout.param_offsets[p_name][0]
                 self._engine.parameters[p_name].grad = p_grad[offset]
 
-    def __repr__(self) -> str:
-        return f"Loss({self.value:.6f}{', attached' if self._engine else ', detached'})"
 
-
-def rmse(predicted: np.ndarray, target: np.ndarray, engine: Optional[Any] = None) -> Loss:
+def rmse(predicted: np.ndarray, target: np.ndarray, engine: Optional[Any] = None, state_name: str = "Voltage") -> Loss:
+    """
+    Computes the Root Mean Square Error and tracks the analytical gradient mapping.
+    
+    Args:
+        predicted: Simulated trajectory
+        target: Lab data trajectory
+        engine: The engine used for the simulation
+        state_name: The string name of the state being evaluated (defaults to "Voltage")
+    """
     p_arr, t_arr = np.asarray(predicted), np.asarray(target)
     if p_arr.shape != t_arr.shape:
         raise ValueError(f"Shape mismatch: predicted {p_arr.shape} vs target {t_arr.shape}")
     
-    val = np.sqrt(np.mean((p_arr - t_arr) ** 2))
-    return Loss(val, engine=engine, trajectory=getattr(engine, "_current_trajectory", None))
+    diff = p_arr - t_arr
+    val = np.sqrt(np.mean(diff ** 2))
+    
+    dl_dy_mapped = None
+    if engine and hasattr(engine, "_current_trajectory"):
+        y_traj = engine._current_trajectory["_y_raw"]
+        dl_dy_mapped = np.zeros_like(y_traj)
+        
+        # Dynamically map the derivative back to the exact physical state offset
+        if state_name in engine.layout.state_offsets:
+            offset, size = engine.layout.state_offsets[state_name]
+            
+            grad_multiplier = 1.0 / (len(diff) * max(val, 1e-12))
+            
+            # Map gradient across spatial dimensions evenly
+            for i in range(size):
+                dl_dy_mapped[:, offset + i] = (grad_multiplier * diff) / size
+            
+    return Loss(val, engine=engine, trajectory=getattr(engine, "_current_trajectory", None), dl_dy_mapped=dl_dy_mapped)

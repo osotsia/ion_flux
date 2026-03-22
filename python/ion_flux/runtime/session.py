@@ -33,7 +33,8 @@ class Session:
             self._mock_y = np.array(y0)
 
     def set_parameter(self, param_name: str, value: float) -> None:
-        self.parameters[param_name] = value
+        # BUG 15 FIX: Session overrides its own local dict, NOT the global Engine parameters
+        self.parameters[param_name] = value 
         if self.handle:
             offset = self.engine.layout.get_param_offset(param_name)
             self.handle.set_parameter(offset, value)
