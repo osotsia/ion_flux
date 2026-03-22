@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.linalg
 from typing import Optional, Any, Union, Dict
 
 try:
@@ -38,22 +39,68 @@ class Loss:
             eis_target_key = self._trajectory.get("_eis_target_key", "Z_real")
             eps = 1e-5
             
+            # Start a clean base session to recover analytical steady-state properties
+            s_base = self._engine.start_session(parameters=self._parameters)
+            s_base.reach_steady_state()
+            
+            if s_base.handle:
+                y_ss = s_base.handle.get_state()
+                J_ss = s_base.handle.get_jacobian(0.0)
+            else:
+                y_ss = s_base._mock_y
+                J_ss = np.eye(len(y_ss))
+                
+            # Pre-factorize the Jacobian to process all exact steady state linear shifts in O(N^2)
+            try:
+                lu, piv = scipy.linalg.lu_factor(J_ss)
+                def solve_J(b): return scipy.linalg.lu_solve((lu, piv), b)
+            except scipy.linalg.LinAlgError:
+                def solve_J(b): return np.linalg.lstsq(J_ss, b, rcond=None)[0]
+            
             for p_name in req_grad:
                 if p_name in self._engine.parameters:
-                    p_fwd = self._parameters.copy()
-                    p_fwd[p_name] += eps
-                    s_fwd = self._engine.start_session(parameters=p_fwd)
-                    s_fwd.reach_steady_state()
-                    Z_fwd = s_fwd.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
+                    p_val = self._parameters.get(p_name, self._engine.parameters[p_name].value)
                     
-                    p_bwd = self._parameters.copy()
-                    p_bwd[p_name] -= eps
-                    s_bwd = self._engine.start_session(parameters=p_bwd)
-                    s_bwd.reach_steady_state()
-                    Z_bwd = s_bwd.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
+                    # 1. Compute exact dF/dp using a local finite difference mapping of the residual C++
+                    p_pert = self._parameters.copy()
+                    p_pert[p_name] = p_val + eps
+                    res_base = np.array(self._engine.evaluate_residual(y_ss.tolist(), np.zeros_like(y_ss).tolist(), parameters=self._parameters))
+                    res_pert = np.array(self._engine.evaluate_residual(y_ss.tolist(), np.zeros_like(y_ss).tolist(), parameters=p_pert))
+                    dF_dp = (res_pert - res_base) / eps
                     
+                    # 2. Extract Exact State Shift via Implicit Function Theorem (dy_ss/dp = -J^{-1} dF/dp)
+                    # This eliminates the Newton solver loop entirely, guaranteeing noise-free analytical gradients.
+                    dy_dp = solve_J(-dF_dp)
+                    
+                    # 3. Evaluate EIS at the analytically shifted Forward State
+                    y_fwd = y_ss + eps * dy_dp
+                    s_base.parameters[p_name] = p_val + eps
+                    if s_base.handle:
+                        s_base.handle.restore_state(s_base.time, y_fwd.tolist(), np.zeros_like(y_fwd).tolist(), y_fwd.tolist(), y_fwd.tolist(), 0.0, 1)
+                    else:
+                        s_base._mock_y = y_fwd
+                    Z_fwd = s_base.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
+                    
+                    # 4. Evaluate EIS at the analytically shifted Backward State
+                    y_bwd = y_ss - eps * dy_dp
+                    s_base.parameters[p_name] = p_val - eps
+                    if s_base.handle:
+                        s_base.handle.restore_state(s_base.time, y_bwd.tolist(), np.zeros_like(y_bwd).tolist(), y_bwd.tolist(), y_bwd.tolist(), 0.0, 1)
+                    else:
+                        s_base._mock_y = y_bwd
+                    Z_bwd = s_base.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
+                    
+                    # 5. Restore Pristine Session State
+                    s_base.parameters[p_name] = p_val
+                    if s_base.handle:
+                        s_base.handle.restore_state(s_base.time, y_ss.tolist(), np.zeros_like(y_ss).tolist(), y_ss.tolist(), y_ss.tolist(), 0.0, 1)
+                    else:
+                        s_base._mock_y = y_ss
+                        
+                    # 6. Accumulate true gradient mappings
                     dZ_dp = (Z_fwd[eis_target_key] - Z_bwd[eis_target_key]) / (2 * eps)
                     self.grads[p_name] = float(np.sum(self._dl_dy_mapped * dZ_dp))
+                    
             return self.grads
 
         if not RUST_FFI_AVAILABLE or getattr(self._engine, "mock_execution", False):

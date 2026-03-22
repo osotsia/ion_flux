@@ -12,7 +12,7 @@ pub fn solve_ida_native<'py>(
     id_py: Vec<f64>,
     p_list: Vec<f64>,
     t_eval: Vec<f64>,
-    bandwidth: isize, // Supports -1 for Matrix-Free Krylov JFNK Iterative Solver
+    bandwidth: isize, 
     spatial_diag: Vec<f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py, ydot0_py, id_py, p_list, spatial_diag)?;
@@ -42,6 +42,10 @@ pub fn solve_batch_native<'py>(
     let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
         let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone())
             .map_err(|e| e.to_string())?;
+            
+        // Explicitly force OpenMP to 1 thread for this worker.
+        // Prevents thread oversubscription cascades when OpenMP meshes inside a Rayon parallel task pool.
+        handle.set_threads(1); 
             
         let mut out_traj = vec![0.0; t_eval.len() * handle.n];
         for i in 0..handle.n { out_traj[i] = handle.y[i]; }

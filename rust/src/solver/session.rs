@@ -32,7 +32,6 @@ impl SolverHandle {
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
         let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
         
-        // Correctly maps the FFI wrapper Symbol without dereferencing a mismatched fn pointer fallback
         let jvp_fn: Option<NativeJvpFn> = unsafe {
             lib.get::<NativeJvpFn>(b"evaluate_jvp\0").map(|sym| *sym).ok()
         };
@@ -115,7 +114,9 @@ impl SolverHandle {
     }
 
     pub fn set_parameter(&mut self, idx: usize, val: f64) { if idx < self.p.len() { self.p[idx] = val; } }
+    
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> { numpy::ndarray::Array1::from_vec(self.y.clone()).to_pyarray_bound(py) }
+    
     pub fn get_jacobian<'py>(&self, py: Python<'py>, c_j: f64) -> Bound<'py, PyArray2<f64>> {
         let mut jac = vec![0.0; self.n * self.n];
         unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), c_j, jac.as_mut_ptr()) };
@@ -124,6 +125,12 @@ impl SolverHandle {
             for row in 0..self.n { jac_rm[row * self.n + col] = jac[col * self.n + row]; }
         }
         numpy::ndarray::Array2::from_shape_vec((self.n, self.n), jac_rm).unwrap().to_pyarray_bound(py)
+    }
+
+    pub fn set_threads(&self, threads: i32) {
+        if let Ok(func) = unsafe { self._lib.get::<unsafe extern "C" fn(i32)>(b"set_spatial_threads\0") } {
+            unsafe { func(threads) };
+        }
     }
 }
 
@@ -151,7 +158,6 @@ impl SolverHandle {
                 let jvp_closure = |v: &[f64], out: &mut [f64]| {
                     unsafe { 
                         jvp(y_ptr, ydot_ptr, p_ptr, 0.0, v.as_ptr(), out.as_mut_ptr()); 
-                        // Force structural identity row for differential states during IC solve
                         for i in 0..self.n { if *id_ptr.add(i) == 1.0 { out[i] = v[i]; } }
                     }
                 };

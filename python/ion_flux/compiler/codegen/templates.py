@@ -50,6 +50,10 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
         #include <vector>
         #include <algorithm>
 
+        #if defined(_OPENMP)
+        #include <omp.h>
+        #endif
+
         #define CLAMP(idx, bound) (std::max(0, std::min((int)(idx), (int)(bound) - 1)))
 
         #ifdef ENZYME_ACTIVE
@@ -60,6 +64,12 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
         #endif
 
         extern "C" {{
+
+        void set_spatial_threads(int num_threads) {{
+        #if defined(_OPENMP)
+            omp_set_num_threads(num_threads);
+        #endif
+        }}
 
         void evaluate_residual(const double* y, const double* ydot, const double* p, double* res) {{
         {body}
