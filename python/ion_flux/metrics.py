@@ -101,6 +101,10 @@ def rmse(predicted: Union[np.ndarray, Any], target: np.ndarray, engine: Optional
             grad_multiplier = 1.0 / (len(diff) * max(val, 1e-12))
             
             for i in range(size):
-                dl_dy_mapped[:, offset + i] = (grad_multiplier * diff) / size
+                if size == 1:
+                    dl_dy_mapped[:, offset + i] = (grad_multiplier * diff)
+                else:
+                    # FIX: Correctly index the specific spatial column of the multi-dimensional diff array
+                    dl_dy_mapped[:, offset + i] = (grad_multiplier * diff[:, i]) / size
             
     return Loss(val, engine=engine, trajectory=trajectory, dl_dy_mapped=dl_dy_mapped, parameters=parameters)

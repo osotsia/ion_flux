@@ -1,8 +1,6 @@
 use super::{NativeResFn, NativeJacFn, NativeJvpFn};
 use super::linalg::{solve_dense_system, solve_banded_system, solve_gmres};
 
-/// A highly modular Variable-Step BDF2 Integrator with Adaptive Step-Sizing.
-/// Isolates numerical integration from state management and minimizes allocations.
 pub struct BdfIntegrator {
     pub max_newton_iters: usize,
     pub min_dt: f64,
@@ -14,7 +12,6 @@ impl Default for BdfIntegrator {
 }
 
 impl BdfIntegrator {
-    /// Advances the system using an implicit variable-step BDF2 formulation.
     pub fn step(
         &self,
         n: usize,
@@ -91,7 +88,13 @@ impl BdfIntegrator {
                     let jvp_closure = |v: &[f64], out: &mut [f64]| {
                         unsafe { jvp(y_ptr, ydot_ptr, p_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
                     };
-                    solve_gmres(n, &mut dy, jvp_closure)?;
+                    
+                    // Lumped Mass Matrix Preconditioner stabilizes highly stiff GMRES convergences automatically.
+                    let precond = |v: &[f64], out: &mut [f64]| {
+                        for i in 0..n { out[i] = v[i] / (c_j * id[i] + 1.0); }
+                    };
+                    
+                    solve_gmres(n, &mut dy, jvp_closure, precond)?;
                 } else {
                     unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), c_j, jac.as_mut_ptr()) };
                     if bw > 0 { solve_banded_system(n, bw as usize, &mut jac, &mut dy)?; } 
@@ -130,12 +133,10 @@ mod tests {
     use std::os::raw::c_double;
 
     unsafe extern "C" fn mock_res(y: *const c_double, ydot: *const c_double, _p: *const c_double, res: *mut c_double) {
-        // Simple ODE: dy/dt = -y  => res = ydot + y = 0
         *res = *ydot + *y;
     }
 
     unsafe extern "C" fn mock_jac(_y: *const c_double, _ydot: *const c_double, _p: *const c_double, c_j: c_double, jac: *mut c_double) {
-        // d(res)/dy = c_j * d(ydot)/d(ydot) + d(y)/dy = c_j + 1.0
         *jac = c_j + 1.0;
     }
 
@@ -152,17 +153,12 @@ mod tests {
         let mut dt_prev = 0.0;
         let mut order = 1;
 
-        // Advance BDF2 history trajectory seamlessly.
-        // Passed None for the Matrix-Free JVP function (not used because bw=0).
         for _ in 0..10 {
             integrator.step(1, 0, &mut y, &mut ydot, &p, &id, 0.1, mock_res, mock_jac, None, 
                 &mut y_prev, &mut y_prev2, &mut dt_prev, &mut order).unwrap();
         }
         
         let analytical_expected = std::f64::consts::E.powf(-1.0);
-        
-        // A tolerance of 1e-2 safely accounts for the mathematical global 
-        // truncation error of BDF2 taking rapid target steps of 0.1.
         assert!((y[0] - analytical_expected).abs() < 1e-2); 
     }
 }

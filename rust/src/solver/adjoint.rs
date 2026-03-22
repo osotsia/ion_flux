@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
 use super::{NativeJacFn, NativeVjpFn};
-use super::linalg::{solve_dense_system, solve_banded_system};
+use super::linalg::{solve_dense_system, solve_banded_system, solve_gmres};
 
 #[pyfunction]
 pub fn discrete_adjoint_native<'py>(
@@ -12,7 +12,7 @@ pub fn discrete_adjoint_native<'py>(
     id_arr: Vec<f64>,
     p_list: Vec<f64>,
     dl_dy: Vec<Vec<f64>>,
-    bandwidth: usize, // Brought in from bindings
+    bandwidth: isize, // Upgraded to isize to allow -1 (Matrix-Free Adjoint)
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let n_steps = y_traj.len();
     let n = y_traj[0].len();
@@ -20,8 +20,8 @@ pub fn discrete_adjoint_native<'py>(
     let mut p_grad = vec![0.0; n_params];
 
     let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT library") };
-    let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
-    let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").unwrap() };
+    let jac_fn: Option<NativeJacFn> = unsafe { lib.get::<NativeJacFn>(b"evaluate_jacobian\0").map(|sym| *sym).ok() };
+    let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").expect("evaluate_vjp missing from binary.") };
 
     let mut lambda = vec![0.0; n];
     
@@ -36,31 +36,51 @@ pub fn discrete_adjoint_native<'py>(
             if id_arr[i] == 1.0 { ydot[i] = (y_traj[step][i] - y_traj[step - 1][i]) / dt; }
         }
         
-        let mut jac = vec![0.0; n * n];
-        unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), c_j, jac.as_mut_ptr()) };
-        
-        // Transpose Jacobian (J^T).
-        // Since SUNDIALS layout is Column-Major, transpsoing preserves the structural Bandwidth!
-        let mut jac_t = vec![0.0; n * n];
-        for row in 0..n {
-            for col in 0..n { jac_t[row * n + col] = jac[col * n + row]; }
-        }
-        
         let mut rhs = vec![0.0; n];
         for i in 0..n { rhs[i] = -dl_dy[step][i] + lambda[i] * id_arr[i] * c_j; }
         
-        // BUG 2 FIX: Bypass dense O(N^3) Gaussian inversion if we have banded structure
-        if bandwidth > 0 {
-            solve_banded_system(n, bandwidth, &mut jac_t, &mut rhs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        // BUG 5 FINALLY FIXED: Matrix-Free Adjoint Solve bypassing O(N^2) memory entirely
+        if bandwidth == -1 {
+            let y_ptr = y.as_ptr();
+            let ydot_ptr = ydot.as_ptr();
+            let p_ptr = p_list.as_ptr();
+            
+            // J^T v = (dF/dy)^T v + c_j * (dF/dydot)^T v 
+            let jvp_T = |v: &[f64], out: &mut [f64]| {
+                let mut dp_dummy = vec![0.0; n_params];
+                let mut dy_out = vec![0.0; n];
+                let mut dydot_out = vec![0.0; n];
+                unsafe { vjp_fn(y_ptr, ydot_ptr, p_ptr, v.as_ptr(), dp_dummy.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
+                for i in 0..n { out[i] = dy_out[i] + c_j * dydot_out[i]; }
+            };
+            
+            let precond = |v: &[f64], out: &mut [f64]| {
+                for i in 0..n { out[i] = v[i] / (c_j * id_arr[i] + 1.0); }
+            };
+            
+            solve_gmres(n, &mut rhs, jvp_T, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            
         } else {
-            solve_dense_system(n, &mut jac_t, &mut rhs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            let mut jac = vec![0.0; n * n];
+            let jac_fn_ptr = jac_fn.expect("Dense/Banded adjoints require evaluate_jacobian. Recompile model.");
+            unsafe { jac_fn_ptr(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), c_j, jac.as_mut_ptr()) };
+            
+            let mut jac_t = vec![0.0; n * n];
+            for row in 0..n {
+                for col in 0..n { jac_t[row * n + col] = jac[col * n + row]; }
+            }
+            
+            if bandwidth > 0 { solve_banded_system(n, bandwidth as usize, &mut jac_t, &mut rhs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
+            else { solve_dense_system(n, &mut jac_t, &mut rhs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; }
         }
+        
         lambda = rhs;
         
-        // Native Reverse-Mode Enzyme Vector-Jacobian Product
+        // Native Reverse-Mode Enzyme Vector-Jacobian Product applied globally
         let mut dp_out = vec![0.0; n_params];
         let mut dy_out = vec![0.0; n];
-        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr()) };
+        let mut dydot_out = vec![0.0; n];
+        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
         
         for p_idx in 0..n_params { p_grad[p_idx] += dp_out[p_idx]; }
     }

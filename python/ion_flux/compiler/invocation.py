@@ -41,8 +41,9 @@ class NativeRuntime:
         ]
         self.dll.evaluate_jacobian.restype = None
 
-        # Signature: void evaluate_vjp(y, ydot, p, lambda, dp_out, dy_out)
+        # Signature: void evaluate_vjp(y, ydot, p, lambda, dp_out, dy_out, dydot_out)
         self.dll.evaluate_vjp.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double),

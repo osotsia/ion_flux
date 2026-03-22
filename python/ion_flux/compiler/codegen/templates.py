@@ -97,18 +97,20 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
         #endif
         }}
 
-        void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* lambda_vec, double* dp_out, double* dy_out) {{
+        // Modified for Matrix-Free Adjoints: Outputs exact dydot_out sensitivities 
+        // to reconstruct J^T v = (dF/dy)^T v + c_j * (dF/dydot)^T v dynamically.
+        void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* lambda_vec, double* dp_out, double* dy_out, double* dydot_out) {{
             int N = {n_states};
             int N_P = {n_params};
             std::vector<double> res_dummy(N, 0.0);
-            std::vector<double> ydot_dummy(N, 0.0);
+            
             for(int i=0; i<N_P; ++i) dp_out[i] = 0.0;
-            for(int i=0; i<N; ++i) dy_out[i] = 0.0;
+            for(int i=0; i<N; ++i) {{ dy_out[i] = 0.0; dydot_out[i] = 0.0; }}
 
         #ifdef ENZYME_ACTIVE
             __enzyme_autodiff((void*)evaluate_residual, 
                 enzyme_dup, y, dy_out, 
-                enzyme_dup, ydot, ydot_dummy.data(), 
+                enzyme_dup, ydot, dydot_out, 
                 enzyme_dup, p, dp_out, 
                 enzyme_dup, res_dummy.data(), (double*)lambda_vec);
         #endif

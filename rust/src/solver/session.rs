@@ -93,7 +93,10 @@ impl SolverHandle {
                 let jvp_closure = |v: &[f64], out: &mut [f64]| {
                     unsafe { jvp(y_ptr, ydot_ptr, p_ptr, 0.0, v.as_ptr(), out.as_mut_ptr()) };
                 };
-                solve_gmres(self.n, &mut dy, jvp_closure).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+                let precond = |v: &[f64], out: &mut [f64]| {
+                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + 1.0); }
+                };
+                solve_gmres(self.n, &mut dy, jvp_closure, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             } else {
                 unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
                 if self.bw > 0 { solve_banded_system(self.n, self.bw as usize, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
@@ -151,7 +154,12 @@ impl SolverHandle {
                         for i in 0..self.n { if *id_ptr.add(i) == 1.0 { out[i] = v[i]; } }
                     }
                 };
-                solve_gmres(self.n, &mut rhs, jvp_closure).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+                
+                let precond = |v: &[f64], out: &mut [f64]| {
+                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + 1.0); }
+                };
+                
+                solve_gmres(self.n, &mut rhs, jvp_closure, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
                 dy.copy_from_slice(&rhs);
             } else {
                 unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
