@@ -279,23 +279,62 @@ class Condition:
     __slots__ = ["expression", "_compiled_logic"]
     def __init__(self, expression: Union[str, Node]):
         self.expression = expression
-        match = re.search(r"([A-Za-z0-9_]+)\s*(>=|<=|>|<|==|!=)\s*([0-9.-]+)", str(expression))
+        
+        if hasattr(expression, "type") and getattr(expression, "type") == "BinaryOp" or type(expression).__name__ == "BinaryOp":
+            op_map = {"ge": ">=", "le": "<=", "gt": ">", "lt": "<", "eq": "==", "ne": "!="}
+            mapped_op = op_map.get(expression.op)
+            left = expression.left_node
+            right = expression.right_node
+            
+            var_name = getattr(left, "name", str(left))
+            if type(right).__name__ == "Scalar":
+                target = right.value
+            elif type(right).__name__ in ("Parameter", "State"):
+                target = right.name
+            else:
+                target = float(str(right))
+                
+            self._compiled_logic = (var_name, mapped_op, target)
+            return
+
+        match = re.search(r"([A-Za-z0-9_]+)\s*(>=|<=|>|<|==|!=)\s*([A-Za-z0-9_.-]+)", str(expression))
         if match:
-            self._compiled_logic = (match.group(1), match.group(2), float(match.group(3)))
+            target_str = match.group(3)
+            try: 
+                target = float(target_str)
+            except ValueError: 
+                target = target_str
+            self._compiled_logic = (match.group(1), match.group(2), target)
         else:
             self._compiled_logic = None
 
     def evaluate(self, session: Any) -> bool:
         if not self._compiled_logic: return False
-        var, op, val = self._compiled_logic
-        try: current_val = session.get(var)
-        except KeyError: return False
-        if op == ">=": return current_val >= val
-        if op == "<=": return current_val <= val
-        if op == ">": return current_val > val
-        if op == "<": return current_val < val
-        if op == "==": return current_val == val
-        if op == "!=": return current_val != val
+        import numpy as np
+        var, op, val_target = self._compiled_logic
+        
+        try: 
+            current_val = session.get_array(var)
+        except KeyError: 
+            return False
+        
+        if isinstance(val_target, str):
+            val = session.parameters.get(val_target, None)
+            if val is None:
+                try: 
+                    val = session.get_array(val_target)
+                except KeyError: 
+                    return False
+        else:
+            val = val_target
+
+        # Evaluate safely across spatial arrays to prevent local failures being averaged out
+        if op == ">=": return bool(np.any(current_val >= val))
+        if op == "<=": return bool(np.any(current_val <= val))
+        if op == ">": return bool(np.any(current_val > val))
+        if op == "<": return bool(np.any(current_val < val))
+        if op == "==": return bool(np.any(current_val == val))
+        if op == "!=": return bool(np.any(current_val != val))
         return False
 
     def __repr__(self) -> str:

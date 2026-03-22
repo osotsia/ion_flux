@@ -24,21 +24,25 @@ except ImportError as e:
 
 class Variable:
     """Wrapper mapping flat FFI arrays back into intuitive multidimensional structures."""
-    __slots__ = ["data"]
-    def __init__(self, data: np.ndarray): self.data = data
+    __slots__ = ["data", "result"]
+    def __init__(self, data: np.ndarray, result: Optional[Any] = None): 
+        self.data = data
+        self.result = result
     def __repr__(self) -> str: return f"<Variable: shape={self.data.shape}>"
 
 
 class SimulationResult:
-    __slots__ = ["_data", "parameters", "status"]
-    def __init__(self, data: Dict[str, np.ndarray], parameters: Dict[str, float], status: str = "completed"):
+    __slots__ = ["_data", "parameters", "status", "engine", "trajectory"]
+    def __init__(self, data: Dict[str, np.ndarray], parameters: Dict[str, float], status: str = "completed", engine: Optional[Any] = None, trajectory: Optional[Dict] = None):
         self._data = data
         self.parameters = parameters
         self.status = status
+        self.engine = engine
+        self.trajectory = trajectory
 
     def __getitem__(self, key: str) -> Variable:
         if key not in self._data: raise KeyError(f"Variable '{key}' not found.")
-        return Variable(self._data[key])
+        return Variable(self._data[key], result=self)
         
     def to_dict(self, variables: Optional[List[str]] = None) -> Dict[str, Any]:
         keys = variables or self._data.keys()
@@ -46,13 +50,12 @@ class SimulationResult:
 
 
 class _ParamHandle:
-    """Provides a differentiable interface to physical parameters for Enzyme AD backward passes."""
-    __slots__ = ["name", "value", "grad"]
+    """Interface to physical parameters for default values tracking."""
+    __slots__ = ["name", "value"]
     def __init__(self, name: str, default: float):
         self.name = name
         self.value = default
-        self.grad = 0.0
-    def __repr__(self) -> str: return f"Parameter({self.name}={self.value}, grad={self.grad:.4e})"
+    def __repr__(self) -> str: return f"Parameter({self.name}={self.value})"
 
 
 class TelemetryReport:
@@ -61,20 +64,23 @@ class TelemetryReport:
     def __init__(self, n_states: int, bandwidth: int):
         self.model_len = n_states
         
-        # Compute analytical cache locality (assuming 64-byte cache lines = 8 f64s)
-        cache_line_doubles = 8.0
         if n_states <= 1:
             self.avg_jump_distance = 0.0
             self.l1_cache_hit_estimate = 1.0
             self.sparsity = 0.0
         else:
             self.avg_jump_distance = float(bandwidth) if bandwidth > 0 else float(n_states)
-            penalty = min(self.avg_jump_distance / cache_line_doubles, 1.0)
-            self.l1_cache_hit_estimate = max(0.01, 1.0 - penalty)
-            
             total_elements = n_states ** 2
             active_elements = min(total_elements, n_states * (2 * bandwidth + 1)) if bandwidth > 0 else total_elements
             self.sparsity = 1.0 - (active_elements / total_elements)
+            
+            # Realistic L1 Cache Heuristic (Assuming 32KB = ~4096 double-precision floats)
+            if total_elements <= 4096:
+                self.l1_cache_hit_estimate = 0.99
+            else:
+                cache_line_doubles = 8.0
+                penalty = min(self.avg_jump_distance / cache_line_doubles, 1.0)
+                self.l1_cache_hit_estimate = max(0.01, 1.0 - penalty)
 
     def __repr__(self) -> str:
         return (f"TelemetryReport(states={self.model_len}, "
@@ -284,6 +290,10 @@ class Engine:
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
               t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1) -> SimulationResult:
+        
+        if threads > 1 and "omp" in self.target:
+            os.environ["OMP_NUM_THREADS"] = str(threads)
+            
         if self.mock_execution or not self.layout:
             return self._execute_mock(parameters, protocol)
 
@@ -346,10 +356,12 @@ class Engine:
                         data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
 
             for k in data_hist: data_hist[k] = np.array(data_hist[k])
-            res = SimulationResult(data_hist, session.parameters)
-            if requires_grad: 
-                self._current_trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), "requires_grad": requires_grad}
-            return res
+            
+            trajectory = None
+            if requires_grad:
+                trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), "requires_grad": requires_grad}
+            
+            return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
             
         if not RUST_FFI_AVAILABLE: raise RuntimeError(f"Native solver missing. FFI Error: {FFI_IMPORT_ERROR}")
             
@@ -364,10 +376,10 @@ class Engine:
             if size == 1: data[state_name] = y_res[:, offset]
             else: data[state_name] = y_res[:, offset:offset+size]
             
-        res = SimulationResult(data, parameters or {}, status="completed")
+        trajectory = None
         if requires_grad: 
-            self._current_trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res, "requires_grad": requires_grad}
-        return res
+            trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res, "requires_grad": requires_grad}
+        return SimulationResult(data, parameters or {}, status="completed", engine=self, trajectory=trajectory)
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 
                     protocol: Any = None, max_workers: int = 1) -> List[SimulationResult]:
@@ -386,7 +398,7 @@ class Engine:
             for state_name, (offset, size) in self.layout.state_offsets.items():
                 if size == 1: data[state_name] = y_res[:, offset]
                 else: data[state_name] = y_res[:, offset:offset+size]
-            results.append(SimulationResult(data, p, status="completed"))
+            results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=None))
             
         return results
 
@@ -404,13 +416,11 @@ class Engine:
         time_len = len(protocol.time) if hasattr(protocol, "time") else 100
         data = {"Time [s]": np.arange(time_len, dtype=np.float64)}
         
-        # Dynamically size fallback matrices based on the JIT AST layout to fix KeyErrors
         if hasattr(self, "layout") and self.layout:
             for state_name, (offset, size) in self.layout.state_offsets.items():
                 data[state_name] = np.zeros(time_len) if size == 1 else np.zeros((time_len, size))
                     
         data["Voltage [V]"] = np.array([4.2] * (time_len - 1) + [2.5])
         
-        res = SimulationResult(data, params, status="completed")
-        self._current_trajectory = {"Time [s]": data["Time [s]"], "_y_raw": np.zeros((time_len, getattr(self.layout, 'n_states', 1)))}
-        return res
+        trajectory = {"Time [s]": data["Time [s]"], "_y_raw": np.zeros((time_len, getattr(self.layout, 'n_states', 1)))}
+        return SimulationResult(data, params, status="completed", engine=self, trajectory=trajectory)

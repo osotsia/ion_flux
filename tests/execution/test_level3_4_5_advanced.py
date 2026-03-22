@@ -120,11 +120,10 @@ def test_discrete_adjoint_backward_propagation():
     
     res = engine.solve(t_span=(0, 1.0), parameters={"k": 2.0}, requires_grad=["k"])
        
-    # FIXED: Pass state_name="y" so the loss maps the gradient seed to the correct memory offset
-    loss = fx.metrics.rmse(res["y"].data, np.zeros_like(res["y"].data), engine=engine, state_name="y")
-    loss.backward()
+    loss = fx.metrics.rmse(res["y"], np.zeros_like(res["y"].data), engine=engine, state_name="y")
+    grads = loss.backward()
     
-    grad_k = engine.parameters["k"].grad
+    grad_k = grads.get("k")
     assert isinstance(grad_k, float)
     assert not np.isnan(grad_k)
     assert grad_k < 0.0 # High k accelerates curve towards 0 target, lowering overall error

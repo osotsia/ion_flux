@@ -145,6 +145,10 @@ class NativeCompiler:
         
         if "#pragma omp" in cpp_source:
             cmd.append("-fopenmp")
+            if sys.platform == "darwin":
+                cmd.extend(["-lomp", "-Wl,-rpath,/opt/homebrew/lib", "-Wl,-rpath,/usr/local/lib"])
+            elif sys.platform == "linux":
+                cmd.append("-lgomp")
         
         if self.enzyme_plugin:
             cmd.insert(1, f"-fplugin={self.enzyme_plugin}")

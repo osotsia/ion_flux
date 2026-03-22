@@ -59,11 +59,12 @@ def test_differentiable_graph_metrics():
     engine = Engine(model=ExponentialDecay(), target="cpu", mock_execution=True)
     res = engine.solve(requires_grad=["k"])
     
-    loss = fx.metrics.rmse(res["Voltage [V]"].data, np.array([4.0]*100), engine=engine)
-    loss.backward()
+    loss = fx.metrics.rmse(res["Voltage [V]"], np.array([4.0]*100), engine=engine)
+    grads = loss.backward()
     
-    # Validate the AD hook properly propagated to the engine's ParamHandle
-    assert engine.parameters["k"].grad != 0.0
+    # Validate the AD hook properly propagated through the isolated dictionary mapping
+    assert "k" in grads
+    assert grads["k"] != 0.0
 
 def test_stateless_binary_deployment(tmp_path):
     import os

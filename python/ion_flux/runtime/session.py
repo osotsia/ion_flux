@@ -39,14 +39,19 @@ class Session:
             offset = self.engine.layout.get_param_offset(param_name)
             self.handle.set_parameter(offset, value)
 
-    def get(self, variable_name: str) -> float:
+    def get_array(self, variable_name: str) -> np.ndarray:
+        """Returns the full underlying spatial array for localized condition triggers."""
         y = self.handle.get_state() if self.handle else self._mock_y
         if variable_name in self.engine.layout.state_offsets:
             offset, size = self.engine.layout.state_offsets[variable_name]
-            return float(np.mean(y[offset:offset+size]))
+            return y[offset:offset+size]
         if variable_name == "Voltage" and self.handle is None:
-            return max(2.5, 4.2 - (self.time * 0.0001))
+            return np.array([max(2.5, 4.2 - (self.time * 0.0001))])
         raise KeyError(f"Variable '{variable_name}' not found in the current state.")
+
+    def get(self, variable_name: str) -> float:
+        """Provides backwards-compatible scalar averaging for telemetry and legacy logging."""
+        return float(np.mean(self.get_array(variable_name)))
 
     def step(self, dt: float, inputs: Optional[Dict[str, float]] = None) -> None:
         if inputs:
