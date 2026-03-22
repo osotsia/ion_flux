@@ -21,13 +21,11 @@ class MemoryLayout:
             self.n_params += 1
             
         self.p_length = self.n_params
-        
-        # Bug 7 Fix: Isolate unstructured mesh connectivity vectors into a dedicated 'm' array.
-        # This prevents Enzyme from calculating exact AD derivatives across millions of static mesh weights.
-        self.m_length = 0
         self.mesh_offsets = {}
         self.mesh_cache = {}
         
+        # Sequentially allocate parameter vector space for unstructured graph buffers
+        # and pre-cache it so stateless Engines can instantly re-pack it
         for s in sorted_states:
             if s.domain and getattr(s.domain, "csr_data", None):
                 d = s.domain
@@ -36,17 +34,17 @@ class MemoryLayout:
                     offsets = {}
                     
                     for key in ["weights", "row_ptr", "col_ind"]:
-                        offsets[key] = self.m_length
+                        offsets[key] = self.p_length
                         for v in csr[key]:
-                            self.mesh_cache[self.m_length] = float(v)
-                            self.m_length += 1
+                            self.mesh_cache[self.p_length] = float(v)
+                            self.p_length += 1
                             
                     offsets["surfaces"] = {}
                     for tag, mask in csr.get("surface_masks", {}).items():
-                        offsets["surfaces"][tag] = self.m_length
+                        offsets["surfaces"][tag] = self.p_length
                         for v in mask:
-                            self.mesh_cache[self.m_length] = float(v)
-                            self.m_length += 1
+                            self.mesh_cache[self.p_length] = float(v)
+                            self.p_length += 1
                             
                     self.mesh_offsets[d.name] = offsets
 
@@ -58,9 +56,9 @@ class MemoryLayout:
         obj.n_states = data["n_states"]
         obj.n_params = data["n_params"]
         obj.p_length = data.get("p_length", obj.n_params)
-        obj.m_length = data.get("m_length", 0)
         obj.mesh_offsets = data.get("mesh_offsets", {})
         
+        # Keys in JSON convert to string, explicitly cast offsets back to int
         raw_cache = data.get("mesh_cache", {})
         obj.mesh_cache = {int(k): float(v) for k, v in raw_cache.items()}
         return obj
@@ -71,8 +69,7 @@ class MemoryLayout:
     def get_param_offset(self, name: str) -> int:
         return self.param_offsets[name][0]
 
-    def pack_mesh_data(self) -> List[float]:
-        m_list = [0.0] * max(1, self.m_length)
+    def pack_mesh_data(self, p_list: List[float]):
+        """Injects static unstructured mesh topological vectors directly into parameters."""
         for k, v in self.mesh_cache.items():
-            m_list[k] = v
-        return m_list
+            p_list[k] = v

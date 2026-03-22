@@ -19,9 +19,7 @@ impl BdfIntegrator {
         y: &mut [f64],
         ydot: &mut [f64],
         p: &[f64],
-        m: &[f64],
         id: &[f64],
-        precond_diag: &[f64],
         target_dt: f64,
         res_fn: NativeResFn,
         jac_fn: NativeJacFn,
@@ -71,7 +69,7 @@ impl BdfIntegrator {
                     ydot[i] = if id[i] == 1.0 { c_j * y[i] - c_1 * cur_y_prev[i] + c_2 * cur_y_prev2[i] } else { 0.0 }; 
                 }
                 
-                unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), res.as_mut_ptr()) };
+                unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), res.as_mut_ptr()) };
 
                 let mut max_res = 0.0;
                 for i in 0..n {
@@ -82,24 +80,23 @@ impl BdfIntegrator {
                 if max_res < self.rel_tol { converged = true; break; }
 
                 if bw == -1 {
-                    let jvp = jvp_fn.expect("evaluate_jvp missing for Matrix-Free solver.");
+                    let jvp = jvp_fn.expect("evaluate_jvp missing for Matrix-Free solver. Clear cache and recompile model.");
                     let y_ptr = y.as_ptr();
                     let ydot_ptr = ydot.as_ptr();
                     let p_ptr = p.as_ptr();
-                    let m_ptr = m.as_ptr();
                     
                     let jvp_closure = |v: &[f64], out: &mut [f64]| {
-                        unsafe { jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
+                        unsafe { jvp(y_ptr, ydot_ptr, p_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
                     };
                     
-                    // Bug 6 Fix: Dynamically applies exact unstructured Laplacian topological mapping to stabilize Krylov clustering.
+                    // Lumped Mass Matrix Preconditioner stabilizes highly stiff GMRES convergences automatically.
                     let precond = |v: &[f64], out: &mut [f64]| {
-                        for i in 0..n { out[i] = v[i] / (c_j * id[i] + precond_diag[i]); }
+                        for i in 0..n { out[i] = v[i] / (c_j * id[i] + 1.0); }
                     };
                     
                     solve_gmres(n, &mut dy, jvp_closure, precond)?;
                 } else {
-                    unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, jac.as_mut_ptr()) };
+                    unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), c_j, jac.as_mut_ptr()) };
                     if bw > 0 { solve_banded_system(n, bw as usize, &mut jac, &mut dy)?; } 
                     else { solve_dense_system(n, &mut jac, &mut dy)?; }
                 }
@@ -135,13 +132,11 @@ mod tests {
     use super::*;
     use std::os::raw::c_double;
 
-    // Updated to accept the new `m` mesh array pointer
-    unsafe extern "C" fn mock_res(y: *const c_double, ydot: *const c_double, _p: *const c_double, _m: *const c_double, res: *mut c_double) {
+    unsafe extern "C" fn mock_res(y: *const c_double, ydot: *const c_double, _p: *const c_double, res: *mut c_double) {
         *res = *ydot + *y;
     }
 
-    // Updated to accept the new `m` mesh array pointer
-    unsafe extern "C" fn mock_jac(_y: *const c_double, _ydot: *const c_double, _p: *const c_double, _m: *const c_double, c_j: c_double, jac: *mut c_double) {
+    unsafe extern "C" fn mock_jac(_y: *const c_double, _ydot: *const c_double, _p: *const c_double, c_j: c_double, jac: *mut c_double) {
         *jac = c_j + 1.0;
     }
 
@@ -152,8 +147,6 @@ mod tests {
         let mut ydot = vec![0.0];
         let id = vec![1.0];
         let p = vec![];
-        let m = vec![]; // Added dummy mesh array
-        let precond_diag = vec![1.0]; // Added dummy precond diagonal
 
         let mut y_prev = vec![1.0];
         let mut y_prev2 = vec![1.0];
@@ -161,8 +154,7 @@ mod tests {
         let mut order = 1;
 
         for _ in 0..10 {
-            // Added &m and &precond_diag to the step call
-            integrator.step(1, 0, &mut y, &mut ydot, &p, &m, &id, &precond_diag, 0.1, mock_res, mock_jac, None, 
+            integrator.step(1, 0, &mut y, &mut ydot, &p, &id, 0.1, mock_res, mock_jac, None, 
                 &mut y_prev, &mut y_prev2, &mut dt_prev, &mut order).unwrap();
         }
         
