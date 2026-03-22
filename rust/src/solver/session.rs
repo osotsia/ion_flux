@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
-use super::{NativeResFn, NativeJacFn, NativeVjpFn};
+use super::{NativeResFn, NativeJacFn};
 use super::integrator::Bdf1Integrator;
 use super::linalg::{solve_dense_system, solve_banded_system};
 
