@@ -110,6 +110,19 @@ def _emit_dirichlet_override(lines: List[str], eq: Dict[str, Any], layout: Any, 
     bc_domain = eq["lhs"].get("domain")
     state_obj = state_map[state_name]
     
+    # Enable dynamic 3D surface tag targeting via the p-mask
+    if state_obj.domain and getattr(state_obj.domain, "coord_sys", "") == "unstructured":
+        if state_obj.domain.name in layout.mesh_offsets and side in layout.mesh_offsets[state_obj.domain.name]["surfaces"]:
+            off_surf = layout.mesh_offsets[state_obj.domain.name]["surfaces"][side]
+            lines.append(f"    for (int i = 0; i < {size}; ++i) {{")
+            lines.append(f"        if (p[{off_surf} + i] > 0.5) {{")
+            lhs_cpp = translator.translate(eq["lhs"]["child"], "i")
+            rhs_cpp = translator.translate(eq["rhs"], "i")
+            lines.append(f"            res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});")
+            lines.append(f"        }}\n    }}")
+            return
+
+    # Fallback to standard 1D/2D boundaries
     if hasattr(state_obj.domain, "domains") and len(state_obj.domain.domains) == 2 and bc_domain == state_obj.domain.domains[1].name:
         d_mac, d_mic = state_obj.domain.domains[0], state_obj.domain.domains[1]
         idx_str = f"i_mac * {d_mic.resolution}" if side == "left" else f"i_mac * {d_mic.resolution} + {d_mic.resolution - 1}"

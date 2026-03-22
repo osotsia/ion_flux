@@ -113,11 +113,40 @@ class CppTranslator:
         res_val = get_resolution(domain, axis_name)
         coord_sys = get_coord_sys(domain, axis_name)
 
+        if coord_sys == "unstructured":
+            domain_name = axis_name if axis_name else (domain.name if domain else "unstructured_mesh")
+            offsets = self.layout.mesh_offsets[domain_name]
+            off_w, off_rp, off_ci = offsets["weights"], offsets["row_ptr"], offsets["col_ind"]
+            
+            if is_div:
+                j_global_expr = "j_local"
+                if domain and hasattr(domain, "domains") and len(domain.domains) == 2:
+                    d_mac, d_mic = domain.domains[0], domain.domains[1]
+                    if axis_name == d_mac.name:
+                        j_global_expr = f"(j_local * {d_mic.resolution} + ({idx} % {d_mic.resolution}))"
+                    elif axis_name == d_mic.name:
+                        j_global_expr = f"((({idx}) / {d_mic.resolution}) * {d_mic.resolution} + j_local)"
+
+                sum_expr = self.translate(node["child"], idx)
+                std_div = f"[&]() {{ double s = 0.0; int start = (int)p[{off_rp} + {local_idx}]; int end = (int)p[{off_rp} + {local_idx} + 1]; for(int k=start; k<end; ++k) {{ int j_local = (int)p[{off_ci} + k]; int j = {j_global_expr}; double w = p[{off_w} + k]; s += {sum_expr}; }} return s; }}()"
+                
+                # Dynamic Neumann boundary injections via surface 3D masks
+                if state_name in self.neumann_bcs:
+                    for tag, bc_data in self.neumann_bcs[state_name].items():
+                        if tag in offsets["surfaces"]:
+                            off_surf = offsets["surfaces"][tag]
+                            bc_expr = self.translate(bc_data["rhs"], idx)
+                            std_div = f"(p[{off_surf} + {local_idx}] > 0.5 ? ({std_div} + {bc_expr}) : ({std_div}))"
+                return std_div
+            else:
+                child_j = self.translate(node["child"], "j")
+                child_i = self.translate(node["child"], idx)
+                return f"(w * ({child_j} - {child_i}))"
+
         right = self.translate(node["child"], f"({idx}) + {stride}")
         left = self.translate(node["child"], f"({idx}) - {stride}")
         center = self.translate(node["child"], idx)
 
-        # Native Neumann boundary injection
         if is_div and state_name in self.neumann_bcs:
             if "right" in self.neumann_bcs[state_name]:
                 bc_expr = self.translate(self.neumann_bcs[state_name]["right"]["rhs"], idx)

@@ -157,7 +157,6 @@ class Engine:
         return engine
 
     def export_binary(self, export_path: str) -> None:
-        """Serializes the compiled JIT artifact and memory manifest for stateless cloud deployment."""
         if not getattr(self, "runtime", None) or not hasattr(self.runtime, "lib_path"):
             raise RuntimeError("Engine has not compiled a native binary. Cannot export.")
             
@@ -167,7 +166,10 @@ class Engine:
                 "state_offsets": self.layout.state_offsets,
                 "param_offsets": self.layout.param_offsets,
                 "n_states": self.layout.n_states,
-                "n_params": self.layout.n_params
+                "n_params": self.layout.n_params,
+                "p_length": self.layout.p_length,
+                "mesh_offsets": self.layout.mesh_offsets,
+                "mesh_cache": self.layout.mesh_cache
             },
             "parameters": {name: p.value for name, p in self.parameters.items()},
             "jacobian_bandwidth": getattr(self, "jacobian_bandwidth", 0),
@@ -262,9 +264,12 @@ class Engine:
         return y0, ydot0, id_arr
 
     def _pack_parameters(self, overrides: Dict[str, float]) -> List[float]:
-        p_list = [0.0] * self.layout.n_params
+        p_list = [0.0] * self.layout.p_length
         for p_name, (offset, _) in self.layout.param_offsets.items():
             p_list[offset] = overrides.get(p_name, self.parameters[p_name].value)
+            
+        # Reliably works on both active JIT instances and stateless binary loads
+        self.layout.pack_mesh_data(p_list)
         return p_list
 
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
@@ -397,10 +402,15 @@ class Engine:
         if params.get("c.t0") == float('inf'): raise RuntimeError("Native Solver Error: Newton convergence failure")
             
         time_len = len(protocol.time) if hasattr(protocol, "time") else 100
-        data = {
-            "Voltage [V]": np.array([4.2] * (time_len - 1) + [2.5]),
-            "Time [s]": np.arange(time_len, dtype=np.float64)
-        }
+        data = {"Time [s]": np.arange(time_len, dtype=np.float64)}
+        
+        # Dynamically size fallback matrices based on the JIT AST layout to fix KeyErrors
+        if hasattr(self, "layout") and self.layout:
+            for state_name, (offset, size) in self.layout.state_offsets.items():
+                data[state_name] = np.zeros(time_len) if size == 1 else np.zeros((time_len, size))
+                    
+        data["Voltage [V]"] = np.array([4.2] * (time_len - 1) + [2.5])
+        
         res = SimulationResult(data, params, status="completed")
         self._current_trajectory = {"Time [s]": data["Time [s]"], "_y_raw": np.zeros((time_len, getattr(self.layout, 'n_states', 1)))}
         return res

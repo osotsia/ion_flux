@@ -43,6 +43,10 @@ class Node:
     @property
     def t0(self) -> "InitialCondition": return InitialCondition(self)
 
+    def boundary(self, tag: str) -> "Boundary": 
+        """Declares a boundary on an arbitrary 3D surface tag."""
+        return Boundary(self, tag)
+
     def to_dict(self) -> Dict[str, Any]: 
         raise NotImplementedError("Subclasses must implement to_dict()")
 
@@ -126,17 +130,13 @@ class UnaryOp(Node):
         self.kwargs = kwargs
     def to_dict(self) -> Dict[str, Any]: 
         d = {"type": "UnaryOp", "op": self.op, "child": self.child.to_dict()}
-        # Only serialize explicit keyword arguments to avoid stringifying `None`
         for k, v in self.kwargs.items():
-            if v is not None:
-                d[k] = v.name if hasattr(v, "name") else str(v)
+            if v is not None: d[k] = v.name if hasattr(v, "name") else str(v)
         return d
-    def left(self, domain: Optional["Domain"] = None) -> "Boundary":
-        return Boundary(self, "left", domain=domain)
-    def right(self, domain: Optional["Domain"] = None) -> "Boundary":
-        return Boundary(self, "right", domain=domain)
-    def __repr__(self) -> str:
-        return f"{self.op}({self.child})"
+    def left(self, domain: Optional["Domain"] = None) -> "Boundary": return Boundary(self, "left", domain=domain)
+    def right(self, domain: Optional["Domain"] = None) -> "Boundary": return Boundary(self, "right", domain=domain)
+    def boundary(self, tag: str, domain: Optional["Domain"] = None) -> "Boundary": return Boundary(self, tag, domain=domain)
+    def __repr__(self) -> str: return f"{self.op}({self.child})"
 
 
 class Boundary(Node):
@@ -176,13 +176,60 @@ class DomainBoundary(Node):
 
 
 class Domain:
-    """Topology-agnostic spatial domain. Overloads multiplication for pseudo-dimensions."""
-    __slots__ = ["bounds", "resolution", "coord_sys", "name"]
-    def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian", name: str = ""):
+    __slots__ = ["bounds", "resolution", "coord_sys", "name", "csr_data"]
+    def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian", name: str = "", csr_data: Optional[Dict] = None):
         self.bounds = bounds
         self.resolution = resolution
         self.coord_sys = coord_sys
         self.name = name
+        self.csr_data = csr_data
+
+    @classmethod
+    def from_mesh(cls, mesh_data: Union[str, dict], name: str = "unstructured_mesh", surfaces: Optional[Dict[str, List[int]]] = None) -> "Domain":
+        import numpy as np
+        if isinstance(mesh_data, str):
+            import json
+            with open(mesh_data, "r") as f: mesh_data = json.load(f)
+                
+        nodes, elements = np.array(mesh_data["nodes"]), np.array(mesh_data["elements"])
+        resolution = len(nodes)
+        
+        from collections import defaultdict
+        adjacency = defaultdict(float)
+        for el in elements:
+            for i in range(len(el)):
+                for j in range(i+1, len(el)):
+                    n1, n2 = el[i], el[j]
+                    dist = np.linalg.norm(nodes[n1] - nodes[n2])
+                    weight = 1.0 / max(dist, 1e-12)
+                    adjacency[(n1, n2)] += weight
+                    adjacency[(n2, n1)] += weight
+                    
+        row_ptr = [0] * (resolution + 1)
+        col_ind, weights = [], []
+        for i in range(resolution):
+            row_ptr[i] = len(col_ind)
+            for j in range(resolution):
+                if (i, j) in adjacency:
+                    col_ind.append(j)
+                    weights.append(adjacency[(i, j)])
+        row_ptr[resolution] = len(col_ind)
+        
+        surface_masks = {}
+        if surfaces:
+            for tag, indices in surfaces.items():
+                mask = [0.0] * resolution
+                for idx in indices: mask[idx] = 1.0
+                surface_masks[tag] = mask
+                
+        # Pack connectivity map into flat floats to bypass rigid Rust C-ABI homogenization
+        csr_data = {
+            "row_ptr": [float(x) for x in row_ptr],
+            "col_ind": [float(x) for x in col_ind],
+            "weights": weights,
+            "surface_masks": surface_masks
+        }
+        return cls(bounds=(0, 1), resolution=resolution, coord_sys="unstructured", name=name, csr_data=csr_data)
         
     @property
     def coords(self) -> Node:
