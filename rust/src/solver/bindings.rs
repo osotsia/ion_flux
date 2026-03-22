@@ -11,10 +11,12 @@ pub fn solve_ida_native<'py>(
     ydot0_py: Vec<f64>,
     id_py: Vec<f64>,
     p_list: Vec<f64>,
+    m_list: Vec<f64>,
+    precond_diag: Vec<f64>,
     t_eval: Vec<f64>,
-    bandwidth: isize, // Supports -1 for Matrix-Free Krylov JFNK Iterative Solver
+    bandwidth: isize, 
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py, ydot0_py, id_py, p_list)?;
+    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py, ydot0_py, id_py, p_list, m_list, precond_diag)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     
     for i in 0..handle.n { out_traj[i] = handle.y[i]; }
@@ -34,11 +36,16 @@ pub fn solve_batch_native<'py>(
     ydot0: Vec<f64>,
     id: Vec<f64>,
     p_batch: Vec<Vec<f64>>,
+    m_list: Vec<f64>,
+    precond_diag: Vec<f64>,
     t_eval: Vec<f64>,
     bandwidth: isize,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
+    // Bug 5 Fix: Defends strictly against exponentially catastrophic N*N thread spawning
+    std::env::set_var("OMP_NUM_THREADS", "1");
+
     let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
-        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone())
+        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), m_list.clone(), precond_diag.clone())
             .map_err(|e| e.to_string())?;
             
         let mut out_traj = vec![0.0; t_eval.len() * handle.n];

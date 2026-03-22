@@ -19,14 +19,15 @@ class Session:
         self.time = 0.0
         self._history = {"Time [s]": [0.0]}
         
-        y0, ydot0, id_arr = engine._extract_metadata()
+        y0, ydot0, id_arr, precond_diag = engine._extract_metadata()
         p_list = engine._pack_parameters(self.parameters)
+        m_list = engine.layout.pack_mesh_data()
         self.id_arr = np.array(id_arr)
         
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
             self.handle = SolverHandle(
                 engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                y0, ydot0, id_arr, p_list
+                y0, ydot0, id_arr, p_list, m_list, precond_diag
             )
         else:
             self.handle = None
@@ -77,8 +78,7 @@ class Session:
             self._mock_y = self._ckpt[1].copy()
 
     def triggered(self, condition: Any) -> bool:
-        if condition is None or isinstance(condition, (int, float)):
-            return False
+        if condition is None or isinstance(condition, (int, float)): return False
         if isinstance(condition, str):
             from ion_flux.dsl.core import Condition
             condition = Condition(condition)
@@ -95,11 +95,11 @@ class Session:
         else:
             self.time += 1000.0
 
-    def solve_eis(self, frequencies: np.ndarray, input_var: str, output_var: str) -> np.ndarray:
-        """Extracts the analytical Jacobian directly from Enzyme and algebraically solves the transfer function."""
+    def solve_eis(self, frequencies: np.ndarray, input_var: str, output_var: str) -> Any:
         if not self.handle:
             w = np.asarray(frequencies) * 2 * np.pi
-            return 0.05 + (0.1 / (1 + 1j * w * 0.1)) + (0.01 / np.sqrt(1j * w))
+            Z = 0.05 + (0.1 / (1 + 1j * w * 0.1)) + (0.01 / np.sqrt(1j * w))
+            return Z
             
         N = self.engine.layout.n_states
         J_steady = self.handle.get_jacobian(0.0)
@@ -131,4 +131,18 @@ class Session:
             except scipy.linalg.LinAlgError:
                 Z[i] = np.nan
                 
-        return Z
+        # Bug 4 Fix: Return a compliant SimulationResult for downstream metrics.py hooks
+        data = {"Frequencies [Hz]": w_arr / (2 * np.pi), "Z_real": np.real(Z), "Z_imag": np.imag(Z)}
+        trajectory = {
+            "requires_grad": list(self.parameters.keys()),
+            "_is_eis": True, 
+            "Z": Z, 
+            "w_arr": w_arr, 
+            "J_steady": J_steady, 
+            "B": B, 
+            "C": C,
+            "input_var": input_var
+        }
+        
+        from ion_flux.runtime.engine import SimulationResult
+        return SimulationResult(data, self.parameters, engine=self.engine, trajectory=trajectory)
