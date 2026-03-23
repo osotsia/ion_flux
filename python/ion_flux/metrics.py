@@ -39,7 +39,6 @@ class Loss:
             eis_target_key = self._trajectory.get("_eis_target_key", "Z_real")
             eps = 1e-5
             
-            # Start a clean base session to recover analytical steady-state properties
             s_base = self._engine.start_session(parameters=self._parameters)
             s_base.reach_steady_state()
             
@@ -50,7 +49,6 @@ class Loss:
                 y_ss = s_base._mock_y
                 J_ss = np.eye(len(y_ss))
                 
-            # Pre-factorize the Jacobian to process all exact steady state linear shifts in O(N^2)
             try:
                 lu, piv = scipy.linalg.lu_factor(J_ss)
                 def solve_J(b): return scipy.linalg.lu_solve((lu, piv), b)
@@ -61,15 +59,18 @@ class Loss:
                 if p_name in self._engine.parameters:
                     p_val = self._parameters.get(p_name, self._engine.parameters[p_name].value)
                     
-                    # 1. Compute exact dF/dp using a local finite difference mapping of the residual C++
-                    p_pert = self._parameters.copy()
-                    p_pert[p_name] = p_val + eps
-                    res_base = np.array(self._engine.evaluate_residual(y_ss.tolist(), np.zeros_like(y_ss).tolist(), parameters=self._parameters))
-                    res_pert = np.array(self._engine.evaluate_residual(y_ss.tolist(), np.zeros_like(y_ss).tolist(), parameters=p_pert))
-                    dF_dp = (res_pert - res_base) / eps
+                    # 1. Compute exact dF/dp using Native Enzyme Reverse-Mode VJP
+                    p_list = self._engine._pack_parameters(self._parameters)
+                    p_offset = self._engine.layout.get_param_offset(p_name)
+                    dF_dp = np.zeros(len(y_ss))
+                    lam = [0.0] * len(y_ss)
+                    for i in range(len(y_ss)):
+                        lam[i] = 1.0
+                        dp_out, _, _ = self._engine.runtime.evaluate_vjp(y_ss.tolist(), np.zeros_like(y_ss).tolist(), p_list, lam)
+                        dF_dp[i] = dp_out[p_offset]
+                        lam[i] = 0.0
                     
                     # 2. Extract Exact State Shift via Implicit Function Theorem (dy_ss/dp = -J^{-1} dF/dp)
-                    # This eliminates the Newton solver loop entirely, guaranteeing noise-free analytical gradients.
                     dy_dp = solve_J(-dF_dp)
                     
                     # 3. Evaluate EIS at the analytically shifted Forward State
@@ -109,22 +110,29 @@ class Loss:
                     self.grads[p_name] = float(np.random.uniform(-0.1, 0.1))
             return self.grads
             
-        t_eval = self._trajectory["Time [s]"]
-        y_traj = self._trajectory["_y_raw"]
+        t_eval = self._trajectory["_micro_t"]
+        y_traj = self._trajectory["_micro_y"]
+        ydot_traj = self._trajectory["_micro_ydot"]
         
-        # Extract the dynamic parameter trajectory to perfectly sync Sequence protocol mutations
         p_list_default = self._engine._pack_parameters(self._parameters)
         p_traj = self._trajectory.get("_p_traj", [p_list_default] * len(y_traj))
         
-        dl_dy = self._dl_dy_mapped if self._dl_dy_mapped is not None else np.zeros_like(y_traj)
+        macro_t = self._trajectory["Time [s]"]
+        dl_dy_macro = self._dl_dy_mapped if self._dl_dy_mapped is not None else np.zeros_like(self._trajectory["_y_raw"])
+        
+        dl_dy = np.zeros_like(y_traj)
+        macro_idx = 0
+        for i, t in enumerate(t_eval):
+            if macro_idx < len(macro_t) and abs(t - macro_t[macro_idx]) < 1e-8:
+                dl_dy[i] = dl_dy_macro[macro_idx]
+                macro_idx += 1
         
         y0, ydot0, id_arr, spatial_diag = self._engine._extract_metadata()
         
-        # Pack parameters strictly using the thread-local state captured during the forward solve
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
         p_grad = discrete_adjoint_native(
-            self._engine.runtime.lib_path,
-            y_traj.tolist(), t_eval.tolist(), id_arr, p_traj, dl_dy.tolist(), bw
+            self._engine.runtime.lib_path, y_traj.tolist(), ydot_traj.tolist(), 
+            t_eval.tolist(), id_arr, p_traj, dl_dy.tolist(), bw
         )
         
         for p_name in req_grad:

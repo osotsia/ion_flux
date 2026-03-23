@@ -56,7 +56,16 @@ class Session:
         if inputs:
             for k, v in inputs.items(): self.set_parameter(k, v)
         if self.handle:
-            self.handle.step(dt)
+            if getattr(self, "record_history", False):
+                mt, my, mydot = self.handle.step_history(dt)
+                if len(mt) > 0:
+                    self.micro_t.extend(mt.tolist())
+                    self.micro_y.extend(my.tolist())
+                    self.micro_ydot.extend(mydot.tolist())
+                    p_list = self.engine._pack_parameters(self.parameters)
+                    self.micro_p.extend([p_list] * len(mt))
+            else:
+                self.handle.step(dt)
         self.time += dt
         self._history["Time [s]"].append(self.time)
 
@@ -105,17 +114,21 @@ class Session:
             N = self.engine.layout.n_states
             J_steady = self.handle.get_jacobian(0.0)
             
-            p_val = self.parameters.get(input_var, 0.0)
-            eps = 1e-6
             y = self.handle.get_state()
             ydot = np.zeros_like(y)
+            p_list = self.engine._pack_parameters(self.parameters)
+            offset = self.engine.layout.get_param_offset(input_var)
             
-            res_base = np.array(self.engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters=self.parameters))
-            p_pert = self.parameters.copy()
-            p_pert[input_var] = p_val + eps
-            res_pert = np.array(self.engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters=p_pert))
-            B = -(res_pert - res_base) / eps
+            # Exact analytical evaluation of dF/dp using Reverse-Mode Enzyme VJP
+            dF_dp_input = np.zeros(N)
+            lam = [0.0] * N
+            for i in range(N):
+                lam[i] = 1.0
+                dp_out, _, _ = self.engine.runtime.evaluate_vjp(y.tolist(), ydot.tolist(), p_list, lam)
+                dF_dp_input[i] = dp_out[offset]
+                lam[i] = 0.0
             
+            B = -dF_dp_input
             out_offset = self.engine.layout.get_state_offset(output_var)
             C = np.zeros(N)
             C[out_offset] = 1.0 
@@ -131,6 +144,12 @@ class Session:
                 except scipy.linalg.LinAlgError:
                     Z[i] = np.nan
                     
+        data = {"Z_real": Z.real, "Z_imag": Z.imag, "Frequencies": frequencies}
+        trajectory = {
+            "type": "eis", "w_arr": w_arr, 
+            "input_var": input_var, "output_var": output_var
+        }
+        return SimulationResult(data, self.parameters, engine=self.engine, trajectory=trajectory)                    
         data = {"Z_real": Z.real, "Z_imag": Z.imag, "Frequencies": frequencies}
         trajectory = {
             "type": "eis", "w_arr": w_arr, 

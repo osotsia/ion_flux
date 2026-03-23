@@ -434,6 +434,13 @@ class Engine:
             raw_y_hist = []
             raw_p_hist = []
 
+            if requires_grad:
+                session.record_history = True
+                session.micro_t = [0.0]
+                session.micro_y = [session.handle.get_state().tolist() if session.handle else session._mock_y.tolist()]
+                session.micro_ydot = [np.zeros(self.layout.n_states).tolist()]
+                session.micro_p = [self._pack_parameters(session.parameters)]
+
             for step in protocol.steps:
                 target_condition = getattr(step, "until", None)
                 
@@ -512,7 +519,15 @@ class Engine:
             
             trajectory = None
             if requires_grad:
-                trajectory = {"Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), "_p_traj": raw_p_hist, "requires_grad": requires_grad}
+                trajectory = {
+                    "Time [s]": data_hist["Time [s]"], 
+                    "_y_raw": np.array(raw_y_hist), 
+                    "_micro_t": np.array(session.micro_t),
+                    "_micro_y": np.array(session.micro_y),
+                    "_micro_ydot": np.array(session.micro_ydot),
+                    "_p_traj": session.micro_p,
+                    "requires_grad": requires_grad
+                }
             
             return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
             
@@ -523,16 +538,8 @@ class Engine:
         
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
         
-        # Interpolate execution mesh for smooth gradients
-        if requires_grad:
-            dt_max = 0.5
-            fine_t = [t_eval_arr[0]]
-            for t_next in t_eval_arr[1:]:
-                while fine_t[-1] + dt_max < t_next: fine_t.append(fine_t[-1] + dt_max)
-                fine_t.append(t_next)
-            t_eval_arr = np.array(fine_t)
-            
-        y_res = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag)
+        record_history = requires_grad is not None
+        y_res, micro_t, micro_y, micro_ydot = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, record_history)
         
         data = {"Time [s]": t_eval_arr}
         for state_name, (offset, size) in self.layout.state_offsets.items():
@@ -541,7 +548,15 @@ class Engine:
             
         trajectory = None
         if requires_grad: 
-            trajectory = {"Time [s]": t_eval_arr, "_y_raw": y_res, "_p_traj": [p_list]*len(t_eval_arr), "requires_grad": requires_grad}
+            trajectory = {
+                "Time [s]": t_eval_arr, 
+                "_y_raw": y_res, 
+                "_micro_t": micro_t,
+                "_micro_y": micro_y,
+                "_micro_ydot": micro_ydot,
+                "_p_traj": [p_list]*len(micro_t), 
+                "requires_grad": requires_grad
+            }
         return SimulationResult(data, parameters or {}, status="completed", engine=self, trajectory=trajectory)
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 

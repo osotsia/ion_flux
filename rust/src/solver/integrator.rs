@@ -29,6 +29,8 @@ impl BdfIntegrator {
         y_prev2: &mut [f64],
         dt_prev: &mut f64,
         order: &mut usize,
+        mut history: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+        abs_t: f64,
     ) -> Result<(), String> {
         let mut cur_y_prev = y_prev.to_vec();
         let mut cur_y_prev2 = y_prev2.to_vec();
@@ -90,7 +92,6 @@ impl BdfIntegrator {
                         unsafe { jvp(y_ptr, ydot_ptr, p_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
                     };
                     
-                    // Perfect O(1) algebraic stabilization capturing spatial mesh stiffness without expensive explicit Jacobians.
                     let precond = |v: &[f64], out: &mut [f64]| {
                         for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
                     };
@@ -107,6 +108,9 @@ impl BdfIntegrator {
             
             if converged {
                 t_local += sub_dt;
+                if let Some(ref mut hist) = history {
+                    hist.push((abs_t + t_local, y.to_vec(), ydot.to_vec()));
+                }
                 cur_y_prev2.copy_from_slice(&cur_y_prev);
                 cur_y_prev.copy_from_slice(y);
                 cur_dt_prev = sub_dt;
@@ -157,7 +161,7 @@ mod tests {
 
         for _ in 0..10 {
             integrator.step(1, 0, &mut y, &mut ydot, &p, &id, &spatial_diag, 0.1, mock_res, mock_jac, None, 
-                &mut y_prev, &mut y_prev2, &mut dt_prev, &mut order).unwrap();
+                &mut y_prev, &mut y_prev2, &mut dt_prev, &mut order, None, 0.0).unwrap();
         }
         
         let analytical_expected = std::f64::consts::E.powf(-1.0);

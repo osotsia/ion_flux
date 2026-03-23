@@ -7,7 +7,7 @@ import subprocess
 import shutil
 import logging
 import tempfile
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,21 @@ class NativeRuntime:
         ]
         self.dll.evaluate_vjp.restype = None
 
+    def evaluate_vjp(self, y: List[float], ydot: List[float], p: List[float], lambda_vec: List[float]) -> Tuple[List[float], List[float], List[float]]:
+        if len(y) != self.n_states or len(ydot) != self.n_states:
+            raise ValueError(f"Expected state vectors of length {self.n_states}.")
+        y_arr = (ctypes.c_double * self.n_states)(*y)
+        ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
+        p_arr = (ctypes.c_double * len(p))(*p)
+        lam_arr = (ctypes.c_double * self.n_states)(*lambda_vec)
+        
+        dp_out = (ctypes.c_double * len(p))()
+        dy_out = (ctypes.c_double * self.n_states)()
+        dydot_out = (ctypes.c_double * self.n_states)()
+        
+        self.dll.evaluate_vjp(y_arr, ydot_arr, p_arr, lam_arr, dp_out, dy_out, dydot_out)
+        return list(dp_out), list(dy_out), list(dydot_out)
+
     def evaluate_residual(self, y: List[float], ydot: List[float], p: List[float]) -> List[float]:
         if len(y) != self.n_states or len(ydot) != self.n_states:
             raise ValueError(f"Expected state vectors of length {self.n_states}.")
@@ -76,13 +91,10 @@ class NativeRuntime:
         
         self.dll.evaluate_jacobian(y_arr, ydot_arr, p_arr, ctypes.c_double(c_j), jac_arr)
         
-        # Correctly unpack the Fortran Column-Major dense layout required by SUNDIALS 
-        # into a standard Row-Major Python 2D list for assertions.
         jac_2d = []
         for row in range(self.n_states):
             row_vals = []
             for col in range(self.n_states):
-                # Column-major index math: (col * N) + row
                 row_vals.append(jac_arr[col * self.n_states + row])
             jac_2d.append(row_vals)
             

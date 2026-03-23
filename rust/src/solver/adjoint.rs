@@ -8,6 +8,7 @@ pub fn discrete_adjoint_native<'py>(
     py: Python<'py>,
     lib_path: String,
     y_traj: Vec<Vec<f64>>,
+    ydot_traj: Vec<Vec<f64>>,
     t_eval: Vec<f64>,
     id_arr: Vec<f64>,
     p_traj: Vec<Vec<f64>>, 
@@ -25,17 +26,15 @@ pub fn discrete_adjoint_native<'py>(
 
     let mut lambda = vec![0.0; n];
     
-    // Implicit Euler Backward Adjoint Step
+    // Implicit Euler Backward Adjoint Step using exact forward history micro-steps
     for step in (1..n_steps).rev() {
         let dt = t_eval[step] - t_eval[step - 1];
+        if dt <= 1e-12 { continue; }
+        
         let c_j = 1.0 / dt;
         let y = &y_traj[step];
+        let ydot = &ydot_traj[step];
         let p_list = &p_traj[step];
-        
-        let mut ydot = vec![0.0; n];
-        for i in 0..n {
-            if id_arr[i] == 1.0 { ydot[i] = (y_traj[step][i] - y_traj[step - 1][i]) / dt; }
-        }
         
         let mut rhs = vec![0.0; n];
         for i in 0..n { rhs[i] = -dl_dy[step][i] + lambda[i] * id_arr[i] * c_j; }

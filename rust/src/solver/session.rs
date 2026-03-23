@@ -57,14 +57,29 @@ impl SolverHandle {
     }
 
     pub fn step(&mut self, dt: f64) -> PyResult<()> {
-        let integrator = BdfIntegrator::default();
-        integrator.step(
-            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, &self.spatial_diag, dt, 
-            self.res_fn, self.jac_fn, self.jvp_fn,
-            &mut self.y_prev, &mut self.y_prev2, &mut self.dt_prev, &mut self.order
-        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
-        self.t += dt;
-        Ok(())
+        self.step_with_history(dt, None)
+    }
+
+    pub fn step_history<'py>(&mut self, py: Python<'py>, dt: f64) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let mut hist = vec![];
+        self.step_with_history(dt, Some(&mut hist))?;
+        
+        let h_len = hist.len();
+        let mut micro_t = vec![0.0; h_len];
+        let mut micro_y = vec![0.0; h_len * self.n];
+        let mut micro_ydot = vec![0.0; h_len * self.n];
+        for (i, (t, y, ydot)) in hist.into_iter().enumerate() {
+            micro_t[i] = t;
+            for j in 0..self.n {
+                micro_y[i * self.n + j] = y[j];
+                micro_ydot[i * self.n + j] = ydot[j];
+            }
+        }
+        Ok((
+            numpy::ndarray::Array1::from_vec(micro_t).to_pyarray_bound(py),
+            numpy::ndarray::Array2::from_shape_vec((h_len, self.n), micro_y).unwrap().to_pyarray_bound(py),
+            numpy::ndarray::Array2::from_shape_vec((h_len, self.n), micro_ydot).unwrap().to_pyarray_bound(py)
+        ))
     }
 
     pub fn reach_steady_state(&mut self) -> PyResult<()> {
@@ -135,6 +150,18 @@ impl SolverHandle {
 }
 
 impl SolverHandle {
+    pub fn step_with_history(&mut self, dt: f64, history: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>) -> PyResult<()> {
+        let integrator = BdfIntegrator::default();
+        integrator.step(
+            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, &self.spatial_diag, dt, 
+            self.res_fn, self.jac_fn, self.jvp_fn,
+            &mut self.y_prev, &mut self.y_prev2, &mut self.dt_prev, &mut self.order,
+            history, self.t
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        self.t += dt;
+        Ok(())
+    }
+    
     fn initialize_ic(&mut self) -> PyResult<()> {
         let mut res = vec![0.0; self.n];
         let mut jac = vec![0.0; self.n * self.n];
