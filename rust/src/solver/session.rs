@@ -88,16 +88,33 @@ impl SolverHandle {
         let mut res = vec![0.0; self.n];
         let mut jac = vec![0.0; self.n * self.n];
         let mut dy = vec![0.0; self.n];
+        let mut weights = vec![0.0; self.n];
         
+        for i in 0..self.n {
+            weights[i] = 1.0 / (1e-6 * self.y[i].abs() + 1e-8);
+        }
+        
+        let wrms_norm = |v: &[f64], w: &[f64]| -> f64 {
+            let mut sum = 0.0;
+            for i in 0..self.n {
+                let scaled = v[i] * w[i];
+                if scaled.is_nan() || scaled.is_infinite() { return f64::INFINITY; }
+                sum += scaled * scaled;
+            }
+            (sum / (self.n as f64)).sqrt()
+        };
+
         let mut converged = false;
+        
         for _ in 0..100 {
             unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
-            let mut max_res = 0.0;
+            
+            let mut max_abs_res = 0.0;
             for i in 0..self.n {
-                if res[i].abs() > max_res { max_res = res[i].abs(); }
+                if res[i].abs() > max_abs_res { max_abs_res = res[i].abs(); }
                 dy[i] = -res[i];
             }
-            if max_res < 1e-8 { converged = true; break; }
+            if max_abs_res < 1e-12 { converged = true; break; }
 
             if self.bw == -1 {
                 let jvp = self.jvp_fn.expect("evaluate_jvp not found. Clear cache and recompile the JIT model.");
@@ -117,7 +134,33 @@ impl SolverHandle {
                 if self.bw > 0 { solve_banded_system(self.n, self.bw as usize, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
                 else { solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; }
             }
-            for i in 0..self.n { self.y[i] += dy[i]; }
+            
+            let dy_norm = wrms_norm(&dy, &weights);
+            let f_norm = wrms_norm(&res, &weights);
+            
+            let mut alpha = 1.0;
+            let mut step_accepted = false;
+            let mut y_trial = vec![0.0; self.n];
+            let mut res_trial = vec![0.0; self.n];
+            
+            for _ in 0..5 {
+                for i in 0..self.n { y_trial[i] = self.y[i] + alpha * dy[i]; }
+                unsafe { (self.res_fn)(y_trial.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res_trial.as_mut_ptr()) };
+                
+                let f_norm_trial = wrms_norm(&res_trial, &weights);
+                if f_norm_trial <= f_norm * (1.0 - 1e-4 * alpha) || dy_norm < 0.1 {
+                    self.y.copy_from_slice(&y_trial);
+                    step_accepted = true;
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            
+            if !step_accepted {
+                for i in 0..self.n { self.y[i] += alpha * dy[i]; }
+            }
+            
+            if dy_norm < 1.0 { converged = true; break; }
         }
         
         if !converged { return Err(pyo3::exceptions::PyRuntimeError::new_err("Steady state Newton failed to converge.")); }
@@ -169,6 +212,7 @@ impl SolverHandle {
 
         for _ in 0..20 {
             unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
+            
             let max_res = res.iter().enumerate().filter(|(i, _)| self.id[*i] == 0.0).map(|(_, v)| v.abs()).fold(0.0, f64::max);
             if max_res < 1e-8 { break; }
 
@@ -207,7 +251,33 @@ impl SolverHandle {
                 if self.bw > 0 { solve_banded_system(self.n, self.bw as usize, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
                 else { solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; }
             }
-            for i in 0..self.n { self.y[i] += dy[i]; }
+            
+            // Globalize the DAE initial conditions evaluation with a fallback Line Search
+            let mut alpha = 1.0;
+            let mut step_accepted = false;
+            let mut y_trial = vec![0.0; self.n];
+            let mut res_trial = vec![0.0; self.n];
+            
+            for _ in 0..5 {
+                for i in 0..self.n { y_trial[i] = self.y[i] + alpha * dy[i]; }
+                unsafe { (self.res_fn)(y_trial.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res_trial.as_mut_ptr()) };
+                
+                let max_res_trial = res_trial.iter().enumerate()
+                    .filter(|(i, _)| self.id[*i] == 0.0)
+                    .map(|(_, v)| v.abs())
+                    .fold(0.0, f64::max);
+                    
+                if max_res_trial <= max_res * (1.0 - 1e-4 * alpha) || max_res_trial.is_nan() == false && max_res < 1e-6 {
+                    self.y.copy_from_slice(&y_trial);
+                    step_accepted = true;
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            
+            if !step_accepted {
+                for i in 0..self.n { self.y[i] += alpha * dy[i]; }
+            }
         }
 
         self.y_prev.copy_from_slice(&self.y);

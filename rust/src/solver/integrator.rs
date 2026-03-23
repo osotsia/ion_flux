@@ -5,10 +5,11 @@ pub struct BdfIntegrator {
     pub max_newton_iters: usize,
     pub min_dt: f64,
     pub rel_tol: f64,
+    pub atol: f64,
 }
 
 impl Default for BdfIntegrator {
-    fn default() -> Self { Self { max_newton_iters: 10, min_dt: 1e-10, rel_tol: 1e-6 } }
+    fn default() -> Self { Self { max_newton_iters: 10, min_dt: 1e-10, rel_tol: 1e-6, atol: 1e-8 } }
 }
 
 impl BdfIntegrator {
@@ -44,6 +45,23 @@ impl BdfIntegrator {
         let mut jac = vec![0.0; if bw == -1 { 0 } else { n * n }];
         let mut dy = vec![0.0; n];
         let mut y_revert = vec![0.0; n]; 
+        let mut weights = vec![0.0; n];
+        
+        // Pre-allocate line search memory to avoid reallocation in the hot loop
+        let mut y_trial = vec![0.0; n];
+        let mut ydot_trial = vec![0.0; n];
+        let mut res_trial = vec![0.0; n];
+        
+        // Helper: Computes the affine-invariant Weighted Root-Mean-Square (WRMS) norm
+        let wrms_norm = |v: &[f64], w: &[f64]| -> f64 {
+            let mut sum = 0.0;
+            for i in 0..n {
+                let scaled = v[i] * w[i];
+                if scaled.is_nan() || scaled.is_infinite() { return f64::INFINITY; }
+                sum += scaled * scaled;
+            }
+            (sum / (n as f64)).sqrt()
+        };
         
         while target_dt - t_local > 1e-8 {
             if t_local + sub_dt > target_dt { sub_dt = target_dt - t_local; }
@@ -62,6 +80,11 @@ impl BdfIntegrator {
                     if id[i] == 1.0 { y[i] = cur_y_prev[i] + r * (cur_y_prev[i] - cur_y_prev2[i]); }
                 }
             }
+            
+            // Dynamic scale-invariant tolerances based on the initial predictor
+            for i in 0..n {
+                weights[i] = 1.0 / (self.rel_tol * y[i].abs() + self.atol);
+            }
 
             let mut converged = false;
             let mut iters = 0;
@@ -74,14 +97,15 @@ impl BdfIntegrator {
                 
                 unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), res.as_mut_ptr()) };
 
-                let mut max_res = 0.0;
+                // Fast-path bypass for exact or near-exact initial roots
+                let mut max_abs_res = 0.0;
                 for i in 0..n {
-                    if res[i].abs() > max_res { max_res = res[i].abs(); }
+                    if res[i].abs() > max_abs_res { max_abs_res = res[i].abs(); }
                     dy[i] = -res[i];
                 }
-                
-                if max_res < self.rel_tol { converged = true; break; }
+                if max_abs_res < 1e-12 { converged = true; break; }
 
+                // Linear Solve
                 if bw == -1 {
                     let jvp = jvp_fn.expect("evaluate_jvp missing for Matrix-Free solver. Clear cache and recompile model.");
                     let y_ptr = y.as_ptr();
@@ -91,11 +115,9 @@ impl BdfIntegrator {
                     let jvp_closure = |v: &[f64], out: &mut [f64]| {
                         unsafe { jvp(y_ptr, ydot_ptr, p_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
                     };
-                    
                     let precond = |v: &[f64], out: &mut [f64]| {
                         for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
                     };
-                    
                     solve_gmres(n, &mut dy, jvp_closure, precond)?;
                 } else {
                     unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), c_j, jac.as_mut_ptr()) };
@@ -103,7 +125,39 @@ impl BdfIntegrator {
                     else { solve_dense_system(n, &mut jac, &mut dy)?; }
                 }
 
-                for i in 0..n { y[i] += dy[i]; }
+                let dy_norm = wrms_norm(&dy, &weights);
+                let f_norm = wrms_norm(&res, &weights);
+                
+                // Backtracking Line Search (Armijo Rule)
+                let mut alpha = 1.0;
+                let mut step_accepted = false;
+                
+                for _ in 0..5 {
+                    for i in 0..n { 
+                        y_trial[i] = y[i] + alpha * dy[i]; 
+                        ydot_trial[i] = if id[i] == 1.0 { c_j * y_trial[i] - c_1 * cur_y_prev[i] + c_2 * cur_y_prev2[i] } else { 0.0 };
+                    }
+                    
+                    unsafe { res_fn(y_trial.as_ptr(), ydot_trial.as_ptr(), p.as_ptr(), res_trial.as_mut_ptr()) };
+                    let f_norm_trial = wrms_norm(&res_trial, &weights);
+                    
+                    // Safely bounds exponential terms (NaN tracking) and ensures monotonic descent
+                    if f_norm_trial <= f_norm * (1.0 - 1e-4 * alpha) || dy_norm < 0.1 {
+                        y.copy_from_slice(&y_trial);
+                        step_accepted = true;
+                        break;
+                    }
+                    alpha *= 0.5; // Halve the Newton step size and retry
+                }
+
+                if !step_accepted { 
+                    break; // Immediate rejection forces a graceful dt collapse instead of unbounded divergence
+                }
+                
+                if dy_norm < 1.0 { 
+                    converged = true; 
+                    break; 
+                }
             }
             
             if converged {
