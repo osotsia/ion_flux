@@ -144,9 +144,9 @@ class SwellingElectrode(fx.PDE):
             fx.dt(self.c_s):          -fx.div(N_s, axis=self.r),
             self.c_s.t0:              1000.0,
             
-            # Boundaries evaluated at the 'r' edges for EVERY particle along 'x'
-            N_s.left(domain=self.r):  0.0,     # Symmetry at particle center
-            N_s.right(domain=self.r): j_flux,  # Intercalation flux at particle surface
+            # Safely boundary target to evade Node operator overload property collisions
+            N_s.boundary("left", domain=self.r):  0.0,     # Symmetry at particle center
+            N_s.boundary("right", domain=self.r): j_flux,  # Intercalation flux at particle surface
 
             # -----------------------------------------------------------------
             # MACRO-SCALE PDEs: Electrolyte Transport (x)

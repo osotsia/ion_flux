@@ -3,8 +3,6 @@ import copy
 import re
 
 class Node:
-    """Base class for all AST nodes. Implements mathematical tracing via operator overloading."""
-    
     # Standard Arithmetic
     def __add__(self, other): return BinaryOp("add", self, _wrap(other))
     def __radd__(self, other): return BinaryOp("add", _wrap(other), self)
@@ -18,7 +16,7 @@ class Node:
     def __rpow__(self, other): return BinaryOp("pow", _wrap(other), self)
     def __neg__(self): return UnaryOp("neg", self)
     
-    # Relational Operators (Overrides default object behavior)
+    # Relational Operators
     def __lt__(self, other): return BinaryOp("lt", self, _wrap(other))
     def __le__(self, other): return BinaryOp("le", self, _wrap(other))
     def __gt__(self, other): return BinaryOp("gt", self, _wrap(other))
@@ -27,11 +25,6 @@ class Node:
     def __ne__(self, other): return BinaryOp("ne", self, _wrap(other))
 
     def __hash__(self) -> int:
-        """
-        Restores identity-based hashing.
-        Required because overriding __eq__ automatically sets __hash__ to None in Python,
-        but we need Nodes to be hashable to act as dictionary keys in the PDE math() definition.
-        """
         return id(self)
 
     @property
@@ -43,9 +36,9 @@ class Node:
     @property
     def t0(self) -> "InitialCondition": return InitialCondition(self)
 
-    def boundary(self, tag: str) -> "Boundary": 
-        """Declares a boundary on an arbitrary 3D surface tag."""
-        return Boundary(self, tag)
+    # FIX: Expose the `domain` kwarg to all AST Nodes so States can target specific micro-scales
+    def boundary(self, tag: str, domain: Optional["Domain"] = None) -> "Boundary": 
+        return Boundary(self, tag, domain=domain)
 
     def to_dict(self) -> Dict[str, Any]: 
         raise NotImplementedError("Subclasses must implement to_dict()")
@@ -175,6 +168,19 @@ class DomainBoundary(Node):
         return f"{self.domain.name}.{self.side}"
 
 
+class ConcatenatedDomain:
+    """Syntactic sugar allowing users to map physical cell regions logically."""
+    __slots__ = ["domains", "name"]
+    def __init__(self, domains: List['Domain'], name: str = ""):
+        self.domains = domains
+        self.name = name or "_plus_".join(d.name for d in domains)
+        
+    def __add__(self, other: Union['Domain', 'ConcatenatedDomain']) -> 'ConcatenatedDomain':
+        if isinstance(other, Domain): return ConcatenatedDomain(self.domains + [other])
+        elif isinstance(other, ConcatenatedDomain): return ConcatenatedDomain(self.domains + other.domains)
+        raise TypeError("Can only concatenate Domains.")
+
+
 class Domain:
     __slots__ = ["bounds", "resolution", "coord_sys", "name", "csr_data"]
     def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian", name: str = "", csr_data: Optional[Dict] = None):
@@ -263,6 +269,11 @@ class Domain:
         
     def __mul__(self, other: "Domain") -> "CompositeDomain":
         return CompositeDomain([self, other])
+        
+    def __add__(self, other: Union["Domain", "ConcatenatedDomain"]) -> "ConcatenatedDomain":
+        if isinstance(other, Domain): return ConcatenatedDomain([self, other])
+        elif isinstance(other, ConcatenatedDomain): return ConcatenatedDomain([self] + other.domains)
+        raise TypeError("Can only concatenate Domains.")
         
     def __repr__(self) -> str:
         return self.name or f"Domain({self.bounds})"
