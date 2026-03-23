@@ -149,10 +149,4 @@ class Session:
             "type": "eis", "w_arr": w_arr, 
             "input_var": input_var, "output_var": output_var
         }
-        return SimulationResult(data, self.parameters, engine=self.engine, trajectory=trajectory)                    
-        data = {"Z_real": Z.real, "Z_imag": Z.imag, "Frequencies": frequencies}
-        trajectory = {
-            "type": "eis", "w_arr": w_arr, 
-            "input_var": input_var, "output_var": output_var
-        }
         return SimulationResult(data, self.parameters, engine=self.engine, trajectory=trajectory)
