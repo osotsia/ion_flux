@@ -1,4 +1,4 @@
-from .dsl.core import PDE, State, Parameter, Domain, Condition
+from .dsl.core import PDE, State, Parameter, Domain, Condition, Terminal
 from .dsl.operators import dt, grad, div, integral, exp, log, sin, cos
 from .dsl.operators import abs_val as abs
 from .dsl.operators import maximum as max

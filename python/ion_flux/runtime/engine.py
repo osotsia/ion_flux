@@ -3,7 +3,7 @@ import logging
 import shutil
 import json
 import os
-from typing import Dict, Any, List, Optional, Tuple, Sequence
+from typing import Dict, Any, List, Optional, Tuple, Sequence as TypingSequence
 import numpy as np
 
 from ion_flux.dsl.core import PDE, State, Parameter
@@ -338,13 +338,32 @@ class Engine:
                 target_condition = getattr(step, "until", None)
                 
                 inputs = {}
-                if type(step).__name__ == "CC":
-                    if "mode" in self.parameters: inputs["mode"] = 1.0
-                    if "i_target" in self.parameters: inputs["i_target"] = step.rate
-                    elif "i_app" in self.parameters: inputs["i_app"] = step.rate
-                elif type(step).__name__ == "CV":
-                    if "mode" in self.parameters: inputs["mode"] = 0.0
-                    if "v_target" in self.parameters: inputs["v_target"] = step.voltage
+                step_name = type(step).__name__
+                
+                # Dynamic translation of Cycler sequences to Hardware Terminals
+                if step_name == "CC":
+                    if "_term_mode" in self.parameters:
+                        inputs["_term_mode"] = 1.0
+                        inputs["_term_i_target"] = step.rate
+                    else: # Legacy fallback
+                        if "mode" in self.parameters: inputs["mode"] = 1.0
+                        if "i_target" in self.parameters: inputs["i_target"] = step.rate
+                        elif "i_app" in self.parameters: inputs["i_app"] = step.rate
+                elif step_name == "CV":
+                    if "_term_mode" in self.parameters:
+                        inputs["_term_mode"] = 0.0
+                        inputs["_term_v_target"] = step.voltage
+                    else: # Legacy fallback
+                        if "mode" in self.parameters: inputs["mode"] = 0.0
+                        if "v_target" in self.parameters: inputs["v_target"] = step.voltage
+                elif step_name == "Rest":
+                    if "_term_mode" in self.parameters:
+                        inputs["_term_mode"] = 1.0
+                        inputs["_term_i_target"] = 0.0
+                    else: # Legacy fallback
+                        if "mode" in self.parameters: inputs["mode"] = 1.0
+                        if "i_target" in self.parameters: inputs["i_target"] = 0.0
+                        elif "i_app" in self.parameters: inputs["i_app"] = 0.0
                 
                 # If gradients requested, limit macro integration step sizes to capture high-res history for Adjoint solver
                 dt_step = 0.5 if requires_grad else 1.0 

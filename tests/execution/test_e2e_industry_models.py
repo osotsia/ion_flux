@@ -18,8 +18,10 @@ class SPM_LumpedThermal(fx.PDE):
     c_s = fx.State(domain=r, name="c_s")
     T_cell = fx.State(domain=None, name="T_cell") # 0D Lumped State
     V_cell = fx.State(domain=None, name="V_cell") # Algebraic DAE State
+    i_app = fx.State(domain=None, name="i_app")   # Cycler controlled state
     
-    i_app = fx.Parameter(default=30.0)
+    terminal = fx.Terminal(current=i_app, voltage=V_cell)
+    
     h_conv = fx.Parameter(default=10.0)
     T_amb = fx.Parameter(default=298.15)
     
@@ -45,9 +47,10 @@ class SPM_LumpedThermal(fx.PDE):
             fx.dt(self.T_cell): (Q_gen - Q_cool) / 1000.0, # Divided by heat capacity
             self.T_cell.t0: 298.15,
             
-            # DAE: Voltage Constraint (benign toy OCV curve)
+            # DAE: Voltage Physics Constraint (benign toy OCV curve)
             self.V_cell: 2.5 + 5e-5 * self.c_s.right - 1e-3 * self.i_app,
-            self.V_cell.t0: 3.72
+            self.V_cell.t0: 3.72,
+            self.i_app.t0: 30.0
         }
 
 
@@ -61,8 +64,9 @@ class SPM_SEIGrowth(fx.PDE):
     c_s = fx.State(domain=r)
     L_sei = fx.State(domain=None) # Average SEI thickness
     V_cell = fx.State(domain=None)
+    i_app = fx.State(domain=None)
     
-    i_app = fx.Parameter(default=30.0)
+    terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
         flux = -1e-14 * fx.grad(self.c_s, axis=self.r)
@@ -82,7 +86,8 @@ class SPM_SEIGrowth(fx.PDE):
             self.L_sei.t0: 1e-8, # Initial 10nm native layer
             
             self.V_cell: 2.5 + 5e-5 * self.c_s.right,
-            self.V_cell.t0: 3.75
+            self.V_cell.t0: 3.75,
+            self.i_app.t0: 0.0
         }
 
 
@@ -114,7 +119,8 @@ def test_e2e_sei_degradation_execution():
     model = SPM_SEIGrowth()
     engine = Engine(model=model, target="cpu", mock_execution=not RUST_FFI_AVAILABLE, jacobian_bandwidth=0)
     
-    res = engine.solve(t_span=(0, 3600), parameters={"i_app": 0.0}) # Rest condition
+    # Rest condition using t_span to allow implicit micro-stepping over the stiff initial transient
+    res = engine.solve(t_span=(0, 3600), parameters={"_term_mode": 1.0, "_term_i_target": 0.0}) 
     assert res.status == "completed"
     
     if RUST_FFI_AVAILABLE:

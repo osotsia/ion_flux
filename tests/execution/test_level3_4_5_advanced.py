@@ -12,9 +12,7 @@ class SimpleBatteryProtocol(fx.PDE):
     V = fx.State(domain=None) 
     i_app = fx.State(domain=None)
     
-    i_target = fx.Parameter(default=10.0)
-    v_target = fx.Parameter(default=3.2)
-    mode = fx.Parameter(default=1.0) # Evaluates algebraic swapping cleanly at 1.0 or 0.0
+    terminal = fx.Terminal(current=i_app, voltage=V)
     R = fx.Parameter(default=0.05)
     
     def math(self):
@@ -22,14 +20,9 @@ class SimpleBatteryProtocol(fx.PDE):
             fx.dt(self.soc): -self.i_app / 3600.0,
             self.soc.t0: 1.0,
             
+            # Physics mapping only. The Terminal handles the sequence constraints.
             self.V: 4.0 + self.soc - self.i_app * self.R,
             self.V.t0: 4.5,
-            
-            # The core mechanism for DAE hot-swapping:
-            # We formulate this as LHS = RHS -> res = LHS - RHS.
-            # To ensure the Jacobian derivative d(res)/d(i_app) is non-zero, we explicitly 
-            # keep self.i_app on the right side of the assignment binding.
-            self.i_app: self.i_app - (self.mode * (self.i_app - self.i_target) + (1.0 - self.mode) * (self.V - self.v_target)),
             self.i_app.t0: 10.0
         }
 
@@ -62,11 +55,11 @@ def test_stateful_session_hil_control():
     engine = Engine(model=SimpleBatteryProtocol(), target="cpu", mock_execution=False)
     if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
-    # Init at Rest (0 current)
-    session = engine.start_session(parameters={"i_target": 0.0})
+    # Init at Rest (0 current) using hardware terminal defaults
+    session = engine.start_session(parameters={"_term_i_target": 0.0, "_term_mode": 1.0})
     assert session.get("V") == pytest.approx(5.0)
     
-    session.step(dt=1800.0, inputs={"i_target": 1.0}) 
+    session.step(dt=1800.0, inputs={"_term_i_target": 1.0}) 
     assert session.time == 1800.0
     assert session.get("soc") == pytest.approx(0.5)
     assert session.get("V") == pytest.approx(4.45) # 4.0 + 0.5 - 1.0 * 0.05

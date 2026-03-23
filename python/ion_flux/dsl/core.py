@@ -358,6 +358,17 @@ class Condition:
     def __repr__(self) -> str:
         return f"Condition({self.expression})"
 
+class Terminal:
+    """Hardware abstraction representing an electrical battery cycler connection."""
+    __slots__ = ["current", "voltage", "name"]
+    def __init__(self, current: "State", voltage: "State", name: str = ""):
+        self.current = current
+        self.voltage = voltage
+        self.name = name
+
+    def __set_name__(self, owner, name):
+        if not self.name:
+            self.name = name
 
 class PDE:
     """Declarative base class for defining Partial Differential Equations."""
@@ -369,21 +380,44 @@ class PDE:
         Isolates class-level Nodes to the instance level to prevent state leakage
         across concurrent PDE instantiations, injecting variable names intrinsically.
         """
+        has_terminal = False
         for name in dir(self.__class__):
             if name.startswith("__"):
                 continue
             
             attr = getattr(self.__class__, name)
-            if isinstance(attr, (State, Parameter, Domain, CompositeDomain)):
+            if isinstance(attr, (State, Parameter, Domain, CompositeDomain, Terminal)):
                 clone = copy.copy(attr)
                 clone.name = name
                 setattr(self, name, clone)
+                if isinstance(attr, Terminal):
+                    has_terminal = True
+        
+        # Implicitly inject reserved parameters for hardware multiplexing 
+        # to ensure they map into the Engine's parameter layout
+        if has_terminal and not hasattr(self, "_term_mode"):
+            self._term_mode = Parameter(default=1.0, name="_term_mode")
+            self._term_i_target = Parameter(default=0.0, name="_term_i_target")
+            self._term_v_target = Parameter(default=0.0, name="_term_v_target")
 
     def math(self) -> Dict[Node, Node]:
         raise NotImplementedError("PDE subclasses must implement the math() method.")
 
     def ast(self) -> List[Dict[str, Any]]:
-        return [
+        eqs = [
             {"lhs": lhs.to_dict(), "rhs": _wrap(rhs).to_dict()} 
             for lhs, rhs in self.math().items()
         ]
+        
+        # Automagically inject the compiled constraint multiplexer if a cycler terminal is bound
+        for name in dir(self):
+            attr = getattr(self, name)
+            if isinstance(attr, Terminal):
+                # Defines: i_app - (mode * i_target + (1 - mode) * (i_app - V_cell + v_target)) == 0
+                # Mode 1 (CC): i_app = i_target
+                # Mode 0 (CV): V_cell = v_target
+                m = self._term_mode
+                rhs = m * self._term_i_target + (1.0 - m) * (attr.current - attr.voltage + self._term_v_target)
+                eqs.append({"lhs": attr.current.to_dict(), "rhs": rhs.to_dict()})
+                
+        return eqs
