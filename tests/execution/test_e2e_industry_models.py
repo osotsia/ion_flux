@@ -37,20 +37,23 @@ class SPM_LumpedThermal(fx.PDE):
         Q_cool = self.h_conv * (self.T_cell - self.T_amb)
         
         return {
-            # PDE: Solid diffusion
-            fx.dt(self.c_s): -fx.div(flux, axis=self.r),
-            flux.left: 0.0,
-            flux.right: j_surf,
-            self.c_s.t0: 25000.0,
-            
-            # ODE: Lumped Thermal
-            fx.dt(self.T_cell): (Q_gen - Q_cool) / 1000.0, # Divided by heat capacity
-            self.T_cell.t0: 298.15,
-            
-            # DAE: Voltage Physics Constraint (benign toy OCV curve)
-            self.V_cell: 2.5 + 5e-5 * self.c_s.right - 1e-3 * self.i_app,
-            self.V_cell.t0: 3.72,
-            self.i_app.t0: 30.0
+            "regions": {
+                self.r: [
+                    fx.dt(self.c_s) == -fx.div(flux, axis=self.r)
+                ]
+            },
+            "boundaries": [
+                flux.left == 0.0,
+                flux.right == j_surf
+            ],
+            "global": [
+                fx.dt(self.T_cell) == (Q_gen - Q_cool) / 1000.0,
+                self.V_cell == 2.5 + 5e-5 * self.c_s.right - 1e-3 * self.i_app,
+                self.c_s.t0 == 25000.0,
+                self.T_cell.t0 == 298.15,
+                self.V_cell.t0 == 3.72,
+                self.i_app.t0 == 30.0
+            ]
         }
 
 
@@ -77,17 +80,23 @@ class SPM_SEIGrowth(fx.PDE):
         j_sei = 1e-6 / fx.max(self.L_sei, 1e-9)
         
         return {
-            fx.dt(self.c_s): -fx.div(flux, axis=self.r),
-            flux.left: 0.0,
-            flux.right: j_intercalation + j_sei, # SEI consumes lithium
-            self.c_s.t0: 25000.0,
-            
-            fx.dt(self.L_sei): j_sei * 1e-5, # Molar volume conversion
-            self.L_sei.t0: 1e-8, # Initial 10nm native layer
-            
-            self.V_cell: 2.5 + 5e-5 * self.c_s.right,
-            self.V_cell.t0: 3.75,
-            self.i_app.t0: 0.0
+            "regions": {
+                self.r: [
+                    fx.dt(self.c_s) == -fx.div(flux, axis=self.r)
+                ]
+            },
+            "boundaries": [
+                flux.left == 0.0,
+                flux.right == j_intercalation + j_sei
+            ],
+            "global": [
+                fx.dt(self.L_sei) == j_sei * 1e-5,
+                self.V_cell == 2.5 + 5e-5 * self.c_s.right,
+                self.c_s.t0 == 25000.0,
+                self.L_sei.t0 == 1e-8,
+                self.V_cell.t0 == 3.75,
+                self.i_app.t0 == 0.0
+            ]
         }
 
 

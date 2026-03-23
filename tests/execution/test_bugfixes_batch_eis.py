@@ -10,10 +10,16 @@ class DummyBatchModel(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.c): self.D * fx.grad(self.c),
-            self.c.t0: 1.0,
-            self.c.left: 0.0,
-            self.c.right: 0.0
+            "regions": {
+                self.x: [ fx.dt(self.c) == self.D * fx.grad(self.c) ]
+            },
+            "boundaries": [
+                self.c.left == 0.0,
+                self.c.right == 0.0
+            ],
+            "global": [
+                self.c.t0 == 1.0
+            ]
         }
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
@@ -44,8 +50,10 @@ class SimpleEISModel(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.V): (self.i_app - self.V / self.R) / self.C,
-            self.V.t0: 0.0
+            "global": [
+                fx.dt(self.V) == (self.i_app - self.V / self.R) / self.C,
+                self.V.t0 == 0.0
+            ]
         }
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")

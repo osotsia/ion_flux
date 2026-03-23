@@ -15,9 +15,6 @@ class ValidatedSPM(fx.PDE):
     i_app = fx.State(domain=None)
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
-    
-    # Increased diffusion coefficient to ensure the non-dimensional 1.0 radius 
-    # equilibrates in a reasonable timeframe (~1000s) to prevent infinite Sequence loops
     D_s = fx.Parameter(default=1e-3)
     
     def math(self):
@@ -27,18 +24,19 @@ class ValidatedSPM(fx.PDE):
         ocv = 4.2 - 0.5 * (1000.0 - self.c_s.right) / 1000.0
         
         return {
-            fx.dt(self.c_s): -fx.div(flux),
-            self.c_s.t0: 500.0, 
-            
-            flux.left: 0.0,
-            flux.right: self.i_app / 20.0,
-            
-            # Physics mapping for cell voltage. 
-            # The terminal automatically supplies the opposing algebraic load constraint.
-            self.V_cell: ocv - 0.05 * self.i_app,
-            self.V_cell.t0: 3.95,
-            
-            self.i_app.t0: 0.0
+            "regions": {
+                self.r: [ fx.dt(self.c_s) == -fx.div(flux) ]
+            },
+            "boundaries": [
+                flux.left == 0.0,
+                flux.right == self.i_app / 20.0
+            ],
+            "global": [
+                self.V_cell == ocv - 0.05 * self.i_app,
+                self.c_s.t0 == 500.0,
+                self.V_cell.t0 == 3.95,
+                self.i_app.t0 == 0.0
+            ]
         }
 
 def test_v1_spm_discharge_conservation():

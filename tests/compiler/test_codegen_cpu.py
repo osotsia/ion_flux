@@ -12,8 +12,10 @@ class SimpleDAE(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.y0): self.y1, 
-            self.y1: self.p0 * self.y0
+            "global": [ 
+                fx.dt(self.y0) == self.y1,
+                self.y1 == self.p0 * self.y0 
+            ]
         }
 
 class SpatialPDE(fx.PDE):
@@ -23,9 +25,13 @@ class SpatialPDE(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.c): fx.grad(self.c),
-            self.c.left: 0.0,
-            self.c.right: 1.0
+            "regions": {
+                self.rod: [ fx.dt(self.c) == fx.grad(self.c) ]
+            },
+            "boundaries": [
+                self.c.left == 0.0,
+                self.c.right == 1.0
+            ]
         }
 
 def test_codegen_emits_valid_dae_residual():
@@ -34,8 +40,8 @@ def test_codegen_emits_valid_dae_residual():
     layout = MemoryLayout(states, params)
     cpp = generate_cpp(model.ast(), layout, states)
     
-    assert "res[0] = (ydot[0 + CLAMP(0, 1)]) - (y[1 + CLAMP(0, 1)]);" in cpp
-    assert "res[1] = (y[1 + CLAMP(0, 1)]) - ((p[0] * y[0 + CLAMP(0, 1)]));" in cpp
+    assert "res[0 + 0] = (ydot[0 + CLAMP(0, 1)]) - (y[1 + CLAMP(0, 1)]);" in cpp
+    assert "res[1 + 0] = (y[1 + CLAMP(0, 1)]) - ((p[0] * y[0 + CLAMP(0, 1)]));" in cpp
 
 def test_codegen_emits_valid_spatial_loops_and_boundaries():
     model = SpatialPDE()
@@ -82,12 +88,12 @@ def test_numerical_jacobian_of_emitted_dae_cpp():
     lines = [line.strip() for line in cpp.split("\n") if line.strip().startswith("res[")]
     
     for line in lines:
-        idx = int(line[4:line.index("]")])
+        idx_str = line[4:line.index("]")]
+        idx = eval(idx_str)
         res_base[idx] = eval(line[line.index("=") + 1 : -1], eval_namespace)
         
     J = np.zeros((N, N))
     
-    # Perform numerical Finite Differences over the parsed string equations
     for col in range(N):
         y_pert = list(y)
         ydot_pert = list(ydot)
@@ -99,7 +105,8 @@ def test_numerical_jacobian_of_emitted_dae_cpp():
         
         res_pert = [0.0] * N
         for line in lines:
-            idx = int(line[4:line.index("]")])
+            idx_str = line[4:line.index("]")]
+            idx = eval(idx_str)
             res_pert[idx] = eval(line[line.index("=") + 1 : -1], eval_namespace)
             
         for row in range(N):

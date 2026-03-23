@@ -25,8 +25,12 @@ def test_unstructured_3d_fem_mesh_codegen(mesh_3d_tetrahedron):
         def math(self):
             flux = -self.D * fx.grad(self.c)
             return { 
-                fx.dt(self.c): -fx.div(flux),
-                flux.boundary("top"): 0.5
+                "regions": {
+                    self.mesh: [ fx.dt(self.c) == -fx.div(flux) ]
+                },
+                "boundaries": [
+                    flux.boundary("top") == 0.5
+                ]
             }
 
     model = UnstructuredModel()
@@ -59,9 +63,15 @@ def test_unstructured_execution_matrix_free_jfnk_and_adjoint(mesh_3d_tetrahedron
 
         def math(self):
             return {
-                fx.dt(self.c): fx.div(self.D * fx.grad(self.c)),
-                self.c.boundary("top"): 100.0,
-                self.c.t0: 100.0
+                "regions": {
+                    self.mesh: [ fx.dt(self.c) == fx.div(self.D * fx.grad(self.c)) ]
+                },
+                "boundaries": [
+                    self.c.boundary("top") == 100.0
+                ],
+                "global": [
+                    self.c.t0 == 100.0
+                ]
             }
 
     # Set cache=False to force LLVM to re-emit the analytical evaluate_jvp function newly added to templates.

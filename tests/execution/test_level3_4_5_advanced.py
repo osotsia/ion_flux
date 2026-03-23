@@ -17,13 +17,13 @@ class SimpleBatteryProtocol(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.soc): -self.i_app / 3600.0,
-            self.soc.t0: 1.0,
-            
-            # Physics mapping only. The Terminal handles the sequence constraints.
-            self.V: 4.0 + self.soc - self.i_app * self.R,
-            self.V.t0: 4.5,
-            self.i_app.t0: 10.0
+            "global": [
+                fx.dt(self.soc) == -self.i_app / 3600.0,
+                self.V == 4.0 + self.soc - self.i_app * self.R,
+                self.soc.t0 == 1.0,
+                self.V.t0 == 4.5,
+                self.i_app.t0 == 10.0
+            ]
         }
 
 class ParallelRCCircuit(fx.PDE):
@@ -31,19 +31,25 @@ class ParallelRCCircuit(fx.PDE):
     R = fx.Parameter(default=10.0)
     C = fx.Parameter(default=0.1)
     i_app = fx.Parameter(default=1.0)
+    
     def math(self):
         return {
-            fx.dt(self.V): (self.i_app - self.V / self.R) / self.C,
-            self.V.t0: 0.0
+            "global": [
+                fx.dt(self.V) == (self.i_app - self.V / self.R) / self.C,
+                self.V.t0 == 0.0
+            ]
         }
 
 class AdjointDecay(fx.PDE):
     y = fx.State(name="y")
     k = fx.Parameter(default=2.0)
+    
     def math(self):
         return {
-            fx.dt(self.y): -self.k * self.y,
-            self.y.t0: 1.0
+            "global": [
+                fx.dt(self.y) == -self.k * self.y,
+                self.y.t0 == 1.0
+            ]
         }
 
 
@@ -142,7 +148,12 @@ def test_omp_data_parallelism_emission():
     class LargeSpatial(fx.PDE):
         x = fx.Domain(bounds=(0, 1), resolution=5000)
         c = fx.State(domain=x, name="c")
-        def math(self): return { fx.dt(self.c): fx.grad(self.c) }
+        def math(self): 
+            return { 
+                "global": [
+                    fx.dt(self.c) == fx.grad(self.c) 
+                ]
+            }
         
     engine = Engine(model=LargeSpatial(), target="cpu:omp", mock_execution=True)
     assert "#pragma omp parallel for" in engine.cpp_source

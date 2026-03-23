@@ -13,17 +13,24 @@ class ExponentialDecay(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.y): -self.k * self.y,
-            self.y.t0: 5.0
+            "global": [
+                fx.dt(self.y) == -self.k * self.y,
+                self.y.t0 == 5.0
+            ]
         }
 
 class SpatiallyVaryingHeatIC(fx.PDE):
     rod = fx.Domain(bounds=(0, 2), resolution=5)
     T = fx.State(domain=rod)
+    
     def math(self):
         return {
-            fx.dt(self.T): fx.grad(self.T),
-            self.T.t0: 2 * self.rod.coords
+            "regions": {
+                self.rod: [ fx.dt(self.T) == fx.grad(self.T) ]
+            },
+            "global": [
+                self.T.t0 == 2 * self.rod.coords
+            ]
         }
 
 def test_engine_emits_enzyme_cpp(heat_model):

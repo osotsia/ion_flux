@@ -1,6 +1,13 @@
 from typing import Dict, Any, Union, List, Optional
+from typing import TypedDict
 import copy
 import re
+
+SystemDict = TypedDict('SystemDict', {
+    'regions': Dict[Any, List['BinaryOp']],
+    'global': List['BinaryOp'],
+    'boundaries': List['BinaryOp']
+}, total=False)
 
 class Node:
     # Standard Arithmetic
@@ -36,7 +43,6 @@ class Node:
     @property
     def t0(self) -> "InitialCondition": return InitialCondition(self)
 
-    # FIX: Expose the `domain` kwarg to all AST Nodes so States can target specific micro-scales
     def boundary(self, tag: str, domain: Optional["Domain"] = None) -> "Boundary": 
         return Boundary(self, tag, domain=domain)
 
@@ -45,12 +51,9 @@ class Node:
 
 
 def _wrap(val: Union[int, float, Node]) -> Node:
-    """Safely coerces Python primitives into AST Nodes."""
-    if isinstance(val, (int, float)): 
-        return Scalar(float(val))
-    if isinstance(val, Node):
-        return val
-    raise TypeError(f"Cannot wrap type {type(val).__name__} into an AST Node. Expected float, int, or Node.")
+    if isinstance(val, (int, float)): return Scalar(float(val))
+    if isinstance(val, Node): return val
+    raise TypeError(f"Cannot wrap type {type(val).__name__} into an AST Node.")
 
 
 class Scalar(Node):
@@ -316,13 +319,14 @@ class Condition:
             right = expression.right_node
             
             var_name = getattr(left, "name", str(left))
+        
             if type(right).__name__ == "Scalar":
                 target = right.value
             elif type(right).__name__ in ("Parameter", "State"):
                 target = right.name
             else:
                 target = float(str(right))
-                
+            
             self._compiled_logic = (var_name, mapped_op, target)
             return
 
@@ -405,30 +409,64 @@ class PDE:
                     has_terminal = True
         
         # Implicitly inject reserved parameters for hardware multiplexing 
-        # to ensure they map into the Engine's parameter layout
         if has_terminal and not hasattr(self, "_term_mode"):
             self._term_mode = Parameter(default=1.0, name="_term_mode")
             self._term_i_target = Parameter(default=0.0, name="_term_i_target")
             self._term_v_target = Parameter(default=0.0, name="_term_v_target")
 
-    def math(self) -> Dict[Node, Node]:
-        raise NotImplementedError("PDE subclasses must implement the math() method.")
+    def math(self) -> SystemDict:
+        raise NotImplementedError("PDE subclasses must implement the math() method returning a SystemDict.")
 
-    def ast(self) -> List[Dict[str, Any]]:
-        eqs = [
-            {"lhs": lhs.to_dict(), "rhs": _wrap(rhs).to_dict()} 
-            for lhs, rhs in self.math().items()
-        ]
+    def ast(self) -> Dict[str, Any]:
+        raw_math = self.math()
+        if not isinstance(raw_math, dict):
+            raise TypeError("math() must return a dictionary using the SystemDict structure (keys: regions, global, boundaries).")
+
+        valid_keys = {"regions", "global", "boundaries"}
+        invalid_keys = set(raw_math.keys()) - valid_keys
+        if invalid_keys:
+            raise ValueError(
+                f"Invalid keys found: {invalid_keys}.\n"
+                f"Please group your equations into 'regions', 'global', or 'boundaries' and use the '==' operator."
+            )
         
-        # Automagically inject the compiled constraint multiplexer if a cycler terminal is bound
+        # Initialize the strict payload structure expected by the compiler
+        compiled_system: Dict[str, Any] = {
+            "regions": {}, "global": [], "boundaries": []
+        }
+        
+        # Parse regional equations bound to physical topologies
+        if "regions" in raw_math:
+            for dom, eqs in raw_math["regions"].items():
+                dom_name = getattr(dom, "name", str(dom))
+                compiled_system["regions"][dom_name] = []
+                for eq in eqs:
+                    if getattr(eq, "op", "") != "eq":
+                        raise ValueError(f"Equations in regions must be declared using '=='. Got: {eq}")
+                    compiled_system["regions"][dom_name].append({
+                        "lhs": eq.left_node.to_dict(), 
+                        "rhs": _wrap(eq.right_node).to_dict()
+                    })
+                    
+        # Parse global and boundary equations
+        for bucket in ["global", "boundaries"]:
+            if bucket in raw_math:
+                for eq in raw_math[bucket]:
+                    if getattr(eq, "op", "") != "eq":
+                        raise ValueError(f"Equations in '{bucket}' must be declared using '=='. Got: {eq}")
+                    compiled_system[bucket].append({
+                        "lhs": eq.left_node.to_dict(), 
+                        "rhs": _wrap(eq.right_node).to_dict()
+                    })
+
+        # Automagically inject the compiled constraint multiplexer safely into the global bucket
         for name in dir(self):
             attr = getattr(self, name)
             if isinstance(attr, Terminal):
-                # Defines: i_app - (mode * i_target + (1 - mode) * (i_app - V_cell + v_target)) == 0
                 # Mode 1 (CC): i_app = i_target
                 # Mode 0 (CV): V_cell = v_target
                 m = self._term_mode
                 rhs = m * self._term_i_target + (1.0 - m) * (attr.current - attr.voltage + self._term_v_target)
-                eqs.append({"lhs": attr.current.to_dict(), "rhs": rhs.to_dict()})
+                compiled_system["global"].append({"lhs": attr.current.to_dict(), "rhs": rhs.to_dict()})
                 
-        return eqs
+        return compiled_system

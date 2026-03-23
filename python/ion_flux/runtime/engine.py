@@ -204,7 +204,7 @@ class Engine:
         self.layout = MemoryLayout(states, params)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
         
-        self.ast_payload = model.ast() if hasattr(model, "ast") else []
+        self.ast_payload: Dict[str, List[Dict[str, Any]]] = model.ast() if hasattr(model, "ast") else {}
 
         # Map -1 to trigger Matrix-Free Krylov Iterative solver natively in Rust
         if jacobian_bandwidth is None:
@@ -334,9 +334,13 @@ class Engine:
             elif isinstance(node, list):
                 for v in node: _mark_differentials(v)
                     
-        _mark_differentials(self.ast_payload)
+        # Scan V2 domains for dt() differentials, isolating algebraic equations automatically
+        _mark_differentials(self.ast_payload.get("global", []))
+        for eqs in self.ast_payload.get("regions", {}).values():
+            _mark_differentials(eqs)
         
-        for eq in self.ast_payload:
+        # ID array masking strictly evaluated against Boundary Conditions
+        for eq in self.ast_payload.get("boundaries", []):
             lhs = eq["lhs"]
             if lhs.get("type") == "Boundary" and lhs["child"].get("type") == "State":
                 state_name = extract_state_name(lhs, self.layout)
@@ -371,7 +375,12 @@ class Engine:
                 if op == "coords": return idx * dx
             return 0.0
         
-        for eq in self.ast_payload:
+        # Initial conditions safely isolated and extracted without parsing the rest of the AST
+        all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
+        for eqs in self.ast_payload.get("regions", {}).values():
+            all_eqs.extend(eqs)
+            
+        for eq in all_eqs:
             lhs = eq["lhs"]
             if lhs.get("type") == "InitialCondition":
                 state_name = extract_state_name(lhs, self.layout)
@@ -408,7 +417,7 @@ class Engine:
         return self.runtime.evaluate_jacobian(y, ydot, p_list, c_j)
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
-              t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1) -> SimulationResult:
+                t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1) -> SimulationResult:
         
         if threads > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = str(threads)
@@ -485,11 +494,11 @@ class Engine:
                         y = session.handle.get_state() if session.handle else session._mock_y
                         raw_y_hist.append(y)
                         if requires_grad: raw_p_hist.append(self._pack_parameters(session.parameters))
-                        
+                
                         for k, (offset, size) in self.layout.state_offsets.items():
                             data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
                         break
-                        
+                    
                     t_elapsed += dt_step
                     data_hist["Time [s]"].append(session.time)
                     y = session.handle.get_state() if session.handle else session._mock_y
@@ -558,7 +567,7 @@ class Engine:
                 if size == 1: data[state_name] = y_res[:, offset]
                 else: data[state_name] = y_res[:, offset:offset+size]
             results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=None))
-            
+
         return results
 
     async def solve_async(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 

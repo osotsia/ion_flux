@@ -13,8 +13,10 @@ class CoupledDynamics(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.y0): self.p_alpha * (self.y1 - self.y0),
-            self.y1: self.y1 - fx.abs(self.y0) * (self.y0 ** 2) + self.p_beta
+            "global": [
+                fx.dt(self.y0) == self.p_alpha * (self.y1 - self.y0),
+                self.y1 == self.y1 - fx.abs(self.y0) * (self.y0 ** 2) + self.p_beta
+            ]
         }
 
 def _has_compiler() -> bool:

@@ -9,9 +9,11 @@ class SPM(PDE):
     
     def math(self):
         return {
-            dt(self.V): -0.01 * self.i_app,
-            self.V.t0: 4.2,
-            self.i_app.t0: 1.0
+            "global": [ 
+                dt(self.V) == -0.01 * self.i_app,
+                self.V.t0 == 4.2,
+                self.i_app.t0 == 1.0 
+            ]
         }
 
 class DFN(PDE):
@@ -33,7 +35,9 @@ class DFN(PDE):
     def math(self):
         # Provide a structurally valid ODE to ensure a non-singular Jacobian during default tests.
         return {
-            dt(self.V): -0.01 * self.i_app,
-            self.V.t0: 4.2,
-            self.i_app.t0: 1.0
+            "global": [ 
+                dt(self.V) == -0.01 * self.i_app,
+                self.V.t0 == 4.2,
+                self.i_app.t0 == 1.0 
+            ]
         }

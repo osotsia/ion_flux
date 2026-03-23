@@ -56,8 +56,10 @@ class SmoothMathPDE(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.y0): fx.sin(self.y0) * fx.exp(self.y1),
-            self.y1: fx.log(self.y0) - fx.cos(self.y1 * self.p_scale)
+            "global": [
+                fx.dt(self.y0) == fx.sin(self.y0) * fx.exp(self.y1),
+                self.y1 == fx.log(self.y0) - fx.cos(self.y1 * self.p_scale)
+            ]
         }
 
 class PiecewisePDE(fx.PDE):
@@ -67,8 +69,10 @@ class PiecewisePDE(fx.PDE):
     
     def math(self):
         return {
-            fx.dt(self.y0): fx.abs(self.y0),
-            self.y1: fx.max(self.y0, self.p_limit) + fx.min(self.y1, 0.0)
+            "global": [
+                fx.dt(self.y0) == fx.abs(self.y0),
+                self.y1 == fx.max(self.y0, self.p_limit) + fx.min(self.y1, 0.0)
+            ]
         }
 
 class StepLogicPDE(fx.PDE):
@@ -76,10 +80,11 @@ class StepLogicPDE(fx.PDE):
     p_thresh = fx.Parameter(default=2.5)
     
     def math(self):
-        # Using operator overloading to build a relational trigger
         trigger = self.y0 > self.p_thresh
         return {
-            fx.dt(self.y0): trigger * self.y0
+            "global": [
+                fx.dt(self.y0) == trigger * self.y0
+            ]
         }
 
 

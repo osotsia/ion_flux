@@ -18,49 +18,84 @@ Crucially, **battery physics are explicitly decoupled from cycler testing logic*
 import ion_flux as fx
 
 class SingleParticle(fx.PDE):
-    # 1. Topology
-    # Defines the spatial discretisation. Can be 1D, 2D, or a 3D unstructured mesh.
-    r = fx.Domain(bounds=(0.0, 1.0), resolution=50, coord_sys="spherical")
+    """
+    A foundational 1D representation demonstrating the ruthless separation 
+    of Physical Intent from Computational Execution.
+    """
     
-    # 2. States
-    # Unknowns to be solved. If assigned a domain, they become PDEs. 
-    # If domain=None, they are scalar ODEs or Algebraic constraints.
-    c = fx.State(domain=r)      # Lithium concentration (PDE)
-    V = fx.State(domain=None)   # Particle voltage (Algebraic scalar)
-    i_app = fx.State(domain=None) # Applied current (Algebraic scalar)
+    # -------------------------------------------------------------------------
+    # 1. Topology Declaration
+    # -------------------------------------------------------------------------
+    # Defines the spatial discretization scheme. The Python AST operates 
+    # independently of the underlying mesh.
+    r = fx.Domain(bounds=(0.0, 1.0), resolution=50, coord_sys="spherical", name="r")
     
+    # -------------------------------------------------------------------------
+    # 2. State Variable Registration
+    # -------------------------------------------------------------------------
+    # Unknowns targeted by the implicit solver. States bound to a `Domain` 
+    # are compiled into spatial array blocks; unbound states (None) 
+    # emit as 0D scalars.
+    c = fx.State(domain=r, name="c")            # Lithium concentration (PDE)
+    V = fx.State(domain=None, name="V")         # Particle voltage (Algebraic scalar)
+    i_app = fx.State(domain=None, name="i_app") # Applied current (Algebraic scalar)
+    
+    # -------------------------------------------------------------------------
     # 3. Hardware Abstraction (The Cycler Terminal)
-    # Decouples external cycler protocol logic from internal battery physics.
-    # The Engine automatically handles the zero-sum structural DAEs required to 
-    # toggle between Constant Current and Constant Voltage cleanly.
+    # -------------------------------------------------------------------------
+    # Explicitly decouples internal physics from cycler testing logic. 
+    # The Engine automatically handles the zero-sum structural DAEs required 
+    # to toggle between Constant Current and Constant Voltage cleanly.
     terminal = fx.Terminal(current=i_app, voltage=V)
     
+    # -------------------------------------------------------------------------
     # 4. Parameters
-    # Constants or inputs that can be modified at runtime without recompiling.
-    D = fx.Parameter(default=1e-14)
+    # -------------------------------------------------------------------------
+    # Constants dynamically mapped into the C-ABI via flat Float64 memory buffers, 
+    # enabling runtime overrides without triggering LLVM recompilation.
+    D = fx.Parameter(default=1e-14, name="D")
     
-    # 5. Physics (Traced by the Python compiler to build the AST)
+    # -------------------------------------------------------------------------
+    # 5. Mathematical AST Construction
+    # -------------------------------------------------------------------------
     def math(self):
-        # The compiler automatically handles the spherical coordinate Jacobian 
-        # based on the `coord_sys` defined in the domain.
+        # Operators evaluate lazily to build the computational graph.
+        # The AST compiler automatically handles the Jacobian transformation 
+        # required for the specified coordinate system (e.g., spherical divergence).
         flux = -self.D * fx.grad(self.c)
         
         return {
-            # --- PDE: Spherical Diffusion ---
-            fx.dt(self.c): -fx.div(flux),
-            self.c.t0:     1000.0,               # Initial Condition
+            # --- Regional Physics ---
+            # Maps bulk governing equations to explicit physical boundaries.
+            # The code generator unrolls these into discrete spatial loops.
+            "regions": {
+                self.r: [
+                    fx.dt(self.c) == -fx.div(flux)
+                ]
+            },
             
-            # --- Boundary Conditions ---
-            flux.left:     0.0,                  # Symmetry at particle center
-            flux.right:    self.i_app / 96485.0, # Faraday's flux at surface
+            # --- Spatial Boundaries ---
+            # Dictates local Dirichlet state overrides or Neumann flux injections.
+            "boundaries": [
+                flux.left == 0.0,                  # Symmetry condition at particle center
+                flux.right == self.i_app / 96485.0 # Faraday's flux mapping at the surface
+            ],
             
-            # --- Battery Physics (Voltage Mapping) ---
-            # Define internal voltage physics directly. You do NOT write cycler logic here.
-            # The Terminal automatically supplies the opposing algebraic cycler 
-            # constraint (e.g., i_app = 10A) to close the implicit system.
-            self.V:        (4.2 - 0.1 * self.c.right) - 0.05 * self.i_app,
-            self.V.t0:     4.1,
-            self.i_app.t0: 1.0
+            # --- Global Mathematics ---
+            # Captures 0D Ordinary Differential Equations (ODEs), pure Algebraic Constraints (DAEs), 
+            # and Initial Conditions. 
+            "global": [
+                # Internal voltage physics. Cycler logic is omitted here and injected 
+                # safely via the Terminal multiplexer. 
+                # Note: The target variable must sit cleanly on the left-hand side 
+                # to route the residual mapping correctly.
+                self.V == (4.2 - 0.1 * self.c.right) - 0.05 * self.i_app,
+                
+                # Initial Conditions (.t0)
+                self.c.t0 == 1000.0,               
+                self.V.t0 == 4.1,
+                self.i_app.t0 == 1.0
+            ]
         }
 ```
 
@@ -78,38 +113,39 @@ class SwellingElectrode(fx.PDE):
     """
     A comprehensive example of a macro-micro scale coupled electrode 
     featuring dynamic moving boundaries (Stefan problem) due to particle swelling.
+    Treats complex hierarchical phenomena as native syntax[cite: 78, 79].
     """
     
+    # -------------------------------------------------------------------------
     # 1. Topology: Cross-Product Domains
     # 'x' is the macroscopic through-thickness of the electrode.
     # 'r' is the microscopic interior of the spherical active material particles.
     x = fx.Domain(bounds=(0, 100e-6), resolution=20, name="macro_x")
     r = fx.Domain(bounds=(0, 5e-6), resolution=15, coord_sys="spherical", name="micro_r")
     
-    # Multiplying domains creates a hierarchical pseudo-dimension.
-    # This places a full 1D spherical particle mesh at every node in the 1D 'x' mesh.
+    # Multiplying domains creates a hierarchical pseudo-dimension, logically placing 
+    # a full 1D spherical particle mesh at every node in the macroscopic 'x' mesh.
     macro_micro = x * r 
     
-    # 2. States
-    c_s = fx.State(domain=macro_micro)  # Solid lithium concentration (defined on x * r)
-    c_e = fx.State(domain=x)            # Electrolyte concentration (defined on x)
-    L   = fx.State(domain=None)         # Scalar tracking the macroscopic electrode thickness
-    V_cell = fx.State(domain=None)
-    i_app = fx.State(domain=None)
+    # -------------------------------------------------------------------------
+    # 2. State & Hardware Definitions
+    # -------------------------------------------------------------------------
+    c_s = fx.State(domain=macro_micro, name="c_s")  # Defined on x * r (2D block)
+    c_e = fx.State(domain=x, name="c_e")            # Defined on x (1D block)
+    L   = fx.State(domain=None, name="L")           # Macroscopic thickness tracking (Scalar)
+    V_cell = fx.State(domain=None, name="V_cell")
+    i_app = fx.State(domain=None, name="i_app")
     
     # Map the cycler to the internal state variables
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
-    # 3. Parameters
-    D_s   = fx.Parameter(default=1e-14) # Solid diffusivity
-    D_e   = fx.Parameter(default=1e-10) # Electrolyte diffusivity
-    omega = fx.Parameter(default=5e-7)  # Volumetric expansion coefficient
+    D_s   = fx.Parameter(default=1e-14, name="D_s") 
+    D_e   = fx.Parameter(default=1e-10, name="D_e") 
+    omega = fx.Parameter(default=5e-7, name="omega")  
     
-    # 4. Physics (Traced by the Python AST Compiler)
     def math(self):
-        # The `axis` argument tells the topology-agnostic operators which coordinate
-        # system to differentiate against. 
-        # N_s computes spherical gradients inside the particles.
+        # The `axis` argument forces topology-agnostic operators to differentiate 
+        # against a specific spatial dimension within a composite domain.
         N_s = -self.D_s * fx.grad(self.c_s, axis=self.r)
         
         # N_e computes Cartesian gradients across the macro electrode.
@@ -123,48 +159,48 @@ class SwellingElectrode(fx.PDE):
         a = 3.0 / 5e-6
 
         return {
-            # -----------------------------------------------------------------
-            # MOVING BOUNDARY (STEFAN PROBLEM)
-            # -----------------------------------------------------------------
-            # 1. Define the ODE for the physical expansion of the electrode.
-            # Here, thickness grows proportionally to the total flux integrated across 'x'.
-            fx.dt(self.L): self.omega * fx.integral(j_flux, over=self.x),
-            self.L.t0:     100e-6,
+            "regions": {
+                # --- Micro-Scale Transport ---
+                # The compiler natively unrolls this into a nested loop structure, 
+                # maintaining independent spherical domains internally.
+                self.macro_micro: [
+                    fx.dt(self.c_s) == -fx.div(N_s, axis=self.r)
+                ],
+                
+                # --- Macro-Scale Transport ---
+                self.x: [
+                    fx.dt(self.c_e) == -fx.div(N_e, axis=self.x) - (a * j_flux)
+                ]
+            },
             
-            # 2. DYNAMIC MESH BINDING
-            # By assigning the scalar state 'L' to the right edge of the 'x' domain, 
-            # the compiler automatically turns this into a moving mesh. It natively 
-            # injects Arbitrary Lagrangian-Eulerian (ALE) advection terms into the 
-            # macro-scale PDEs (like c_e) to account for the stretching coordinate system.
-            self.x.right:  self.L,
-
-            # -----------------------------------------------------------------
-            # MICRO-SCALE PDEs: Solid Particle Diffusion (x * r)
-            # -----------------------------------------------------------------
-            fx.dt(self.c_s):          -fx.div(N_s, axis=self.r),
-            self.c_s.t0:              1000.0,
+            "boundaries": [
+                # --- Dynamic Mesh Binding (Stefan Problem) ---
+                # Binding a scalar state ('L') to the edge of a domain triggers the C++ 
+                # emission engine to automatically inject Arbitrary Lagrangian-Eulerian (ALE) 
+                # grid velocity advection terms into any transport PDE executing over 'x'.
+                self.x.right == self.L,
+                
+                # Explicit boundary targets evade Node operator overload property collisions 
+                # within hierarchical meshes.
+                N_s.boundary("left", domain=self.r) == 0.0,     
+                N_s.boundary("right", domain=self.r) == j_flux, 
+                
+                N_e.left(domain=self.x) == 0.0,     
+                N_e.right(domain=self.x) == 0.0     
+            ],
             
-            # Safely boundary target to evade Node operator overload property collisions
-            N_s.boundary("left", domain=self.r):  0.0,     # Symmetry at particle center
-            N_s.boundary("right", domain=self.r): j_flux,  # Intercalation flux at particle surface
-
-            # -----------------------------------------------------------------
-            # MACRO-SCALE PDEs: Electrolyte Transport (x)
-            # -----------------------------------------------------------------
-            # The electrolyte is depleted by the flux entering the solid phase
-            fx.dt(self.c_e):          -fx.div(N_e, axis=self.x) - (a * j_flux),
-            self.c_e.t0:              1000.0,
-            
-            # Boundaries evaluated at the 'x' edges
-            N_e.left(domain=self.x):  0.0,     # Flux from separator (assumed 0 for isolation)
-            N_e.right(domain=self.x): 0.0,     # Impermeable current collector
-            
-            # -----------------------------------------------------------------
-            # ALGEBRAIC CONSTRAINTS
-            # -----------------------------------------------------------------
-            self.V_cell: 4.2 - 0.05 * self.i_app,
-            self.V_cell.t0: 4.2,
-            self.i_app.t0: 30.0
+            "global": [
+                # Macroscopic physical expansion ODE
+                fx.dt(self.L) == self.omega * fx.integral(j_flux, over=self.x),
+                
+                self.V_cell == 4.2 - 0.05 * self.i_app,
+                
+                self.L.t0 == 100e-6,
+                self.c_s.t0 == 1000.0,
+                self.c_e.t0 == 1000.0,
+                self.V_cell.t0 == 4.2,
+                self.i_app.t0 == 30.0
+            ]
         }
 ```
 
