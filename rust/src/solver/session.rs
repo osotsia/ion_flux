@@ -159,8 +159,11 @@ impl SolverHandle {
                 alpha *= 0.5;
             }
             
+            // Throw an error instead of corrupting the array
             if !step_accepted {
-                for i in 0..self.n { self.y[i] += alpha * dy[i]; }
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "Algebraic initialization failed: Line search rejected all steps due to singular scaling or undefined mathematical domains."
+                ));
             }
         }
 

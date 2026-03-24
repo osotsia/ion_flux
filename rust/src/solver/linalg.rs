@@ -1,5 +1,24 @@
 /// Solves a dense square linear system J * dx = b in-place using Gaussian elimination.
+/// Now features Row Equilibration to neutralize massive PDE vs DAE scaling disparities.
 pub fn solve_dense_system(n: usize, jac: &mut [f64], b: &mut [f64]) -> Result<(), String> {
+    // 1. Row Equilibration: Scale all rows to have a maximum absolute value of 1.0
+    let mut row_scales = vec![1.0; n];
+    for row in 0..n {
+        let mut max_val = 0.0;
+        // jac is column-major from Enzyme: jac[col * n + row]
+        for col in 0..n {
+            let val = jac[col * n + row].abs();
+            if val > max_val { max_val = val; }
+        }
+        if max_val > 1e-15 { row_scales[row] = 1.0 / max_val; }
+    }
+    
+    for col in 0..n {
+        for row in 0..n { jac[col * n + row] *= row_scales[row]; }
+    }
+    for row in 0..n { b[row] *= row_scales[row]; }
+
+    // 2. Standard Gaussian Elimination with Partial Pivoting
     for k in 0..n {
         let mut max_val = 0.0;
         let mut pivot_row = k;
@@ -35,6 +54,26 @@ pub fn solve_dense_system(n: usize, jac: &mut [f64], b: &mut [f64]) -> Result<()
 
 /// Solves a Banded linear system in-place unlocking massive Data Parallelism.
 pub fn solve_banded_system(n: usize, bw: usize, jac: &mut [f64], b: &mut [f64]) -> Result<(), String> {
+    // 1. Row Equilibration for Banded matrices (jac array remains dense in memory from V2 Codegen)
+    let mut row_scales = vec![1.0; n];
+    for row in 0..n {
+        let mut max_val = 0.0;
+        let start_col = if row > bw { row - bw } else { 0 };
+        let end_col = std::cmp::min(n, row + bw + 1);
+        
+        for col in start_col..end_col {
+            let val = jac[col * n + row].abs();
+            if val > max_val { max_val = val; }
+        }
+        if max_val > 1e-15 { row_scales[row] = 1.0 / max_val; }
+    }
+    
+    for col in 0..n {
+        for row in 0..n { jac[col * n + row] *= row_scales[row]; }
+    }
+    for row in 0..n { b[row] *= row_scales[row]; }
+
+    // 2. Standard Banded Elimination
     for k in 0..n {
         let pivot = jac[k * n + k];
         if pivot.abs() < 1e-25 { return Err("Singular or ill-conditioned Banded Jacobian.".to_string()); }
