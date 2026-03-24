@@ -129,10 +129,8 @@ class UnaryOp(Node):
         for k, v in self.kwargs.items():
             if v is not None: d[k] = v.name if hasattr(v, "name") else str(v)
         return d
-    def left(self, domain: Optional["Domain"] = None) -> "Boundary": return Boundary(self, "left", domain=domain)
-    def right(self, domain: Optional["Domain"] = None) -> "Boundary": return Boundary(self, "right", domain=domain)
-    def boundary(self, tag: str, domain: Optional["Domain"] = None) -> "Boundary": return Boundary(self, tag, domain=domain)
-    def __repr__(self) -> str: return f"{self.op}({self.child})"
+    def __repr__(self) -> str: 
+        return f"{self.op}({self.child})"
 
 
 class Boundary(Node):
@@ -141,6 +139,11 @@ class Boundary(Node):
         self.child = child
         self.side = side
         self.domain = domain
+        
+    def __call__(self, domain: Optional["Domain"] = None) -> "Boundary":
+        """Allows flexible syntactic access (e.g., flux.right() or flux.right(domain=r))"""
+        return Boundary(self.child, self.side, domain=(domain or self.domain))
+
     def to_dict(self) -> Dict[str, Any]: 
         d = {"type": "Boundary", "side": self.side, "child": self.child.to_dict()}
         if self.domain:
@@ -154,6 +157,8 @@ class InitialCondition(Node):
     __slots__ = ["child"]
     def __init__(self, child: Node):
         self.child = child
+    def __call__(self) -> "InitialCondition":
+        return self
     def to_dict(self) -> Dict[str, Any]: 
         return {"type": "InitialCondition", "child": self.child.to_dict()}
     def __repr__(self) -> str:
@@ -165,6 +170,8 @@ class DomainBoundary(Node):
     def __init__(self, domain: "Domain", side: str):
         self.domain = domain
         self.side = side
+    def __call__(self) -> "DomainBoundary":
+        return self
     def to_dict(self) -> Dict[str, Any]: 
         return {"type": "DomainBoundary", "domain": self.domain.name, "side": self.side}
     def __repr__(self) -> str:

@@ -114,6 +114,7 @@ def _emit_residual_loop(lines: List[str], eq: Dict[str, Any], target: str, layou
         
     offset, total_size = layout.state_offsets[state_name]
     state_obj = state_map[state_name]
+    translator.current_domain = getattr(state_obj, "domain", None)
     
     # 1. Resolve sub-offsets for Regionally Bound Mathematics
     loop_start = 0
@@ -165,6 +166,7 @@ def _emit_dirichlet_override(lines: List[str], eq: Dict[str, Any], layout: Any, 
     side = eq["lhs"]["side"]
     bc_domain = eq["lhs"].get("domain")
     state_obj = state_map[state_name]
+    translator.current_domain = getattr(state_obj, "domain", None)
     
     # Enable dynamic 3D surface tag targeting via the p-mask
     if state_obj.domain and getattr(state_obj.domain, "coord_sys", "") == "unstructured":

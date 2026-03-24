@@ -16,6 +16,7 @@ class CppTranslator:
         self.dx_symbol = dx_symbol
         self.neumann_bcs = neumann_bcs
         self.use_ydot = False
+        self.current_domain = None
 
     def translate(self, node: Dict[str, Any], idx: str) -> str:
         """Dynamic dispatch to the appropriate node translation method."""
@@ -128,7 +129,7 @@ class CppTranslator:
                         j_global_expr = f"((({idx}) / {d_mic.resolution}) * {d_mic.resolution} + j_local)"
 
                 sum_expr = self.translate(node["child"], idx)
-                std_div = f"[&]() {{ double s = 0.0; int start = (int)p[{off_rp} + {local_idx}]; int end = (int)p[{off_rp} + {local_idx} + 1]; for(int k=start; k<end; ++k) {{ int j_local = (int)p[{off_ci} + k]; int j = {j_global_expr}; double w = p[{off_w} + k]; s += {sum_expr}; }} return s; }}()"
+                std_div = f"[&]() {{ double s = 0.0;\nint start = (int)p[{off_rp} + {local_idx}]; int end = (int)p[{off_rp} + {local_idx} + 1];\nfor(int k=start; k<end; ++k) {{ int j_local = (int)p[{off_ci} + k]; int j = {j_global_expr};\ndouble w = p[{off_w} + k]; s += {sum_expr}; }} return s;\n}}()"
                 
                 # Dynamic Neumann boundary injections via surface 3D masks
                 if state_name in self.neumann_bcs:
@@ -174,14 +175,24 @@ class CppTranslator:
         loop_size, eval_idx = "1", "j"
         if domain and hasattr(domain, "domains") and len(domain.domains) == 2:
             d_mac, d_mic = domain.domains[0], domain.domains[1]
+            
+            target_domain = getattr(self, "current_domain", None)
+            
             if node.get("over") == d_mic.name:
                 loop_size = str(d_mic.resolution)
-                eval_idx = f"((({idx}) / {d_mic.resolution}) * {d_mic.resolution} + j)"
+                if target_domain and target_domain.name == d_mac.name:
+                    eval_idx = f"(({idx}) * {d_mic.resolution} + j)"
+                else:
+                    eval_idx = f"((({idx}) / {d_mic.resolution}) * {d_mic.resolution} + j)"
             elif node.get("over") == d_mac.name:
                 loop_size = str(d_mac.resolution)
-                eval_idx = f"(j * {d_mic.resolution} + (({idx}) % {d_mic.resolution}))"
+                if target_domain and target_domain.name == d_mic.name:
+                    eval_idx = f"(j * {d_mic.resolution} + ({idx}))"
+                else:
+                    eval_idx = f"(j * {d_mic.resolution} + (({idx}) % {d_mic.resolution}))"
         else:
             loop_size = str(self.layout.state_offsets[state_name][1])
+            eval_idx = "j"
             
         sum_expr = self.translate(child, eval_idx)
-        return f"[&]() {{ double s = 0.0; for(int j=0; j<{loop_size}; ++j) s += {sum_expr}; return s * {target_dx}; }}()"
+        return f"[&]() {{ double s = 0.0;\nfor(int j=0; j<{loop_size}; ++j) s += {sum_expr}; return s * {target_dx};\n}}()"
