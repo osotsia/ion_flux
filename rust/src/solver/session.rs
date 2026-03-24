@@ -22,12 +22,13 @@ pub struct SolverHandle {
     pub y_prev2: Vec<f64>,
     pub dt_prev: f64,
     pub order: usize,
+    pub debug: bool, // Track internally
 }
 
 #[pymethods]
 impl SolverHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p: Vec<f64>, spatial_diag: Vec<f64>) -> PyResult<Self> {
+        pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p: Vec<f64>, spatial_diag: Vec<f64>, debug: bool) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
         let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
@@ -42,7 +43,7 @@ impl SolverHandle {
         let mut handle = SolverHandle { 
             _lib: lib, res_fn, jac_fn, jvp_fn, n, bw, 
             t: 0.0, y: y0, ydot: ydot0, id, p, spatial_diag,
-            y_prev, y_prev2, dt_prev: 0.0, order: 1,
+            y_prev, y_prev2, dt_prev: 0.0, order: 1, debug
         };
         handle.calc_algebraic_roots()?;
         Ok(handle)
@@ -283,7 +284,9 @@ impl SolverHandle {
 
 impl SolverHandle {
     pub fn step_with_history(&mut self, dt: f64, history: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>) -> PyResult<()> {
-        let integrator = BdfIntegrator::default();
+        let mut integrator = BdfIntegrator::default();
+        integrator.debug = self.debug; // Inject observability flag
+        
         integrator.step(
             self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, &self.spatial_diag, dt, 
             self.res_fn, self.jac_fn, self.jvp_fn,

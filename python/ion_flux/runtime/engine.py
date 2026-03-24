@@ -301,10 +301,11 @@ class TelemetryReport:
 
 class Engine:
     """The central orchestrator for compilation, execution routing, and autodiff graphs."""
-    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, **kwargs):
+    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, debug: bool = False, **kwargs):
         self.model = model
         self.target = target
         self.mock_execution = mock_execution
+        self.debug = debug
         
         # Introspect PDE attributes for memory layout
         states = [attr for attr in model.__dict__.values() if isinstance(attr, State)]
@@ -406,7 +407,7 @@ class Engine:
 
     def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None) -> Session:
         """Initializes a stateful memory session for HIL/SIL control loops."""
-        return Session(engine=self, parameters=parameters or {}, soc=soc)
+        return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug)
 
     def _extract_metadata(self) -> Tuple[List[float], List[float], List[float], List[float]]:
         if hasattr(self, "_metadata_cache"):
@@ -648,7 +649,10 @@ class Engine:
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
         
         record_history = requires_grad is not None
-        y_res, micro_t, micro_y, micro_ydot = solve_ida_native(self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, record_history)
+        y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
+            self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), 
+            self.jacobian_bandwidth, spatial_diag, record_history, self.debug
+        )
         
         data = {"Time [s]": t_eval_arr}
         for state_name, (offset, size) in self.layout.state_offsets.items():
@@ -682,7 +686,7 @@ class Engine:
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
         
-        y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag)
+        y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, self.debug)
         
         results = []
         for p, y_res in zip(parameters, y_res_batch):

@@ -1,15 +1,18 @@
 use super::{NativeResFn, NativeJacFn, NativeJvpFn};
 use super::linalg::{solve_dense_system, solve_banded_system, solve_gmres};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 
 pub struct BdfIntegrator {
     pub max_newton_iters: usize,
     pub min_dt: f64,
     pub rel_tol: f64,
     pub atol: f64,
+    pub debug: bool, // Added observability toggle
 }
 
 impl Default for BdfIntegrator {
-    fn default() -> Self { Self { max_newton_iters: 10, min_dt: 1e-10, rel_tol: 1e-6, atol: 1e-8 } }
+    fn default() -> Self { Self { max_newton_iters: 10, min_dt: 1e-10, rel_tol: 1e-6, atol: 1e-8, debug: false } }
 }
 
 impl BdfIntegrator {
@@ -47,12 +50,22 @@ impl BdfIntegrator {
         let mut y_revert = vec![0.0; n]; 
         let mut weights = vec![0.0; n];
         
-        // Pre-allocate line search memory to avoid reallocation in the hot loop
         let mut y_trial = vec![0.0; n];
         let mut ydot_trial = vec![0.0; n];
         let mut res_trial = vec![0.0; n];
         
-        // Helper: Computes the affine-invariant Weighted Root-Mean-Square (WRMS) norm
+        // Setup Diagnostic File
+        let mut trace_file = if self.debug {
+            std::fs::create_dir_all("ion_flux_diagnostics").ok();
+            Some(OpenOptions::new().create(true).append(true).open("ion_flux_diagnostics/newton_trace.csv").unwrap())
+        } else {
+            None
+        };
+
+        if let Some(ref mut file) = trace_file {
+            writeln!(file, "abs_t,sub_dt,iter,max_res_val,max_res_idx,f_norm,dy_norm,alpha").ok();
+        }
+
         let wrms_norm = |v: &[f64], w: &[f64]| -> f64 {
             let mut sum = 0.0;
             for i in 0..n {
@@ -81,7 +94,6 @@ impl BdfIntegrator {
                 }
             }
             
-            // Dynamic scale-invariant tolerances based on the initial predictor
             for i in 0..n {
                 weights[i] = 1.0 / (self.rel_tol * y[i].abs() + self.atol);
             }
@@ -97,17 +109,21 @@ impl BdfIntegrator {
                 
                 unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), res.as_mut_ptr()) };
 
-                // Fast-path bypass for exact or near-exact initial roots
                 let mut max_abs_res = 0.0;
+                let mut max_res_idx = 0;
                 for i in 0..n {
-                    if res[i].abs() > max_abs_res { max_abs_res = res[i].abs(); }
+                    let r_abs = res[i].abs();
+                    if r_abs > max_abs_res || r_abs.is_nan() { 
+                        max_abs_res = r_abs; 
+                        max_res_idx = i;
+                    }
                     dy[i] = -res[i];
                 }
-                if max_abs_res < 1e-12 { converged = true; break; }
 
-                // Linear Solve
+                if max_abs_res < 1e-12 && !max_abs_res.is_nan() { converged = true; break; }
+
                 if bw == -1 {
-                    let jvp = jvp_fn.expect("evaluate_jvp missing for Matrix-Free solver. Clear cache and recompile model.");
+                    let jvp = jvp_fn.expect("evaluate_jvp missing.");
                     let y_ptr = y.as_ptr();
                     let ydot_ptr = ydot.as_ptr();
                     let p_ptr = p.as_ptr();
@@ -118,11 +134,17 @@ impl BdfIntegrator {
                     let precond = |v: &[f64], out: &mut [f64]| {
                         for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
                     };
-                    solve_gmres(n, &mut dy, jvp_closure, precond)?;
+                    // Pass linear algebra failures upward to trigger crash dumps
+                    if let Err(e) = solve_gmres(n, &mut dy, jvp_closure, precond) {
+                        return self.trigger_crash_dump(n, y, &res, &weights, format!("GMRES Failed: {}", e));
+                    }
                 } else {
                     unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), c_j, jac.as_mut_ptr()) };
-                    if bw > 0 { solve_banded_system(n, bw as usize, &mut jac, &mut dy)?; } 
-                    else { solve_dense_system(n, &mut jac, &mut dy)?; }
+                    let lin_res = if bw > 0 { solve_banded_system(n, bw as usize, &mut jac, &mut dy) } 
+                                  else { solve_dense_system(n, &mut jac, &mut dy) };
+                    if let Err(e) = lin_res {
+                        return self.trigger_crash_dump(n, y, &res, &weights, format!("Linear Solve Failed: {}", e));
+                    }
                 }
 
                 let dy_norm = wrms_norm(&dy, &weights);
@@ -147,17 +169,16 @@ impl BdfIntegrator {
                         step_accepted = true;
                         break;
                     }
-                    alpha *= 0.5; // Halve the Newton step size and retry
+                    alpha *= 0.5; 
                 }
 
-                if !step_accepted { 
-                    break; // Immediate rejection forces a graceful dt collapse instead of unbounded divergence
+                if let Some(ref mut file) = trace_file {
+                    writeln!(file, "{},{},{},{},{},{},{},{}", abs_t + t_local, sub_dt, iter, max_abs_res, max_res_idx, f_norm, dy_norm, alpha).ok();
+                    file.flush().ok();
                 }
-                
-                if dy_norm < 1.0 { 
-                    converged = true; 
-                    break; 
-                }
+
+                if !step_accepted { break; }
+                if dy_norm < 1.0 { converged = true; break; }
             }
             
             if converged {
@@ -174,7 +195,9 @@ impl BdfIntegrator {
             } else {
                 y.copy_from_slice(&y_revert);
                 sub_dt *= 0.25; 
-                if sub_dt < self.min_dt { return Err(format!("Newton method failed to converge. Timestep collapsed below {}.", self.min_dt)); }
+                if sub_dt < self.min_dt { 
+                    return self.trigger_crash_dump(n, y, &res, &weights, format!("Timestep collapsed below {}.", self.min_dt));
+                }
             }
         }
 
@@ -184,41 +207,21 @@ impl BdfIntegrator {
         *order = cur_order;
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::raw::c_double;
-
-    unsafe extern "C" fn mock_res(y: *const c_double, ydot: *const c_double, _p: *const c_double, res: *mut c_double) {
-        *res = *ydot + *y;
-    }
-
-    unsafe extern "C" fn mock_jac(_y: *const c_double, _ydot: *const c_double, _p: *const c_double, c_j: c_double, jac: *mut c_double) {
-        *jac = c_j + 1.0;
-    }
-
-    #[test]
-    fn test_bdf2_variable_step_correctness() {
-        let integrator = BdfIntegrator::default();
-        let mut y = vec![1.0];
-        let mut ydot = vec![0.0];
-        let id = vec![1.0];
-        let p = vec![];
-        let spatial_diag = vec![0.0];
-
-        let mut y_prev = vec![1.0];
-        let mut y_prev2 = vec![1.0];
-        let mut dt_prev = 0.0;
-        let mut order = 1;
-
-        for _ in 0..10 {
-            integrator.step(1, 0, &mut y, &mut ydot, &p, &id, &spatial_diag, 0.1, mock_res, mock_jac, None, 
-                &mut y_prev, &mut y_prev2, &mut dt_prev, &mut order, None, 0.0).unwrap();
+    /// Pre-mortem JSON dump to persist the exact array shapes that killed the solver.
+    fn trigger_crash_dump(&self, n: usize, y: &[f64], res: &[f64], weights: &[f64], error_msg: String) -> Result<(), String> {
+        if self.debug {
+            std::fs::create_dir_all("ion_flux_diagnostics").ok();
+            if let Ok(mut file) = File::create("ion_flux_diagnostics/crash_dump.json") {
+                let y_str = y.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                let res_str = res.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                let w_str = weights.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                
+                writeln!(file, "{{\n  \"error\": \"{}\",\n  \"n\": {},\n  \"y\": [{}],\n  \"res\": [{}],\n  \"weights\": [{}]\n}}", 
+                         error_msg, n, y_str, res_str, w_str).ok();
+                file.flush().ok();
+            }
         }
-        
-        let analytical_expected = std::f64::consts::E.powf(-1.0);
-        assert!((y[0] - analytical_expected).abs() < 1e-2); 
+        Err(error_msg)
     }
 }

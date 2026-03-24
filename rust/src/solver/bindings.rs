@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use super::session::SolverHandle;
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, t_eval, bandwidth, spatial_diag, record_history=false))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, t_eval, bandwidth, spatial_diag, record_history=false, debug=false))]
 pub fn solve_ida_native<'py>(
     py: Python<'py>,
     lib_path: String,
@@ -16,8 +16,9 @@ pub fn solve_ida_native<'py>(
     bandwidth: isize, 
     spatial_diag: Vec<f64>,
     record_history: bool,
+    debug: bool,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
-    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, p_list, spatial_diag)?;
+    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, p_list, spatial_diag, debug)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     
     let mut history = if record_history {
@@ -66,9 +67,10 @@ pub fn solve_batch_native<'py>(
     t_eval: Vec<f64>,
     bandwidth: isize,
     spatial_diag: Vec<f64>,
+    debug: bool,
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
-        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone())
+        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone(), debug.clone())
             .map_err(|e| e.to_string())?;
             
         // Explicitly force OpenMP to 1 thread for this worker.

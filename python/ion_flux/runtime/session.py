@@ -13,20 +13,22 @@ class Session:
     Stateful execution session for Hardware/Software-in-the-Loop co-simulation.
     Keeps native memory, sparse matrices, and integration history "hot" in hardware.
     """
-    def __init__(self, engine: Any, parameters: Dict[str, float], soc: Optional[float] = None):
+    def __init__(self, engine: Any, parameters: Dict[str, float], soc: Optional[float] = None, debug: bool = False):
         self.engine = engine
         self.parameters = {**{k: v.value for k, v in engine.parameters.items()}, **parameters}
         self.time = 0.0
         self._history = {"Time [s]": [0.0]}
+        self.debug = debug
         
         y0, ydot0, id_arr, spatial_diag = engine._extract_metadata()
         p_list = engine._pack_parameters(self.parameters)
         self.id_arr = np.array(id_arr)
         
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
+            # Pass debug explicitly to the handle
             self.handle = SolverHandle(
                 engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                y0, ydot0, id_arr, p_list, spatial_diag
+                y0, ydot0, id_arr, p_list, spatial_diag, self.debug
             )
         else:
             self.handle = None
