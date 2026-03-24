@@ -44,7 +44,7 @@ impl SolverHandle {
             t: 0.0, y: y0, ydot: ydot0, id, p, spatial_diag,
             y_prev, y_prev2, dt_prev: 0.0, order: 1,
         };
-        handle.initialize_ic()?;
+        handle.calc_algebraic_roots()?;
         Ok(handle)
     }
 
@@ -80,6 +80,95 @@ impl SolverHandle {
             numpy::ndarray::Array2::from_shape_vec((h_len, self.n), micro_y).unwrap().to_pyarray_bound(py),
             numpy::ndarray::Array2::from_shape_vec((h_len, self.n), micro_ydot).unwrap().to_pyarray_bound(py)
         ))
+    }
+
+    /// Evaluates a zero-dt solve over the system. Freezes differential states (id == 1.0) 
+    /// while snapping algebraic variables to the new equilibrium manifold.
+    pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {
+        let mut res = vec![0.0; self.n];
+        let mut jac = vec![0.0; self.n * self.n];
+        let mut dy = vec![0.0; self.n];
+
+        for _ in 0..20 {
+            unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
+            
+            let max_res = res.iter().enumerate()
+                .filter(|(i, _)| self.id[*i] == 0.0)
+                .map(|(_, v)| v.abs())
+                .fold(0.0, f64::max);
+                
+            if max_res < 1e-8 { break; }
+
+            if self.bw == -1 {
+                let mut rhs = vec![0.0; self.n];
+                for i in 0..self.n { rhs[i] = if self.id[i] == 1.0 { 0.0 } else { -res[i] }; }
+                
+                let jvp = self.jvp_fn.expect("evaluate_jvp not found. Clear cache and recompile the JIT model.");
+                let y_ptr = self.y.as_ptr();
+                let ydot_ptr = self.ydot.as_ptr();
+                let p_ptr = self.p.as_ptr();
+                let id_ptr = self.id.as_ptr();
+                
+                let jvp_closure = |v: &[f64], out: &mut [f64]| {
+                    unsafe { 
+                        jvp(y_ptr, ydot_ptr, p_ptr, 0.0, v.as_ptr(), out.as_mut_ptr()); 
+                        for i in 0..self.n { if *id_ptr.add(i) == 1.0 { out[i] = v[i]; } }
+                    }
+                };
+                
+                let precond = |v: &[f64], out: &mut [f64]| {
+                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + self.spatial_diag[i] + 1.0); }
+                };
+                
+                solve_gmres(self.n, &mut rhs, jvp_closure, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+                dy.copy_from_slice(&rhs);
+            } else {
+                unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
+                for i in 0..self.n {
+                    dy[i] = -res[i];
+                    if self.id[i] == 1.0 {
+                        dy[i] = 0.0; // Force differential variables to freeze
+                        for col in 0..self.n { jac[col * self.n + i] = if col == i { 1.0 } else { 0.0 }; }
+                    }
+                }
+                if self.bw > 0 { solve_banded_system(self.n, self.bw as usize, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
+                else { solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; }
+            }
+            
+            // Apply the Newton update with globalization (Line Search)
+            let mut alpha = 1.0;
+            let mut step_accepted = false;
+            let mut y_trial = vec![0.0; self.n];
+            let mut res_trial = vec![0.0; self.n];
+            
+            for _ in 0..5 {
+                for i in 0..self.n { y_trial[i] = self.y[i] + alpha * dy[i]; }
+                unsafe { (self.res_fn)(y_trial.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res_trial.as_mut_ptr()) };
+                
+                let max_res_trial = res_trial.iter().enumerate()
+                    .filter(|(i, _)| self.id[*i] == 0.0)
+                    .map(|(_, v)| v.abs())
+                    .fold(0.0, f64::max);
+                    
+                if max_res_trial <= max_res * (1.0 - 1e-4 * alpha) || max_res_trial.is_nan() == false && max_res < 1e-6 {
+                    self.y.copy_from_slice(&y_trial);
+                    step_accepted = true;
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            
+            if !step_accepted {
+                for i in 0..self.n { self.y[i] += alpha * dy[i]; }
+            }
+        }
+
+        // Restore integration history context based on the new equilibrium manifold
+        self.y_prev.copy_from_slice(&self.y);
+        self.y_prev2.copy_from_slice(&self.y);
+        self.dt_prev = 0.0;
+        self.order = 1; // Explicitly drop to BDF1 across the discontinuity shock
+        Ok(())
     }
 
     pub fn reach_steady_state(&mut self) -> PyResult<()> {
@@ -202,88 +291,6 @@ impl SolverHandle {
             history, self.t
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         self.t += dt;
-        Ok(())
-    }
-    
-    fn initialize_ic(&mut self) -> PyResult<()> {
-        let mut res = vec![0.0; self.n];
-        let mut jac = vec![0.0; self.n * self.n];
-        let mut dy = vec![0.0; self.n];
-
-        for _ in 0..20 {
-            unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
-            
-            let max_res = res.iter().enumerate().filter(|(i, _)| self.id[*i] == 0.0).map(|(_, v)| v.abs()).fold(0.0, f64::max);
-            if max_res < 1e-8 { break; }
-
-            if self.bw == -1 {
-                let mut rhs = vec![0.0; self.n];
-                for i in 0..self.n { rhs[i] = if self.id[i] == 1.0 { 0.0 } else { -res[i] }; }
-                
-                let jvp = self.jvp_fn.expect("evaluate_jvp not found. Clear cache and recompile the JIT model.");
-                let y_ptr = self.y.as_ptr();
-                let ydot_ptr = self.ydot.as_ptr();
-                let p_ptr = self.p.as_ptr();
-                let id_ptr = self.id.as_ptr();
-                
-                let jvp_closure = |v: &[f64], out: &mut [f64]| {
-                    unsafe { 
-                        jvp(y_ptr, ydot_ptr, p_ptr, 0.0, v.as_ptr(), out.as_mut_ptr()); 
-                        for i in 0..self.n { if *id_ptr.add(i) == 1.0 { out[i] = v[i]; } }
-                    }
-                };
-                
-                let precond = |v: &[f64], out: &mut [f64]| {
-                    for i in 0..self.n { out[i] = v[i] / (0.0 * self.id[i] + self.spatial_diag[i] + 1.0); }
-                };
-                
-                solve_gmres(self.n, &mut rhs, jvp_closure, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
-                dy.copy_from_slice(&rhs);
-            } else {
-                unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), 0.0, jac.as_mut_ptr()) };
-                for i in 0..self.n {
-                    dy[i] = -res[i];
-                    if self.id[i] == 1.0 {
-                        dy[i] = 0.0;
-                        for col in 0..self.n { jac[col * self.n + i] = if col == i { 1.0 } else { 0.0 }; }
-                    }
-                }
-                if self.bw > 0 { solve_banded_system(self.n, self.bw as usize, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; } 
-                else { solve_dense_system(self.n, &mut jac, &mut dy).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?; }
-            }
-            
-            // Globalize the DAE initial conditions evaluation with a fallback Line Search
-            let mut alpha = 1.0;
-            let mut step_accepted = false;
-            let mut y_trial = vec![0.0; self.n];
-            let mut res_trial = vec![0.0; self.n];
-            
-            for _ in 0..5 {
-                for i in 0..self.n { y_trial[i] = self.y[i] + alpha * dy[i]; }
-                unsafe { (self.res_fn)(y_trial.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res_trial.as_mut_ptr()) };
-                
-                let max_res_trial = res_trial.iter().enumerate()
-                    .filter(|(i, _)| self.id[*i] == 0.0)
-                    .map(|(_, v)| v.abs())
-                    .fold(0.0, f64::max);
-                    
-                if max_res_trial <= max_res * (1.0 - 1e-4 * alpha) || max_res_trial.is_nan() == false && max_res < 1e-6 {
-                    self.y.copy_from_slice(&y_trial);
-                    step_accepted = true;
-                    break;
-                }
-                alpha *= 0.5;
-            }
-            
-            if !step_accepted {
-                for i in 0..self.n { self.y[i] += alpha * dy[i]; }
-            }
-        }
-
-        self.y_prev.copy_from_slice(&self.y);
-        self.y_prev2.copy_from_slice(&self.y);
-        self.dt_prev = 0.0;
-        self.order = 1;
         Ok(())
     }
 }

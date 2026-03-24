@@ -54,7 +54,17 @@ class Session:
 
     def step(self, dt: float, inputs: Optional[Dict[str, float]] = None) -> None:
         if inputs:
-            for k, v in inputs.items(): self.set_parameter(k, v)
+            changed = False
+            for k, v in inputs.items(): 
+                current_v = self.parameters.get(k)
+                if current_v is None or abs(current_v - v) > 1e-12:
+                    self.set_parameter(k, v)
+                    changed = True
+                    
+            # Snap algebraic states instantly to the new hardware inputs before integrating
+            if changed and self.handle:
+                self.handle.calc_algebraic_roots()
+                
         if self.handle:
             if getattr(self, "record_history", False):
                 mt, my, mydot = self.handle.step_history(dt)
@@ -119,7 +129,6 @@ class Session:
             p_list = self.engine._pack_parameters(self.parameters)
             offset = self.engine.layout.get_param_offset(input_var)
             
-            # Exact analytical evaluation of dF/dp using Reverse-Mode Enzyme VJP
             dF_dp_input = np.zeros(N)
             lam = [0.0] * N
             for i in range(N):
