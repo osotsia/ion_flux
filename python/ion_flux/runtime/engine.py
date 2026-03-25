@@ -145,9 +145,9 @@ class SimulationResult:
         """
         Generates an interactive Matplotlib dashboard to visualize simulated states.
         Dynamically adapts to the provided variables and handles both 0D and 1D spatial data.
-        
+
         Args:
-            variables: List of variable names or lists of variable names (for grouping on the same axes). 
+            variables: List of variable names or lists of variable names (for grouping on the same axes).
                        If None, attempts to use the model's `default_quick_plot_variables` or falls back 
                        to automatically selecting available outputs.
         """
@@ -315,6 +315,24 @@ class Engine:
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
         
         self.ast_payload: Dict[str, List[Dict[str, Any]]] = model.ast() if hasattr(model, "ast") else {}
+        
+        # Topological validation: detect unconstrained states prior to LLVM emission
+        if self.ast_payload:
+            targeted_states = set()
+            from ion_flux.compiler.codegen.ast_analysis import extract_state_names
+            
+            all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
+            for eqs in self.ast_payload.get("regions", {}).values():
+                all_eqs.extend(eqs)
+                
+            for eq in all_eqs:
+                if eq["lhs"].get("type") != "InitialCondition":
+                    targeted_states.update(extract_state_names(eq["lhs"]))
+                    targeted_states.update(extract_state_names(eq["rhs"]))
+                    
+            for state_name in self.layout.state_offsets.keys():
+                if state_name not in targeted_states:
+                    raise ValueError(f"Unconstrained state detected: '{state_name}'. Rank deficiency in system.")
 
         # Map -1 to trigger Matrix-Free Krylov Iterative solver natively in Rust
         if jacobian_bandwidth is None:
@@ -355,6 +373,7 @@ class Engine:
     def load(cls, binary_path: str, target: str = "cpu:serial") -> "Engine":
         """0ms Serverless cold-start instantiation from a pre-compiled object block and layout manifest."""
         meta_path = binary_path + ".meta.json"
+        
         if not os.path.exists(meta_path):
             raise FileNotFoundError(f"Missing layout manifest at {meta_path}. Ensure it was exported correctly.")
             
@@ -443,7 +462,7 @@ class Engine:
                 for v in node.values(): _mark_differentials(v)
             elif isinstance(node, list):
                 for v in node: _mark_differentials(v)
-                    
+                
         # Scan V2 domains for dt() differentials, isolating algebraic equations automatically
         _mark_differentials(self.ast_payload.get("global", []))
         for eqs in self.ast_payload.get("regions", {}).values():
@@ -602,7 +621,7 @@ class Engine:
                             else:
                                 low = mid
                             session.restore()
-                            
+                        
                         # Evaluate to the precise boundary that triggers the event
                         session.step(high, inputs=inputs)
                         

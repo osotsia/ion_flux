@@ -99,6 +99,7 @@ def _emit_domain_constants(lines: List[str], states: List[Any], layout: Any, dyn
             L_state = extract_state_name(dynamic_domains[d.name]["rhs"], layout)
             offset = layout.state_offsets[L_state][0]
             lines.append(f"    double dx_{d.name} = y[{offset}] / {denom}.0;")
+            lines.append(f"    if (dx_{d.name} <= 0.0) {{ for(int i=0; i<{layout.n_states}; ++i) res[i] = std::nan(\"\"); return; }}")
         else:
             dx_val = float(d.bounds[1] - d.bounds[0]) / denom
             lines.append(f"    double dx_{d.name} = {dx_val};")

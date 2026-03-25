@@ -8,7 +8,7 @@ pub struct BdfIntegrator {
     pub min_dt: f64,
     pub rel_tol: f64,
     pub atol: f64,
-    pub debug: bool, // Added observability toggle
+    pub debug: bool,
 }
 
 impl Default for BdfIntegrator {
@@ -43,7 +43,6 @@ impl BdfIntegrator {
 
         let mut t_local = 0.0;
         let mut sub_dt = if cur_dt_prev > 0.0 { target_dt.min(cur_dt_prev * 1.5).max(self.min_dt) } else { target_dt.min(1e-3) };
-        
         let mut res = vec![0.0; n];
         let mut jac = vec![0.0; if bw == -1 { 0 } else { n * n }];
         let mut dy = vec![0.0; n];
@@ -75,7 +74,7 @@ impl BdfIntegrator {
             }
             (sum / (n as f64)).sqrt()
         };
-        
+
         while target_dt - t_local > 1e-8 {
             if t_local + sub_dt > target_dt { sub_dt = target_dt - t_local; }
             
@@ -85,7 +84,7 @@ impl BdfIntegrator {
             } else {
                 (1.0 / sub_dt, 1.0 / sub_dt, 0.0)
             };
-            
+
             y_revert.copy_from_slice(y);
 
             if cur_order == 2 {
@@ -104,23 +103,28 @@ impl BdfIntegrator {
             for iter in 0..self.max_newton_iters {
                 iters = iter;
                 for i in 0..n { 
-                    ydot[i] = if id[i] == 1.0 { c_j * y[i] - c_1 * cur_y_prev[i] + c_2 * cur_y_prev2[i] } else { 0.0 }; 
+                    ydot[i] = if id[i] == 1.0 { c_j * y[i] - c_1 * cur_y_prev[i] + c_2 * cur_y_prev2[i] } else { 0.0 };
                 }
                 
                 unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), res.as_mut_ptr()) };
-
+                
                 let mut max_abs_res = 0.0;
                 let mut max_res_idx = 0;
                 for i in 0..n {
                     let r_abs = res[i].abs();
                     if r_abs > max_abs_res || r_abs.is_nan() { 
-                        max_abs_res = r_abs; 
+                        max_abs_res = r_abs;
                         max_res_idx = i;
                     }
                     dy[i] = -res[i];
                 }
 
                 if max_abs_res < 1e-12 && !max_abs_res.is_nan() { converged = true; break; }
+
+                // Force step rejection rather than passing garbage into factorization
+                if max_abs_res.is_nan() || max_abs_res.is_infinite() {
+                    break; 
+                }
 
                 if bw == -1 {
                     let jvp = jvp_fn.expect("evaluate_jvp missing.");
@@ -134,16 +138,18 @@ impl BdfIntegrator {
                     let precond = |v: &[f64], out: &mut [f64]| {
                         for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
                     };
-                    // Pass linear algebra failures upward to trigger crash dumps
-                    if let Err(e) = solve_gmres(n, &mut dy, jvp_closure, precond) {
-                        return self.trigger_crash_dump(n, y, &res, &weights, format!("GMRES Failed: {}", e));
+
+                    // Linear failures indicate local ill-conditioning for this dt, reject step natively
+                    if solve_gmres(n, &mut dy, jvp_closure, precond).is_err() {
+                        break;
                     }
                 } else {
                     unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), c_j, jac.as_mut_ptr()) };
                     let lin_res = if bw > 0 { solve_banded_system(n, bw as usize, &mut jac, &mut dy) } 
                                   else { solve_dense_system(n, &mut jac, &mut dy) };
-                    if let Err(e) = lin_res {
-                        return self.trigger_crash_dump(n, y, &res, &weights, format!("Linear Solve Failed: {}", e));
+                    
+                    if lin_res.is_err() {
+                        break;
                     }
                 }
 
@@ -156,7 +162,7 @@ impl BdfIntegrator {
                 
                 for _ in 0..5 {
                     for i in 0..n { 
-                        y_trial[i] = y[i] + alpha * dy[i]; 
+                        y_trial[i] = y[i] + alpha * dy[i];
                         ydot_trial[i] = if id[i] == 1.0 { c_j * y_trial[i] - c_1 * cur_y_prev[i] + c_2 * cur_y_prev2[i] } else { 0.0 };
                     }
                     
@@ -169,7 +175,7 @@ impl BdfIntegrator {
                         step_accepted = true;
                         break;
                     }
-                    alpha *= 0.5; 
+                    alpha *= 0.5;
                 }
 
                 if let Some(ref mut file) = trace_file {
@@ -196,7 +202,7 @@ impl BdfIntegrator {
                 y.copy_from_slice(&y_revert);
                 sub_dt *= 0.25; 
                 if sub_dt < self.min_dt { 
-                    return self.trigger_crash_dump(n, y, &res, &weights, format!("Timestep collapsed below {}.", self.min_dt));
+                    return self.trigger_crash_dump(n, y, &res, &weights, format!("Timestep collapsed below {}. Possible Domain collapse or Mesh inversion.", self.min_dt));
                 }
             }
         }
