@@ -158,13 +158,16 @@ class CppTranslator:
                 left = f"(({local_idx}) == 0 ? ({bc_expr}) : ({left}))"
                 center = f"(({local_idx}) == 0 ? ({bc_expr}) : ({center}))"
 
+        # Construct mathematically correct 1st-order one-sided stencils at boundaries,
+        # and 2nd-order centered stencils in the bulk.
+        fd_stencil = f"(({local_idx}) == 0 || ({local_idx}) == {res_val} - 1 ? (({right}) - ({left})) / {target_dx} : (({right}) - ({left})) / (2.0 * {target_dx}))"
+
         if is_div and coord_sys == "spherical":
-            grad_n = f"(({right}) - ({left})) / (2.0 * {target_dx})"
             r_coord = f"(std::max(1e-12, (double)({local_idx}) * {target_dx}))"
-            std_div = f"({grad_n}) + (2.0 / {r_coord}) * ({center})"
+            std_div = f"({fd_stencil}) + (2.0 / {r_coord}) * ({center})"
             return f"(({local_idx}) == 0 ? (3.0 * ({right}) / {target_dx}) : ({std_div}))"
             
-        return f"(({right}) - ({left})) / (2.0 * {target_dx})"
+        return fd_stencil
 
     def _build_integral(self, node: Dict[str, Any], idx: str) -> str:
         child = node["child"]
