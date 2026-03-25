@@ -36,71 +36,48 @@ class Loss:
             w_arr = self._trajectory["w_arr"]
             input_var = self._trajectory["input_var"]
             output_var = self._trajectory["output_var"]
-            eis_target_key = self._trajectory.get("_eis_target_key", "Z_real")
-            eps = 1e-5
             
             s_base = self._engine.start_session(parameters=self._parameters)
             s_base.reach_steady_state()
             
-            if s_base.handle:
-                y_ss = s_base.handle.get_state()
-                J_ss = s_base.handle.get_jacobian(0.0)
-            else:
-                y_ss = s_base._mock_y
-                J_ss = np.eye(len(y_ss))
-                
+            y_ss = s_base.handle.get_state() if s_base.handle else s_base._mock_y
+            J_ss = s_base.handle.get_jacobian(0.0) if s_base.handle else np.eye(len(y_ss))
+            
+            # Pre-factor the Jacobian for O(N^2) sensitivity solve
             try:
-                lu, piv = scipy.linalg.lu_factor(J_ss)
-                def solve_J(b): return scipy.linalg.lu_solve((lu, piv), b)
+                lu_piv = scipy.linalg.lu_factor(J_ss)
+                def solve_J(b): return scipy.linalg.lu_solve(lu_piv, b)
             except scipy.linalg.LinAlgError:
                 def solve_J(b): return np.linalg.lstsq(J_ss, b, rcond=None)[0]
             
+            # Identify output mapping vector C
+            out_offset = self._engine.layout.get_state_offset(output_var)
+            C = np.zeros(len(y_ss))
+            C[out_offset] = 1.0
+
+            p_list = self._engine._pack_parameters(self._parameters)
+            
             for p_name in req_grad:
                 if p_name in self._engine.parameters:
-                    p_val = self._parameters.get(p_name, self._engine.parameters[p_name].value)
+                    p_offset = self._engine.layout.get_param_offset(p_name)
                     
                     # 1. Compute exact dF/dp using Native Enzyme Reverse-Mode VJP
-                    p_list = self._engine._pack_parameters(self._parameters)
-                    p_offset = self._engine.layout.get_param_offset(p_name)
-                    dF_dp = np.zeros(len(y_ss))
-                    lam = [0.0] * len(y_ss)
-                    for i in range(len(y_ss)):
-                        lam[i] = 1.0
-                        dp_out, _, _ = self._engine.runtime.evaluate_vjp(y_ss.tolist(), np.zeros_like(y_ss).tolist(), p_list, lam)
-                        dF_dp[i] = dp_out[p_offset]
-                        lam[i] = 0.0
+                    # We solve the adjoint equation: J^T * lambda = C
+                    # Then grad = lambda^T * (dF/dp)
+                    adj_lambda = solve_J(C)
                     
-                    # 2. Extract Exact State Shift via Implicit Function Theorem (dy_ss/dp = -J^{-1} dF/dp)
-                    dy_dp = solve_J(-dF_dp)
+                    # Pull dF/dp via VJP: Enzyme gives us (lambda^T * dF/dp) directly
+                    # Signature: evaluate_vjp(y, ydot, p, lambda) -> (dp_out, dy_out, dydot_out)
+                    dp_out, _, _ = self._engine.runtime.evaluate_vjp(
+                        y_ss.tolist(), 
+                        np.zeros_like(y_ss).tolist(), 
+                        p_list, 
+                        adj_lambda.tolist()
+                    )
                     
-                    # 3. Evaluate EIS at the analytically shifted Forward State
-                    y_fwd = y_ss + eps * dy_dp
-                    s_base.parameters[p_name] = p_val + eps
-                    if s_base.handle:
-                        s_base.handle.restore_state(s_base.time, y_fwd.tolist(), np.zeros_like(y_fwd).tolist(), y_fwd.tolist(), y_fwd.tolist(), 0.0, 1)
-                    else:
-                        s_base._mock_y = y_fwd
-                    Z_fwd = s_base.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
-                    
-                    # 4. Evaluate EIS at the analytically shifted Backward State
-                    y_bwd = y_ss - eps * dy_dp
-                    s_base.parameters[p_name] = p_val - eps
-                    if s_base.handle:
-                        s_base.handle.restore_state(s_base.time, y_bwd.tolist(), np.zeros_like(y_bwd).tolist(), y_bwd.tolist(), y_bwd.tolist(), 0.0, 1)
-                    else:
-                        s_base._mock_y = y_bwd
-                    Z_bwd = s_base.solve_eis(w_arr / (2 * np.pi), input_var, output_var)._data
-                    
-                    # 5. Restore Pristine Session State
-                    s_base.parameters[p_name] = p_val
-                    if s_base.handle:
-                        s_base.handle.restore_state(s_base.time, y_ss.tolist(), np.zeros_like(y_ss).tolist(), y_ss.tolist(), y_ss.tolist(), 0.0, 1)
-                    else:
-                        s_base._mock_y = y_ss
-                        
-                    # 6. Accumulate true gradient mappings
-                    dZ_dp = (Z_fwd[eis_target_key] - Z_bwd[eis_target_key]) / (2 * eps)
-                    self.grads[p_name] = float(np.sum(self._dl_dy_mapped * dZ_dp))
+                    # 2. Apply Implicit Function Theorem: dZ/dp = -C^T * J^-1 * dF/dp
+                    # The VJP result dp_out[p_offset] is precisely lambda^T * dF/dp
+                    self.grads[p_name] = -float(np.sum(self._dl_dy_mapped * dp_out[p_offset]))
                     
             return self.grads
 
@@ -128,8 +105,8 @@ class Loss:
                 macro_idx += 1
         
         y0, ydot0, id_arr, spatial_diag = self._engine._extract_metadata()
-        
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
+        
         p_grad = discrete_adjoint_native(
             self._engine.runtime.lib_path, y_traj.tolist(), ydot_traj.tolist(), 
             t_eval.tolist(), id_arr, p_traj, dl_dy.tolist(), bw
