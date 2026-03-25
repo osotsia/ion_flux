@@ -1,3 +1,10 @@
+"""
+Frontend DSL: AST Failure Modes
+
+Validates compiler handling of boundary condition collisions, DAE masking flaws,
+hierarchical topology misalignments, and under-determined systems.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

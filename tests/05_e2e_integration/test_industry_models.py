@@ -1,3 +1,10 @@
+"""
+E2E Integration: Industry Models
+
+End-to-End tests validating the implicit solver against highly coupled
+PDE-ODE-DAE industry architectures (e.g., lumped thermals and SEI degradation).
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

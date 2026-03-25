@@ -1,3 +1,10 @@
+"""
+Middle-End Codegen: Spatial Topologies
+
+Tests the generation of correct C++ memory strides, coordinate systems, and
+hierarchical loop unrolling (e.g., 1D spherical, macro-micro cross-products).
+"""
+
 import pytest
 import ion_flux as fx
 from ion_flux.compiler.memory import MemoryLayout

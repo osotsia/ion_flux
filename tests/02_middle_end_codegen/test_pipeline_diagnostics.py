@@ -1,3 +1,10 @@
+"""
+Middle-End Codegen: Pipeline Diagnostics
+
+Targeted diagnostics for the Codegen pipeline, isolating finite difference
+stencil deformations, boundary condition erasures, and DAE initialization.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

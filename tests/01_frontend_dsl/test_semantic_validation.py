@@ -1,3 +1,10 @@
+"""
+Frontend DSL: Semantic Validation
+
+Tests the strict validation barriers applied to the AST before compilation.
+Ensures structural integrity to prevent fatal unwraps downstream.
+"""
+
 import pytest
 import ion_flux as fx
 from ion_flux.dsl.ast import validate_ast

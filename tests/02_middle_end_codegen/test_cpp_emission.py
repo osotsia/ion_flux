@@ -1,3 +1,10 @@
+"""
+Middle-End Codegen: C++ Emission
+
+Validates the dynamic dispatcher that translates AST nodes into native C++
+residual loops, including basic DAEs and 1D spatial loops.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

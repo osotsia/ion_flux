@@ -1,3 +1,10 @@
+"""
+E2E Integration: V1 Cross Validation
+
+Direct transcription of legacy PyBaMM/V1 logic mapped to V2 to mathematically
+validate backwards-compatible conservation and CCCV handling.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

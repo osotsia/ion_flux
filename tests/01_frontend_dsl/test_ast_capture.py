@@ -1,3 +1,10 @@
+"""
+Frontend DSL: AST Capture
+
+Validates that Python operator overloading correctly translates mathematical
+intent into the expected AST JSON/Dict payload without executing calculus.
+"""
+
 import ion_flux as fx
 
 class AdvancedMathModel(fx.PDE):

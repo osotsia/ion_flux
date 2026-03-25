@@ -1,3 +1,10 @@
+"""
+Runtime Execution: Native Solvers
+
+Tests the core numerical math engine loaded via FFI, including implicit BDF1
+steppers, stateful session execution, and stateless binary deployment.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

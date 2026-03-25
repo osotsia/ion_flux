@@ -1,3 +1,10 @@
+"""
+Benchmarks: Performance Metrics
+
+Pytest-benchmark suites rigorously tracking regressions in JIT compilation time,
+isolated numerical loop execution, and task-parallel throughput.
+"""
+
 import pytest
 from ion_flux.battery import DFN, parameters
 from ion_flux import Engine

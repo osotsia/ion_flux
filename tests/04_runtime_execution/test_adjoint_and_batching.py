@@ -1,3 +1,10 @@
+"""
+Runtime Execution: Adjoints & Parallel Batching
+
+Validates discrete adjoint backward propagation, Rayon/OpenMP task parallelism,
+and explicit suppression of thread-oversubscription cascades.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

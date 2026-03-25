@@ -1,3 +1,10 @@
+"""
+Runtime Execution: 3D Unstructured Meshes
+
+Validates Matrix-Free GMRES Krylov subspace solvers and discrete CSR matrix
+graph traversals for massive 3D unstructured finite-element meshes.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

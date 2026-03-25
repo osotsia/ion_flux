@@ -1,3 +1,10 @@
+"""
+Runtime Execution: Stateful Sessions & Co-Simulation
+
+Tests the Stateful HIL/SIL memory session manager, protocol hot-swapping (CC/CV),
+and analytical Electrochemical Impedance Spectroscopy (EIS) solvers.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

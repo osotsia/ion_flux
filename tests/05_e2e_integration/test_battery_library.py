@@ -1,3 +1,10 @@
+"""
+E2E Integration: Battery Library API
+
+Validates the public API wrappers around the core engine, including flat-string
+parameter injection and dynamic drive cycle array evaluation.
+"""
+
 import pytest
 import numpy as np
 import ion_flux as fx

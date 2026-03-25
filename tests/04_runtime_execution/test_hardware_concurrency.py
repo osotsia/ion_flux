@@ -1,3 +1,10 @@
+"""
+Runtime Execution: Hardware Concurrency
+
+Validates safe asynchronous task queueing and limits concurrent solves to
+prevent hardware oversubscription (OOM) and scheduler collision conditions.
+"""
+
 import pytest
 import asyncio
 from ion_flux import Engine

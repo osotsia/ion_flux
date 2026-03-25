@@ -1,3 +1,10 @@
+"""
+Backend Compilation: Clang Invocation
+
+Tests the subprocess invocation of the Clang compiler, generation of portable
+.so binaries, and basic Foreign Function Interface (FFI) loading.
+"""
+
 import pytest
 import shutil
 import platform
