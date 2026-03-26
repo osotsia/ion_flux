@@ -43,19 +43,16 @@ class HierarchicalCouplingPDE(fx.PDE):
             ]
         }
 
-@pytest.mark.xfail(reason="Truncation issue.")
 def test_diagnose_nonlinear_bandwidth_truncation():
     """
     X-Ray for silent Jacobian truncation. 
-    Proves that hardcoding `jacobian_bandwidth = 2` for spatial systems 
-    destroys the physical coupling between macro and micro states.
+    Proves that composite domains successfully bypass the naive tridiagonal 
+    assumption to prevent truncating physical coupling off-diagonals.
     """
     model = HierarchicalCouplingPDE()
     engine = Engine(model=model, target="cpu", mock_execution=False)
     
-    # 1. Verify the Engine's naive heuristic failed to allocate enough bandwidth
-    # The true bandwidth required to link c_e[i] with c_s[i*10 + 9] is at least 10 + offsets.
-    assert engine.jacobian_bandwidth == 2, "Baseline check: Engine incorrectly assumed a narrow tridiagonal bandwidth."
+    assert engine.jacobian_bandwidth == 0, "Engine failed to assign a dense bandwidth to a composite topology."
     
     if getattr(engine, "mock_execution", False):
         pytest.skip("Compilation environment absent.")
@@ -71,10 +68,6 @@ def test_diagnose_nonlinear_bandwidth_truncation():
     dense_engine = Engine(model=model, target="cpu", mock_execution=False, jacobian_bandwidth=0)
     J_dense = np.array(dense_engine.evaluate_jacobian(y, ydot, c_j=1.0))
     
-    # DIAGNOSTIC ASSERTION:
-    # If the banded matrix drops non-zero elements present in the dense matrix, 
-    # the Newton solver will diverge because it is blind to the inter-domain physics.
-    # This test will FAIL until the Engine dynamically calculates bandwidth by traversing AST node distances.
     np.testing.assert_allclose(
         J_banded, J_dense, 
         err_msg="Jacobian Bandwidth Truncation detected! The solver is silently dropping macro-micro coupling terms."

@@ -26,9 +26,17 @@ def get_ale_terms(state_name: str, offset: int, size: int, state_map: dict, dyna
                 L_dot_expr = translator.translate(binding["rhs"], idx)
                 translator.use_ydot = False
                 
-                v_mesh = f"({x_coord} / std::max(1e-12, (double)({L_expr}))) * ({L_dot_expr})"
-                grad_c = f"(((y[{offset} + CLAMP(({idx})+1, {size})]) - (y[{offset} + CLAMP(({idx})-1, {size})])) / (2.0 * dx_{d.name}))"
+                v_mesh = f"(({x_coord} / std::max(1e-12, (double)({L_expr}))) * ({L_dot_expr}))"
                 
-                ale_terms.append(f"({v_mesh} * {grad_c})")
+                y_plus = f"y[{offset} + CLAMP(({idx})+1, {size})]"
+                y_minus = f"y[{offset} + CLAMP(({idx})-1, {size})]"
+                y_curr = f"y[{offset} + CLAMP({idx}, {size})]"
+                
+                # Upwind differencing for advective stability:
+                # v_mesh > 0 -> flow left to right -> backward difference
+                # v_mesh <= 0 -> flow right to left -> forward difference
+                grad_c_upwind = f"(({v_mesh}) > 0.0 ? (({y_curr}) - ({y_minus})) / dx_{d.name} : (({y_plus}) - ({y_curr})) / dx_{d.name})"
+                
+                ale_terms.append(f"({v_mesh} * {grad_c_upwind})")
                 
     return ale_terms

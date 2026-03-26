@@ -341,6 +341,7 @@ class Engine:
             else:
                 has_spatial = any(s.domain is not None for s in states)
                 has_scalar = any(s.domain is None for s in states)
+                has_composite = any(type(s.domain).__name__ == "CompositeDomain" for s in states if s.domain)
                 
                 def _has_integral(node: Any) -> bool:
                     if isinstance(node, dict):
@@ -349,8 +350,10 @@ class Engine:
                     elif isinstance(node, list): return any(_has_integral(v) for v in node)
                     return False
                     
-                if (has_spatial and has_scalar) or _has_integral(self.ast_payload): self.jacobian_bandwidth = 0
-                else: self.jacobian_bandwidth = 2 if has_spatial else 0
+                if (has_spatial and has_scalar) or _has_integral(self.ast_payload) or has_composite: 
+                    self.jacobian_bandwidth = 0
+                else: 
+                    self.jacobian_bandwidth = 2 if has_spatial else 0
         else:
             self.jacobian_bandwidth = jacobian_bandwidth
         
@@ -362,6 +365,7 @@ class Engine:
                 try:
                     self.runtime = NativeCompiler().compile(self.cpp_source, self.layout.n_states)
                 except RuntimeError as e:
+                    import logging
                     logging.warning(f"Compilation failed, falling back to mock execution: {e}")
                     self.mock_execution = True
         else:
