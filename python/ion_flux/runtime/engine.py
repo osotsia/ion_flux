@@ -307,9 +307,9 @@ class Engine:
         self.mock_execution = mock_execution
         self.debug = debug
         
-        # Introspect PDE attributes for memory layout
-        states = [attr for attr in model.__dict__.values() if isinstance(attr, State)]
-        params = [attr for attr in model.__dict__.values() if isinstance(attr, Parameter)]
+        # Introspect PDE attributes recursively for accurate hardware memory layouts
+        states = model.components(State) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, State)]
+        params = model.components(Parameter) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Parameter)]
         
         self.layout = MemoryLayout(states, params)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}

@@ -50,6 +50,19 @@ class Node:
         raise NotImplementedError("Subclasses must implement to_dict()")
 
 
+def merge(*systems: SystemDict) -> SystemDict:
+    """Merges multiple SystemDict physics payloads into a single cohesive system."""
+    merged: SystemDict = {"regions": {}, "global": [], "boundaries": []}
+    for sys in systems:
+        if not sys:
+            continue
+        for dom, eqs in sys.get("regions", {}).items():
+            merged["regions"].setdefault(dom, []).extend(eqs)
+        merged["global"].extend(sys.get("global", []))
+        merged["boundaries"].extend(sys.get("boundaries", []))
+    return merged
+
+
 def _wrap(val: Union[int, float, Node]) -> Node:
     if isinstance(val, (int, float)): return Scalar(float(val))
     if isinstance(val, Node): return val
@@ -67,7 +80,7 @@ class Scalar(Node):
 
 
 class State(Node):
-    __slots__ = ["domain", "name"]
+    __slots__ = ["domain", "name", "_original_name"]
     def __init__(self, domain: Optional["Domain"] = None, name: str = ""):
         self.domain = domain
         self.name = name
@@ -81,7 +94,7 @@ class State(Node):
 
 
 class Parameter(Node):
-    __slots__ = ["default", "name"]
+    __slots__ = ["default", "name", "_original_name"]
     def __init__(self, default: float, name: str = ""):
         self.default = default
         self.name = name
@@ -180,7 +193,7 @@ class DomainBoundary(Node):
 
 class ConcatenatedDomain:
     """Syntactic sugar allowing users to map physical cell regions logically."""
-    __slots__ = ["domains", "name"]
+    __slots__ = ["domains", "name", "_original_name"]
     def __init__(self, domains: List['Domain'], name: str = ""):
         self.domains = domains
         self.name = name or "_plus_".join(d.name for d in domains)
@@ -192,7 +205,7 @@ class ConcatenatedDomain:
 
 
 class Domain:
-    __slots__ = ["bounds", "resolution", "coord_sys", "name", "csr_data"]
+    __slots__ = ["bounds", "resolution", "coord_sys", "name", "csr_data", "_original_name"]
     def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian", name: str = "", csr_data: Optional[Dict] = None):
         self.bounds = bounds
         self.resolution = resolution
@@ -295,7 +308,7 @@ class Domain:
 
 class CompositeDomain:
     """Represents a hierarchical cross-product of multiple topologies."""
-    __slots__ = ["domains", "name"]
+    __slots__ = ["domains", "name", "_original_name"]
     def __init__(self, domains: List[Domain], name: str = ""):
         self.domains = domains
         self.name = name or "_x_".join([d.name for d in domains if d.name])
@@ -382,7 +395,7 @@ class Condition:
 
 class Terminal:
     """Hardware abstraction representing an electrical battery cycler connection."""
-    __slots__ = ["current", "voltage", "name"]
+    __slots__ = ["current", "voltage", "name", "_original_name"]
     def __init__(self, current: "State", voltage: "State", name: str = ""):
         self.current = current
         self.voltage = voltage
@@ -396,30 +409,81 @@ class PDE:
     """Declarative base class for defining Partial Differential Equations."""
     def __init__(self, **kwargs):
         self._bind_declarations()
+        self._pde_init_done = True
         
     def _bind_declarations(self) -> None:
         """
         Isolates class-level Nodes to the instance level to prevent state leakage
         across concurrent PDE instantiations, injecting variable names intrinsically.
         """
-        has_terminal = False
+        to_copy = {}
         for name in dir(self.__class__):
             if name.startswith("__"):
                 continue
             
             attr = getattr(self.__class__, name)
-            if isinstance(attr, (State, Parameter, Domain, CompositeDomain, Terminal)):
-                clone = copy.copy(attr)
+            # Include ConcatenatedDomain and package all valid AST nodes for a single group deepcopy
+            if isinstance(attr, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal, PDE)):
+                to_copy[name] = attr
+
+        # Deepcopying as a group preserves shared object references (e.g. State.domain -> Domain)
+        clones = copy.deepcopy(to_copy)
+        
+        has_terminal = False
+        for name, clone in clones.items():
+            if isinstance(clone, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
                 clone.name = name
                 setattr(self, name, clone)
-                if isinstance(attr, Terminal):
+                if isinstance(clone, Terminal):
                     has_terminal = True
+            elif isinstance(clone, PDE):
+                # Recursively mangle names of sub-models
+                clone._apply_namespace(prefix=name)
+                setattr(self, name, clone)
         
         # Implicitly inject reserved parameters for hardware multiplexing 
         if has_terminal and not hasattr(self, "_term_mode"):
             self._term_mode = Parameter(default=1.0, name="_term_mode")
             self._term_i_target = Parameter(default=0.0, name="_term_i_target")
             self._term_v_target = Parameter(default=0.0, name="_term_v_target")
+
+    def _apply_namespace(self, prefix: str) -> None:
+        """Recursively prefixes all internal AST nodes to prevent compilation collisions."""
+        for name, attr in self.__dict__.items():
+            # Ensure ConcatenatedDomain is captured in the namespace mapping
+            if isinstance(attr, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
+                # Cache the true un-mangled root name to prevent double-prefixing in deep hierarchies
+                if not hasattr(attr, "_original_name"):
+                    attr._original_name = getattr(attr, "name", "") or name
+                attr.name = f"{prefix}_{attr._original_name}"
+            elif isinstance(attr, PDE):
+                attr._apply_namespace(prefix=f"{prefix}_{name}")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Safely intercepts submodels assigned dynamically at runtime (e.g. inside __init__)."""
+        if getattr(self, "_pde_init_done", False):
+            if isinstance(value, PDE):
+                clone = copy.deepcopy(value)
+                clone._apply_namespace(prefix=name)
+                super().__setattr__(name, clone)
+                return
+        super().__setattr__(name, value)
+
+    def components(self, node_type: type) -> List[Any]:
+        """Recursively extracts all AST nodes of a given type, ensuring topological uniqueness."""
+        gathered = []
+        seen = set()
+        for attr in self.__dict__.values():
+            if isinstance(attr, node_type):
+                if id(attr) not in seen:
+                    seen.add(id(attr))
+                    gathered.append(attr)
+            elif isinstance(attr, PDE):
+                for sub_attr in attr.components(node_type):
+                    if id(sub_attr) not in seen:
+                        seen.add(id(sub_attr))
+                        gathered.append(sub_attr)
+        return gathered
 
     def math(self) -> SystemDict:
         raise NotImplementedError("PDE subclasses must implement the math() method returning a SystemDict.")
