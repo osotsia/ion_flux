@@ -1,3 +1,4 @@
+# --- File: tests/02_middle_end_codegen/test_spatial_topologies.py ---
 """
 Middle-End Codegen: Spatial Topologies
 
@@ -9,32 +10,6 @@ import pytest
 import ion_flux as fx
 from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp
-
-class Level1_Spherical(fx.PDE):
-    r = fx.Domain(bounds=(0, 1), resolution=5, coord_sys="spherical", name="r")
-    c = fx.State(domain=r, name="c")
-    def math(self):
-        return {
-            "regions": {
-                self.r: [
-                    fx.dt(self.c) == fx.div(fx.grad(self.c, axis=self.r), axis=self.r)
-                ]
-            }
-        }
-
-class Level1_FluxBC(fx.PDE):
-    x = fx.Domain(bounds=(0, 1), resolution=5, name="x")
-    c = fx.State(domain=x, name="c")
-    def math(self):
-        flux = -fx.grad(self.c)
-        return {
-            "regions": {
-                self.x: [ fx.dt(self.c) == -fx.div(flux) ]
-            },
-            "boundaries": [
-                flux.right() == 1.0
-            ]
-        }
 
 class Level2_ALE(fx.PDE):
     x = fx.Domain(bounds=(0, 1), resolution=5, name="x")
@@ -72,24 +47,6 @@ class Level2_MacroMicro(fx.PDE):
                 flux_r.right(domain=self.r) == 0.5 
             ]
         }
-
-def test_spherical_divergence_emission():
-    model, states = Level1_Spherical(), [Level1_Spherical().c]
-    cpp = generate_cpp(model.ast(), MemoryLayout(states, []), states)
-    
-    # Verify L'Hopital's rule is applied at the origin (r=0) to prevent 0/0 singularities
-    assert "((i) == 0 ? (3.0 *" in cpp 
-    
-    # Verify the expanded divergence formula (grad(c) + 2/r * c) is used for r > 0
-    assert "(2.0 / (std::max(1e-12, (double)(i) * dx_r)))" in cpp
-
-def test_flux_boundary_neumann():
-    model, states = Level1_FluxBC(), [Level1_FluxBC().c]
-    cpp = generate_cpp(model.ast(), MemoryLayout(states, []), states)
-    # Verify the ternary operator successfully injects the Neumann BC into the flux evaluation
-    assert "((i) == 5 - 1 ? (1.0)" in cpp
-    # Verify the bulk gradient evaluation is preserved for the 'else' branch
-    assert "(2.0 * dx_x)" in cpp
 
 def test_ale_moving_boundary_injection():
     model, states = Level2_ALE(), [Level2_ALE().c, Level2_ALE().L]

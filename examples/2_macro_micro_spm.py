@@ -86,7 +86,7 @@ class MacroMicroSPM(fx.PDE):
         }
 
 if __name__ == "__main__":
-    engine = fx.Engine(model=MacroMicroSPM(), target="cpu:serial", solver_backend="sundials")
+    engine = fx.Engine(model=MacroMicroSPM(), target="cpu:serial", solver_backend="native")
     
     protocol = Sequence([
         CC(rate=30.0, until=fx.Condition("V_cell <= 3.0"), time=3600),
