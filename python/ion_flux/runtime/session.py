@@ -3,7 +3,7 @@ import scipy.linalg
 from typing import Dict, Any, Optional
 
 try:
-    from ion_flux._core import SolverHandle
+    from ion_flux._core import SolverHandle, SundialsHandle
     RUST_FFI_AVAILABLE = True
 except ImportError:
     RUST_FFI_AVAILABLE = False
@@ -25,11 +25,16 @@ class Session:
         self.id_arr = np.array(id_arr)
         
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
-            # Pass debug explicitly to the handle
-            self.handle = SolverHandle(
-                engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                y0, ydot0, id_arr, p_list, spatial_diag, self.debug
-            )
+            if getattr(engine, "solver_backend", "native") == "sundials":
+                self.handle = SundialsHandle(
+                    engine.runtime.lib_path, engine.layout.n_states,
+                    y0, ydot0, id_arr, p_list
+                )
+            else:
+                self.handle = SolverHandle(
+                    engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
+                    y0, ydot0, id_arr, p_list, spatial_diag, self.debug
+                )
         else:
             self.handle = None
             self._mock_y = np.array(y0)
@@ -69,27 +74,30 @@ class Session:
                 
         if self.handle:
             if getattr(self, "record_history", False):
-                mt, my, mydot = self.handle.step_history(dt)
-                if len(mt) > 0:
-                    self.micro_t.extend(mt.tolist())
-                    self.micro_y.extend(my.tolist())
-                    self.micro_ydot.extend(mydot.tolist())
-                    p_list = self.engine._pack_parameters(self.parameters)
-                    self.micro_p.extend([p_list] * len(mt))
+                if hasattr(self.handle, "step_history"):
+                    mt, my, mydot = self.handle.step_history(dt)
+                    if len(mt) > 0:
+                        self.micro_t.extend(mt.tolist())
+                        self.micro_y.extend(my.tolist())
+                        self.micro_ydot.extend(mydot.tolist())
+                        p_list = self.engine._pack_parameters(self.parameters)
+                        self.micro_p.extend([p_list] * len(mt))
+                else:
+                    self.handle.step(dt) # Sundials does not yet pipe deep history logic
             else:
                 self.handle.step(dt)
         self.time += dt
         self._history["Time [s]"].append(self.time)
 
     def checkpoint(self) -> None:
-        if self.handle:
+        if self.handle and hasattr(self.handle, "clone_state"):
             self._ckpt = self.handle.clone_state()
         else:
-            self._ckpt = (self.time, self._mock_y.copy())
+            self._ckpt = (self.time, self._mock_y.copy() if not self.handle else self.handle.get_state())
             
     def restore(self) -> None:
         if not hasattr(self, "_ckpt"): return
-        if self.handle:
+        if self.handle and hasattr(self.handle, "restore_state"):
             self.handle.restore_state(*self._ckpt)
             self.time = self._ckpt[0]
         else:
@@ -97,8 +105,7 @@ class Session:
             self._mock_y = self._ckpt[1].copy()
 
     def triggered(self, condition: Any) -> bool:
-        if condition is None or isinstance(condition, (int, float)):
-            return False
+        if condition is None or isinstance(condition, (int, float)): return False
         if isinstance(condition, str):
             from ion_flux.dsl.core import Condition
             condition = Condition(condition)

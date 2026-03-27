@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use rayon::prelude::*;
 use super::session::SolverHandle;
+use super::sundials::SundialsHandle;
 
 #[pyfunction]
 #[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, t_eval, bandwidth, spatial_diag, record_history=false, debug=false))]
@@ -54,6 +55,35 @@ pub fn solve_ida_native<'py>(
         let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
         Ok((res_y, empty_t, empty_y.clone(), empty_y))
     }
+}
+
+#[pyfunction]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, t_eval))]
+pub fn solve_ida_sundials<'py>(
+    py: Python<'py>,
+    lib_path: String,
+    y0_py: Vec<f64>,
+    ydot0_py: Vec<f64>,
+    id_py: Vec<f64>,
+    p_list: Vec<f64>,
+    t_eval: Vec<f64>,
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let mut handle = SundialsHandle::new(lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list)?;
+    let mut out_traj = vec![0.0; t_eval.len() * handle.n];
+    
+    for i in 0..handle.n { out_traj[i] = handle._y_data[i]; }
+    
+    for step in 1..t_eval.len() {
+        let dt = t_eval[step] - t_eval[step - 1];
+        handle.step(dt)?;
+        for i in 0..handle.n { out_traj[step * handle.n + i] = handle._y_data[i]; }
+    }
+    
+    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).unwrap().to_pyarray_bound(py);
+    let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
+    let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
+    
+    Ok((res_y, empty_t, empty_y.clone(), empty_y))
 }
 
 #[pyfunction]

@@ -138,7 +138,8 @@ class DFN(fx.PDE):
 
 if __name__ == "__main__":
     # Instantiate the compilation engine and target the local CPU
-    engine = fx.Engine(model=DFN(), target="cpu:serial", debug=True)
+    #engine = fx.Engine(model=DFN(), target="cpu:serial", debug=True)
+    engine = fx.Engine(model=DFN(), target="cpu", solver_backend="sundials")
 
     # Define a 1-hour (3600s) Constant Current (CC) discharge
     # The applied rate (e.g., 30.0A) is assumed to correspond to the cell's 1C capacity

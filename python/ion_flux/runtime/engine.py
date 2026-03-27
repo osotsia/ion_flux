@@ -13,7 +13,7 @@ from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
 from ion_flux.runtime.session import Session
 
 try:
-    from ion_flux._core import solve_ida_native, solve_batch_native
+    from ion_flux._core import solve_ida_native, solve_ida_sundials, solve_batch_native
     RUST_FFI_AVAILABLE = True
     FFI_IMPORT_ERROR = None
 except ImportError as e:
@@ -301,9 +301,10 @@ class TelemetryReport:
 
 class Engine:
     """The central orchestrator for compilation, execution routing, and autodiff graphs."""
-    def __init__(self, model: PDE, target: str = "cpu", cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, debug: bool = False, **kwargs):
+    def __init__(self, model: PDE, target: str = "cpu", solver_backend: str = "native", cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, debug: bool = False, **kwargs):
         self.model = model
         self.target = target
+        self.solver_backend = solver_backend.lower()
         self.mock_execution = mock_execution
         self.debug = debug
         
@@ -374,8 +375,7 @@ class Engine:
         for k, v in kwargs.items(): setattr(self, k, v)
 
     @classmethod
-    def load(cls, binary_path: str, target: str = "cpu:serial") -> "Engine":
-        """0ms Serverless cold-start instantiation from a pre-compiled object block and layout manifest."""
+    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native") -> "Engine":
         meta_path = binary_path + ".meta.json"
         
         if not os.path.exists(meta_path):
@@ -386,6 +386,7 @@ class Engine:
             
         engine = cls.__new__(cls)
         engine.target = target
+        engine.solver_backend = solver_backend
         engine.mock_execution = False
         engine.layout = MemoryLayout.from_dict(meta["layout"])
         engine.parameters = {name: _ParamHandle(name, val) for name, val in meta["parameters"].items()}
@@ -672,10 +673,16 @@ class Engine:
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
         
         record_history = requires_grad is not None
-        y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
-            self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), 
-            self.jacobian_bandwidth, spatial_diag, record_history, self.debug
-        )
+        
+        if self.solver_backend == "sundials":
+            y_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
+                self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist()
+            )
+        else:
+            y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
+                self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), 
+                self.jacobian_bandwidth, spatial_diag, record_history, self.debug
+            )
         
         data = {"Time [s]": t_eval_arr}
         for state_name, (offset, size) in self.layout.state_offsets.items():

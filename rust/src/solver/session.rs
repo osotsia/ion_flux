@@ -181,15 +181,10 @@ impl SolverHandle {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(report));
             }
 
-            // SUNDIALS Technique: Bounded Step Limiter (Trust Region)
-            // Prevents massive Newton overshoots from throwing variables into unphysical domains
-            // (e.g. updating a 4.2V potential by 1,000,000 Volts in a single step).
-            if max_dy > 50.0 {
-                let scale = 50.0 / max_dy;
-                for i in 0..self.n { dy[i] *= scale; }
-            }
-
-            let dy_norm = wrms_norm(&dy, &weights); // Calculate AFTER applying the step limiter
+            // Trust Region Step Limiter Removed. 
+            // Strict linear spatial equations (e.g. Poisson interfaces) require exactly 1 massive Newton 
+            // step to immediately reach their root. Bounding the update artificially exhausts the solver.
+            let dy_norm = wrms_norm(&dy, &weights); 
 
             let mut alpha = 1.0;
             let mut step_accepted = false;
@@ -204,6 +199,7 @@ impl SolverHandle {
                 let f_norm_trial = wrms_norm(&res_trial, &weights);
                 let max_res_trial = res_trial.iter().enumerate().filter(|(i, _)| self.id[*i] == 0.0).map(|(_, v)| v.abs()).fold(0.0f64, |a: f64, b: f64| if !a.is_finite() { a } else if !b.is_finite() { b } else { a.max(b) });
 
+                // Rely strictly on the unscaled Armijo threshold to safeguard against divergent nonlinear roots natively
                 if f_norm_trial.is_finite() && (f_norm_trial <= f_norm * (1.0 - 1e-4 * alpha) || max_res_trial < 1e-6) {
                     self.y.copy_from_slice(&y_trial);
                     step_accepted = true;
@@ -308,12 +304,6 @@ impl SolverHandle {
             if !max_dy.is_finite() {
                 let report = self.build_crash_report("Steady State Initialization", "Newton step (dy) generated NaN or Inf.", &res, &dy, &history);
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(report));
-            }
-
-            // Trust Region Step Limiter
-            if max_dy > 50.0 {
-                let scale = 50.0 / max_dy;
-                for i in 0..self.n { dy[i] *= scale; }
             }
 
             let dy_norm = wrms_norm(&dy, &weights); 

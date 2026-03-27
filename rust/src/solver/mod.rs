@@ -3,6 +3,7 @@ pub mod integrator;
 pub mod session;
 pub mod adjoint;
 pub mod bindings;
+pub mod sundials;
 
 use std::os::raw::c_double;
 

@@ -44,11 +44,12 @@ class Loss:
             J_ss = s_base.handle.get_jacobian(0.0) if s_base.handle else np.eye(len(y_ss))
             
             # Pre-factor the Jacobian for O(N^2) sensitivity solve
+            # Transpose solves are required strictly for Adjoint formulation (J^T * lambda = C)
             try:
                 lu_piv = scipy.linalg.lu_factor(J_ss)
-                def solve_J(b): return scipy.linalg.lu_solve(lu_piv, b)
+                def solve_J_trans(b): return scipy.linalg.lu_solve(lu_piv, b, trans=1)
             except scipy.linalg.LinAlgError:
-                def solve_J(b): return np.linalg.lstsq(J_ss, b, rcond=None)[0]
+                def solve_J_trans(b): return np.linalg.lstsq(J_ss.T, b, rcond=None)[0]
             
             # Identify output mapping vector C
             out_offset = self._engine.layout.get_state_offset(output_var)
@@ -64,7 +65,7 @@ class Loss:
                     # 1. Compute exact dF/dp using Native Enzyme Reverse-Mode VJP
                     # We solve the adjoint equation: J^T * lambda = C
                     # Then grad = lambda^T * (dF/dp)
-                    adj_lambda = solve_J(C)
+                    adj_lambda = solve_J_trans(C)
                     
                     # Pull dF/dp via VJP: Enzyme gives us (lambda^T * dF/dp) directly
                     # Signature: evaluate_vjp(y, ydot, p, lambda) -> (dp_out, dy_out, dydot_out)
