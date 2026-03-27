@@ -67,8 +67,35 @@ def _parse_buckets(ast_payload: Dict[str, Any], layout: Any) -> Tuple[dict, list
             bulk_eqs.append(eq_copy)
             
     # Boundaries dictate local Dirichlet overrides or Neumann flux injections
+    targeted_boundaries = set()
+    
     for eq in ast_payload.get("boundaries", []):
         lhs = eq["lhs"]
+        rhs = eq["rhs"]
+        
+        # --- Commutative DSL Auto-Flipper ---
+        # Automatically swaps LHS and RHS if the LHS node is already fully constrained
+        # by a previous equation, allowing researchers to write intuitive A == B syntax.
+        def get_bnd_target(node):
+            if node.get("type") == "Boundary":
+                try:
+                    return (extract_state_name(node, layout), node["side"])
+                except ValueError:
+                    pass
+            return None
+            
+        lhs_target = get_bnd_target(lhs)
+        rhs_target = get_bnd_target(rhs)
+        
+        if lhs_target and lhs_target in targeted_boundaries and rhs_target and rhs_target not in targeted_boundaries:
+            eq["lhs"], eq["rhs"] = rhs, lhs
+            lhs = eq["lhs"]
+            lhs_target = rhs_target
+            
+        if lhs_target:
+            targeted_boundaries.add(lhs_target)
+        # ------------------------------------
+
         if lhs.get("type") == "DomainBoundary":
             dynamic_domains[lhs["domain"]] = {"side": lhs["side"], "rhs": eq["rhs"]}
         elif lhs.get("type") == "InitialCondition":
