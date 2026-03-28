@@ -44,6 +44,13 @@ class DFN(fx.PDE):
         Ds_n, Ds_p = 1e-14, 1e-14
         sig_n, sig_p = 100.0, 100.0
         
+        # Physical Constants
+        F = 96485.0
+        a_n = 3.0 / 5e-6
+        a_p = 3.0 / 5e-6
+        aF_n = a_n * F
+        aF_p = a_p * F
+        
         # Continuous internal fluxes
         N_e_n = -De * fx.grad(self.c_e_n) 
         N_e_s = -De * fx.grad(self.c_e_s) 
@@ -71,14 +78,14 @@ class DFN(fx.PDE):
         eta_n = self.phi_s_n - self.phi_e_n - U_n 
         eta_p = self.phi_s_p - self.phi_e_p - U_p 
         
-        # Butler-Volmer
-        j_n = 1.0 * eta_n 
-        j_p = 1.0 * eta_p 
+        # Volumetric exchange current (A/m^3)
+        j_n = 1e6 * eta_n 
+        j_p = 1e6 * eta_p 
         
         return {
             "regions": {
                 self.x_n: [
-                    fx.dt(self.c_e_n) == -fx.div(N_e_n) + j_n,
+                    fx.dt(self.c_e_n) == -fx.div(N_e_n) + (j_n / F),
                     0 == fx.div(i_e_n) - j_n,
                     0 == fx.div(i_s_n) + j_n
                 ],
@@ -87,7 +94,7 @@ class DFN(fx.PDE):
                     0 == fx.div(i_e_s)
                 ],
                 self.x_p: [
-                    fx.dt(self.c_e_p) == -fx.div(N_e_p) + j_p,
+                    fx.dt(self.c_e_p) == -fx.div(N_e_p) + (j_p / F),
                     0 == fx.div(i_e_p) - j_p,
                     0 == fx.div(i_s_p) + j_p
                 ],
@@ -116,15 +123,15 @@ class DFN(fx.PDE):
                 i_e_s.right == i_e_p.left, 
                 i_e_p.right == 0.0,
                 
-                # Solid Potential Boundaries
+                # Solid Potential Boundaries (Corrected Wiring)
                 i_s_n.left == -self.i_app, i_s_n.right == 0.0,
-                i_s_p.left == 0.0, i_s_p.right == self.i_app,
+                i_s_p.left == 0.0, i_s_p.right == -self.i_app,
                 
-                # Particle Boundaries
+                # Particle Boundaries (Corrected Faraday mapping)
                 N_s_n.boundary("left", domain=self.r_n) == 0.0,  
-                N_s_n.boundary("right", domain=self.r_n) == -j_n, 
+                N_s_n.boundary("right", domain=self.r_n) == -j_n / aF_n, 
                 N_s_p.boundary("left", domain=self.r_p) == 0.0,  
-                N_s_p.boundary("right", domain=self.r_p) == -j_p 
+                N_s_p.boundary("right", domain=self.r_p) == -j_p / aF_p 
             ],
             "global": [
                 self.V_cell == self.phi_s_p.right - self.phi_s_n.left,
@@ -137,8 +144,6 @@ class DFN(fx.PDE):
         }
 
 if __name__ == "__main__":
-    # Instantiate the compilation engine and target the local CPU
-    #engine = fx.Engine(model=DFN(), target="cpu:serial", debug=True)
     engine = fx.Engine(model=DFN(), target="cpu", solver_backend="native")
 
     # Define a 1-hour (3600s) Constant Current (CC) discharge
@@ -149,7 +154,13 @@ if __name__ == "__main__":
     ])
 
     print("Executing protocol...")
+    import time
+    start = time.time()
+
     res = engine.solve(protocol=protocol)
+
+    end = time.time()
+    print(end - start)
 
     print("Simulation Complete. Launching Dashboard.")
     res.plot_dashboard()

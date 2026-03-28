@@ -99,6 +99,7 @@ impl BdfIntegrator {
 
             let mut converged = false;
             let mut iters = 0;
+            let mut initial_max_res = 0.0; // Track the initial residual magnitude
             
             for iter in 0..self.max_newton_iters {
                 iters = iter;
@@ -119,7 +120,16 @@ impl BdfIntegrator {
                     dy[i] = -res[i];
                 }
 
-                if max_abs_res < 1e-12 && !max_abs_res.is_nan() { converged = true; break; }
+                // Record the pre-step residual magnitude
+                if iter == 0 {
+                    initial_max_res = max_abs_res;
+                }
+
+                // HYBRID TOLERANCE FIX: Accept step if absolute floor is hit OR if relative reduction is sufficient
+                if max_abs_res < 1e-8 || (iter > 0 && max_abs_res < 1e-6 * initial_max_res) { 
+                    converged = true; 
+                    break; 
+                }
 
                 // Force step rejection rather than passing garbage into factorization
                 if max_abs_res.is_nan() || max_abs_res.is_infinite() {

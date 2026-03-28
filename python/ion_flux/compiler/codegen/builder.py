@@ -132,6 +132,17 @@ def _emit_domain_constants(lines: List[str], states: List[Any], layout: Any, dyn
             lines.append(f"    double dx_{d.name} = {dx_val};")
     lines.append("")
 
+def _has_dt(node: Any) -> bool:
+    """Recursively checks if an AST node contains a time derivative (dt)."""
+    if isinstance(node, dict):
+        if node.get("type") == "UnaryOp" and node.get("op") == "dt":
+            return True
+        return any(_has_dt(v) for v in node.values())
+    elif isinstance(node, list):
+        return any(_has_dt(v) for v in node)
+    return False
+
+
 def _emit_residual_loop(lines: List[str], eq: Dict[str, Any], target: str, layout: Any, state_map: dict, translator: CppTranslator):
     try:
         # Standard extraction for equations like: dt(T) == RHS
@@ -165,6 +176,14 @@ def _emit_residual_loop(lines: List[str], eq: Dict[str, Any], target: str, layou
 
     omp_pragma = "    #pragma omp parallel for\n" if ("omp" in target and loop_size > 50) else ""
 
+    # AUTOMATED EQUATION NORMALIZATION
+    # If the equation lacks a time derivative but operates over a spatial mesh, it is a Spatial DAE.
+    # We multiply the residual by dx^2 to neutralize the 1/dx^2 scaling of divergence/Laplacian operators,
+    # bringing the absolute residual natively back to O(1) to survive f64 ULP noise.
+    scale_factor = ""
+    if target_domain_name and not _has_dt(eq["lhs"]) and not _has_dt(eq["rhs"]):
+        scale_factor = f" * (dx_{target_domain_name} * dx_{target_domain_name})"
+
     # 2. Emit the native C++ arrays bound to the exact spatial region
     if hasattr(state_obj.domain, "domains") and type(state_obj.domain).__name__ == "CompositeDomain" and len(state_obj.domain.domains) == 2:
         d_mac, d_mic = state_obj.domain.domains[0], state_obj.domain.domains[1]
@@ -175,18 +194,18 @@ def _emit_residual_loop(lines: List[str], eq: Dict[str, Any], target: str, layou
         lines.append(f"            int i = i_mac * {d_mic.resolution} + i_mic;")
         lhs_cpp = translator.translate(eq["lhs"], "i")
         rhs_cpp = translator.translate(eq["rhs"], "i")
-        lines.append(f"            res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});")
+        lines.append(f"            res[{offset} + i] = (({lhs_cpp}) - ({rhs_cpp})){scale_factor};")
         lines.append(f"        }}\n    }}")
     elif loop_size > 1:
         lines.append(f"{omp_pragma}    for (int i = {loop_start}; i < {loop_start + loop_size}; ++i) {{")
         lhs_cpp = translator.translate(eq["lhs"], "i")
         rhs_cpp = translator.translate(eq["rhs"], "i")
-        lines.append(f"        res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});\n    }}")
+        lines.append(f"        res[{offset} + i] = (({lhs_cpp}) - ({rhs_cpp})){scale_factor};\n    }}")
     else:
         idx = str(loop_start) if loop_start > 0 else "0"
         lhs_cpp = translator.translate(eq["lhs"], idx)
         rhs_cpp = translator.translate(eq["rhs"], idx)
-        lines.append(f"    res[{offset} + {idx}] = ({lhs_cpp}) - ({rhs_cpp});")
+        lines.append(f"    res[{offset} + {idx}] = (({lhs_cpp}) - ({rhs_cpp})){scale_factor};")
 
 def _emit_dirichlet_override(lines: List[str], eq: Dict[str, Any], layout: Any, state_map: dict, translator: CppTranslator):
     state_name = extract_state_name(eq["lhs"], layout)

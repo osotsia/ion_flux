@@ -101,6 +101,7 @@ impl SolverHandle {
         
         let mut history: Vec<(usize, f64, f64, f64)> = Vec::new();
         let max_iters = 100;
+        let mut initial_max_res = 0.0; // Track initial DAE residual
 
         for iter in 0..max_iters {
             unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
@@ -128,7 +129,10 @@ impl SolverHandle {
             }
             
             let max_res = res.iter().enumerate().filter(|(i, _)| self.id[*i] == 0.0).map(|(_, v)| v.abs()).fold(0.0f64, |a: f64, b: f64| a.max(b));
-            if max_res < 1e-8 { break; } 
+
+            // HYBRID TOLERANCE FIX
+            if iter == 0 { initial_max_res = max_res; }
+            if max_res < 1e-8 || (iter > 0 && max_res < 1e-6 * initial_max_res) { break; } 
 
             let mut lin_success = true;
             if self.bw == -1 {
@@ -239,6 +243,7 @@ impl SolverHandle {
         
         let mut history: Vec<(usize, f64, f64, f64)> = Vec::new();
         let max_iters = 100;
+        let mut initial_max_res = 0.0; // Track initial DAE residual
 
         for iter in 0..max_iters {
             unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), res.as_mut_ptr()) };
@@ -264,7 +269,10 @@ impl SolverHandle {
             }
             
             let max_res = res.iter().map(|v| v.abs()).fold(0.0f64, |a: f64, b: f64| a.max(b));
-            if max_res < 1e-12 { break; } 
+            
+            // HYBRID TOLERANCE FIX: Accept if absolute floor is hit OR relative reduction is sufficient
+            if iter == 0 { initial_max_res = max_res; }
+            if max_res < 1e-8 || (iter > 0 && max_res < 1e-6 * initial_max_res) { break; } 
 
             let mut lin_success = true;
             if self.bw == -1 {
