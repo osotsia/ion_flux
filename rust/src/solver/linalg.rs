@@ -14,14 +14,12 @@ pub struct NativeSparseLuSolver {
     pub bw: isize,
     symbolic: Option<SymbolicLu<usize>>, 
     numeric: Option<Lu<usize, f64>>,     
-    
-    // Cached triplet memory structure for safe SparseColMat construction
     pub triplets: Vec<(usize, usize, f64)>,
+    pub row_scales: Vec<f64>,
 }
 
 impl NativeSparseLuSolver {
     pub fn new(n: usize, bw: isize) -> Self {
-        // Estimate initial capacity for the sparse triplets
         let estimated_nnz = n * (2 * bw.max(0) as usize + 1).min(n);
         
         Self {
@@ -31,6 +29,7 @@ impl NativeSparseLuSolver {
             symbolic: None,
             numeric: None,
             triplets: Vec::with_capacity(estimated_nnz),
+            row_scales: vec![1.0; n],
         }
     }
 
@@ -40,11 +39,20 @@ impl NativeSparseLuSolver {
         
         self.triplets.clear();
 
-        // Convert dense array to Triplets dynamically.
-        // This is extremely safe and allows Faer to handle CSC sorting and compression internally.
+        // Compute row equilibration scales
+        for r in 0..n {
+            let mut max_val = 0.0_f64;
+            for c in 0..n {
+                let val = jac_dense[c * n + r].abs();
+                if val > max_val { max_val = val; }
+            }
+            self.row_scales[r] = if max_val > 1e-15 { 1.0 / max_val } else { 1.0 };
+        }
+
+        // Assemble scaled triplets
         for c in 0..n {
             for r in 0..n {
-                let val = jac_dense[c * n + r];
+                let val = jac_dense[c * n + r] * self.row_scales[r];
                 if val.abs() > 1e-14 {
                     self.triplets.push((r, c, val));
                 }
@@ -55,7 +63,6 @@ impl NativeSparseLuSolver {
             n, n, &self.triplets
         ).map_err(|_| "Failed to assemble sparse matrix from triplets.".to_string())?;
 
-        // Always recompute SymbolicLu to prevent panics when zero-crossings dynamically alter the sparsity pattern
         let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic LU failed".to_string())?;
         self.numeric = Some(
             Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric LU failed".to_string())?
@@ -71,7 +78,10 @@ impl NativeSparseLuSolver {
     pub fn solve(&self, b: &mut [f64], diag: &mut Diagnostics) -> Result<(), String> {
         let start_time = Instant::now();
         if let Some(lu) = &self.numeric {
-            // Connect raw slice perfectly to Faer's highly optimized vectorized solver
+            // Apply equilibration row scales to RHS residual
+            for i in 0..self.n {
+                b[i] *= self.row_scales[i];
+            }
             lu.solve_in_place(from_slice_mut(b));
             diag.linear_solve_time_us += start_time.elapsed().as_micros();
             Ok(())

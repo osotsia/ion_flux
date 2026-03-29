@@ -24,7 +24,38 @@ def _has_compiler() -> bool:
 REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires native C++ toolchain.")
 
 # ==============================================================================
-# Bug 1: Cross-Domain State Projection
+# Bug 1: Neumann Boundary Mask Extraction 
+# ==============================================================================
+
+class NeumannBoundaryMaskingPDE(fx.PDE):
+    x = fx.Domain(bounds=(0, 1), resolution=5, name="x")
+    c = fx.State(domain=x, name="c")
+    
+    def math(self):
+        flux = -fx.grad(self.c)
+        return {
+            "regions": { self.x: [ fx.dt(self.c) == -fx.div(flux) ] },
+            "boundaries": [ flux.left == 1.0, flux.right == 0.0 ],
+            "global": [ self.c.t0 == 1.0 ]
+        }
+
+def test_neumann_boundary_masking_extraction():
+    """
+    Validates that boundary conditions applied to arbitrary child wrappers 
+    (like fluxes) correctly map back to and mask the underlying State variables 
+    as algebraic (0.0). This prevents the solver from treating surface nodes as ODEs.
+    """
+    engine = Engine(model=NeumannBoundaryMaskingPDE(), target="cpu", mock_execution=True)
+    _, _, id_arr, _ = engine._extract_metadata()
+    
+    off_c, size_c = engine.layout.state_offsets["c"]
+    
+    assert id_arr[off_c] == 0.0, "Left Neumann boundary failed to mask as algebraic."
+    assert id_arr[off_c + size_c - 1] == 0.0, "Right Neumann boundary failed to mask as algebraic."
+    assert id_arr[off_c + 1] == 1.0, "Bulk node improperly masked as algebraic."
+
+# ==============================================================================
+# Bug 2: Cross-Domain State Projection
 # ==============================================================================
 
 class MacroMicroStateProjectionPDE(fx.PDE):
@@ -79,7 +110,7 @@ def test_cross_domain_state_projection():
 
 
 # ==============================================================================
-# Bug 2: Cross-Domain Boundary Evaluation
+# Bug 3: Cross-Domain Boundary Evaluation
 # ==============================================================================
 
 class CrossDomainBoundaryEvaluationPDE(fx.PDE):
@@ -136,7 +167,7 @@ def test_cross_domain_boundary_evaluation():
 
 
 # ==============================================================================
-# Bug 3: Interface Boundary Condition Loss
+# Bug 4: Interface Boundary Condition Loss
 # ==============================================================================
 
 class InterfaceLossPDE(fx.PDE):
@@ -193,4 +224,55 @@ def test_interface_boundary_condition_loss():
         "Interface Boundary Condition Loss detected! "
         "The Neumann flux coupling was overwritten by the Dirichlet state coupling, "
         "breaking mathematical conservation across the separator interface."
+    )
+
+# ==============================================================================
+# Bug 5: Macro-Micro Topological Bleeding (Hermetic Mesh Isolation)
+# ==============================================================================
+
+class MacroMicroTopologicalBleedPDE(fx.PDE):
+    x = fx.Domain(bounds=(0, 1), resolution=2, name="x")
+    r = fx.Domain(bounds=(0, 1), resolution=3, name="r")
+    macro_micro = x * r
+    
+    c = fx.State(domain=macro_micro, name="c")
+    
+    def math(self):
+        flux = -fx.grad(self.c, axis=self.r)
+        return {
+            "regions": {
+                self.macro_micro: [ fx.dt(self.c) == -fx.div(flux, axis=self.r) ]
+            }
+            # INTENTIONAL: No boundaries provided! Should default to hermetically sealed 0-flux.
+        }
+
+@REQUIRES_COMPILER
+def test_macro_micro_topological_bleed_prevention():
+    """
+    Proves that without explicit Neumann boundary conditions, macro-micro domains 
+    are hermetically sealed. Spatial gradients at the edges do not 'bleed' over into 
+    the next macro node's array offset.
+    """
+    engine = Engine(model=MacroMicroTopologicalBleedPDE(), target="cpu", mock_execution=False)
+    
+    N = engine.layout.n_states
+    y = np.zeros(N)
+    ydot = np.zeros(N)
+    
+    off_c, size_c = engine.layout.state_offsets["c"]
+    
+    # 2 Macro nodes * 3 Micro nodes = 6 states
+    # Inject a massive concentration ONLY in Macro Node 1.
+    # If the domain bleeds, Macro Node 0's right boundary will incorrectly evaluate a massive gradient.
+    y[off_c + 3 : off_c + 6] = [1e6, 1e6, 1e6]
+    
+    res = engine.evaluate_residual(y.tolist(), ydot.tolist())
+    
+    # Mathematical Oracle:
+    # Since Macro Node 0 is completely 0.0, and natively defaults to 0-flux boundaries,
+    # its residual MUST evaluate to exactly 0.0.
+    np.testing.assert_allclose(
+        res[off_c : off_c + 3], 
+        [0.0, 0.0, 0.0],
+        err_msg="Topological bleed detected! Macro Node 0 evaluated a boundary gradient using states from Macro Node 1."
     )

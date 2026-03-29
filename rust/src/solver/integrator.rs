@@ -2,14 +2,12 @@ use std::fs::File;
 use std::io::Write;
 use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::linalg::NativeSparseLuSolver;
-use super::newton::{solve_nonlinear_system, NewtonResult, wrms_norm_diff};
+use super::newton::{solve_nonlinear_system, NewtonResult, NewtonFailure, wrms_norm_diff};
 
-/// Variable-Step, Variable-Order Nordsieck History Array.
-/// Generates and scales integration states to seamlessly implement implicit BDF Orders 1 to 5.
 pub struct NordsieckHistory {
     pub order: usize,
     pub z: Vec<Vec<f64>>, 
-    pub l: Vec<f64>, // BDF Corrector coefficients
+    pub l: Vec<f64>, 
 }
 
 impl NordsieckHistory {
@@ -25,7 +23,6 @@ impl NordsieckHistory {
 
     pub fn set_order(&mut self, order: usize) {
         self.order = order.clamp(1, 5);
-        // Fixed-Leading Coefficient (FLC) BDF values directly derived from interpolating polynomials
         self.l = match self.order {
             1 => vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
             2 => vec![1.0, 3.0/2.0, 1.0/2.0, 0.0, 0.0, 0.0],
@@ -36,7 +33,6 @@ impl NordsieckHistory {
         };
     }
 
-    /// Extrapolates history forward using Pascal's triangle matrix equivalent.
     pub fn predict(&mut self) {
         for j in 1..=self.order {
             for i in (1..=self.order - j).rev() {
@@ -47,7 +43,6 @@ impl NordsieckHistory {
         }
     }
 
-    /// Incorporates the Newton error update into the entire derivative history.
     pub fn correct(&mut self, e_n: &[f64]) {
         for j in 0..=self.order {
             let l_j = self.l[j];
@@ -57,7 +52,6 @@ impl NordsieckHistory {
         }
     }
 
-    /// Rescales history seamlessly without polynomial re-interpolation.
     pub fn rescale(&mut self, ratio: f64) {
         let mut factor = 1.0;
         for j in 1..=self.order {
@@ -102,7 +96,7 @@ pub fn step_bdf_vsvo(
             *current_dt = sub_dt;
         }
 
-        let c_j = history.l[1] / *current_dt; // Dynamic scaling correctly shifts for BDF2-5
+        let c_j = history.l[1] / *current_dt;
 
         history.predict();
         let y_pred = history.z[0].clone();
@@ -117,8 +111,6 @@ pub fn step_bdf_vsvo(
 
         match newton_res {
             NewtonResult::Converged(iters, e_n) => {
-                // Evaluate Local Truncation Error (LTE). Critically, algebraic variables (id == 0.0) 
-                // are explicitly ignored here to prevent Index-1 DAEs from crushing step scaling.
                 let mut weights = vec![0.0; n];
                 for i in 0..n { weights[i] = 1.0 / (config.rel_tol * y[i].abs() + config.abs_tol); }
                 let err_norm = wrms_norm_diff(&e_n, &weights, id);
@@ -127,7 +119,7 @@ pub fn step_bdf_vsvo(
                 let mut err_factor = if err_norm > 1e-10 { safety * (1.0 / err_norm).powf(1.0 / (history.order as f64 + 1.0)) } else { 2.0 };
                 err_factor = err_factor.clamp(0.2, 2.0);
 
-                if err_norm > 1.0 {
+                if err_norm > 1.0 { 
                     diag.rejected_steps += 1;
                     let mut e_rev = vec![0.0; n];
                     for i in 0..n { e_rev[i] = y_pred[i] - history.z[0][i]; }
@@ -140,8 +132,8 @@ pub fn step_bdf_vsvo(
                     sub_dt *= shrink_ratio;
 
                     if sub_dt < config.min_dt {
-                        dump_diagnostics(diag);
-                        return Err(format!("Step collapsed below min_dt ({})", config.min_dt));
+                        dump_crash_report(diag, id, "Tolerance Starvation: Error estimator rejected step repeatedly.");
+                        return Err(format!("Step collapsed at t={} below min_dt ({}). Cause: Truncation error > 1.0", abs_t + t_local, config.min_dt));
                     }
                     continue;
                 }
@@ -153,14 +145,13 @@ pub fn step_bdf_vsvo(
                 diag.trace_dt.push(sub_dt);
                 diag.trace_order.push(history.order);
                 diag.trace_iters.push(iters);
+                diag.trace_err.push(err_norm);
                 
                 t_local += sub_dt;
                 if let Some(ref mut hist) = history_cache {
                     hist.push((abs_t + t_local, y.to_vec(), ydot.to_vec()));
                 }
                 
-                // Aggressive Order Heuristic: Ramp order up rapidly during smooth segments
-                // BDF2 provides immense immediate stability & step advantages over BDF1.
                 if diag.accepted_steps % 5 == 0 && history.order < 5 {
                     history.set_order(history.order + 1);
                 }
@@ -168,14 +159,14 @@ pub fn step_bdf_vsvo(
                 sub_dt *= err_factor;
                 *current_dt = sub_dt;
             },
-            NewtonResult::DivergedStaleJac => {
+            NewtonResult::DivergedStaleJac(_) => {
                 let mut e_rev = vec![0.0; n];
                 for i in 0..n { e_rev[i] = y_pred[i] - history.z[0][i]; }
                 history.correct(&e_rev); 
                 lu_solver.mark_stale();
                 continue;
             },
-            NewtonResult::DivergedFatal => {
+            NewtonResult::DivergedFatal(fail_reason) => {
                 diag.rejected_steps += 1;
                 let mut e_rev = vec![0.0; n];
                 for i in 0..n { e_rev[i] = y_pred[i] - history.z[0][i]; }
@@ -188,8 +179,15 @@ pub fn step_bdf_vsvo(
                 lu_solver.mark_stale();
 
                 if sub_dt < config.min_dt {
-                    dump_diagnostics(diag);
-                    return Err(format!("Step collapsed below min_dt ({})", config.min_dt));
+                    let reason_str = match fail_reason {
+                        NewtonFailure::NonFiniteResidual => "Mathematical Singularity (NaN/Inf in residual)".to_string(),
+                        NewtonFailure::SingularJacobian(ref e) => format!("Structural Singularity: {}", e),
+                        NewtonFailure::ContractionThrashing(rho) => format!("Nonlinear Thrashing (rho = {:.2})", rho),
+                        NewtonFailure::F64Stagnation => "f64 Precision Stagnation (y + dy == y)".to_string(),
+                        NewtonFailure::MaxItersReached => "Newton iterations stalled.".to_string(),
+                    };
+                    dump_crash_report(diag, id, &reason_str);
+                    return Err(format!("Step collapsed at t={} below min_dt ({}). Cause: {}", abs_t + t_local, config.min_dt, reason_str));
                 }
             }
         }
@@ -197,14 +195,44 @@ pub fn step_bdf_vsvo(
     Ok(())
 }
 
+pub fn dump_crash_report(diag: &Diagnostics, id: &[f64], reason: &str) {
+    std::fs::create_dir_all("ion_flux_diagnostics").ok();
+    
+    let mut offenders: Vec<(usize, f64, f64, f64, bool)> = diag.last_res.iter().enumerate()
+        .map(|(i, &res)| {
+            let err = diag.last_dy.get(i).unwrap_or(&0.0) * diag.last_weights.get(i).unwrap_or(&0.0);
+            let is_diff = id.get(i).unwrap_or(&0.0) > &0.5;
+            (i, res, err.abs(), *diag.last_y_pred.get(i).unwrap_or(&0.0), is_diff)
+        }).collect();
+    
+    offenders.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+    
+    let top_offenders: Vec<String> = offenders.into_iter().take(10).map(|(i, res, err, y, is_diff)| {
+        let eq_type = if is_diff { "ODE/PDE" } else { "Algebraic" };
+        format!("{{\"index\": {}, \"type\": \"{}\", \"y_val\": {:.3e}, \"residual\": {:.3e}, \"weighted_error\": {:.3e}}}", i, eq_type, y, res, err)
+    }).collect();
+
+    let ts = Diagnostics::generate_timestamp();
+    let filename = format!("ion_flux_diagnostics/crash_{}.json", ts);
+    
+    if let Ok(mut file) = File::create(&filename) {
+        let json = format!(
+            "{{\n  \"status\": \"CRASH\",\n  \"reason\": \"{}\",\n  \"accepted_steps\": {},\n  \"top_offenders\": [\n    {}\n  ]\n}}",
+            reason, diag.accepted_steps, top_offenders.join(",\n    ")
+        );
+        file.write_all(json.as_bytes()).ok();
+    }
+}
+
 pub fn dump_diagnostics(diag: &Diagnostics) {
     std::fs::create_dir_all("ion_flux_diagnostics").ok();
-    if let Ok(mut file) = File::create("ion_flux_diagnostics/solver_stats.json") {
+    let ts = Diagnostics::generate_timestamp();
+    if let Ok(mut file) = File::create(format!("ion_flux_diagnostics/profile_{}.json", ts)) {
         let json = format!(
-            "{{\n  \"accepted_steps\": {},\n  \"rejected_steps\": {},\n  \"newton_iterations\": {},\n  \"jacobian_evals\": {},\n  \"numeric_lus\": {},\n  \"jac_time_us\": {},\n  \"solve_time_us\": {}\n}}",
+            "{{\n  \"status\": \"SUCCESS\",\n  \"accepted_steps\": {},\n  \"rejected_steps\": {},\n  \"newton_iterations\": {},\n  \"jacobian_evals\": {},\n  \"numeric_lus\": {},\n  \"timers_us\": {{\n    \"residual\": {},\n    \"jac_assembly\": {},\n    \"lu_solve\": {}\n  }}\n}}",
             diag.accepted_steps, diag.rejected_steps, diag.newton_iterations,
             diag.jacobian_evaluations, diag.numeric_factorizations,
-            diag.jacobian_assembly_time_us, diag.linear_solve_time_us
+            diag.residual_time_us, diag.jacobian_assembly_time_us, diag.linear_solve_time_us
         );
         file.write_all(json.as_bytes()).ok();
     }

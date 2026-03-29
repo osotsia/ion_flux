@@ -175,13 +175,16 @@ class CppTranslator:
                 left = self.translate(node["child"], f"({idx}) - {stride}", face=None)
                 return f"(({curr}) - ({left})) / {target_dx}"
             else:
+                curr = self.translate(node["child"], idx, face=None)
                 right = self.translate(node["child"], f"({idx}) + {stride}", face=None)
                 left = self.translate(node["child"], f"({idx}) - {stride}", face=None)
                 denominator = f"(2.0 * {target_dx})"
+                # Fixed to prevent topological bleeding across nested grids.
+                # Uses mathematically exact asymmetric backward/forward differences at boundaries.
                 return (
-                    f"(({local_idx}) == 0 || ({local_idx}) == {res_val} - 1 ? "
-                    f"(({right}) - ({left})) / {target_dx} : "
-                    f"(({right}) - ({left})) / {denominator})"
+                    f"(({local_idx}) == 0 ? (({right}) - ({curr})) / {target_dx} : "
+                    f"(({local_idx}) == {res_val} - 1 ? (({curr}) - ({left})) / {target_dx} : "
+                    f"(({right}) - ({left})) / {denominator}))"
                 )
 
     def _build_spherical_divergence(
@@ -217,11 +220,18 @@ class CppTranslator:
             bc_expr = self.translate(bcs["right"]["rhs"], idx, face=None)
             right = f"(({local_idx}) == {res_val} - 1 ? ({bc_expr}) : ({right}))"
             center = f"(({local_idx}) == {res_val} - 1 ? ({bc_expr}) : ({center}))"
+        else:
+            # Default to no-flux to hermetically seal uncoupled macro-micro boundaries
+            right = f"(({local_idx}) == {res_val} - 1 ? (0.0) : ({right}))"
+            center = f"(({local_idx}) == {res_val} - 1 ? (0.0) : ({center}))"
             
         if "left" in bcs:
             bc_expr = self.translate(bcs["left"]["rhs"], idx, face=None)
             left = f"(({local_idx}) == 0 ? ({bc_expr}) : ({left}))"
             center = f"(({local_idx}) == 0 ? ({bc_expr}) : ({center}))"
+        else:
+            left = f"(({local_idx}) == 0 ? (0.0) : ({left}))"
+            center = f"(({local_idx}) == 0 ? (0.0) : ({center}))"
             
         return left, center, right
 
