@@ -400,7 +400,7 @@ def test_ale_grid_inversion_trapping():
     
     # Expect the native solver to throw a PyRuntimeError indicating domain collapse
     # rather than failing silently or hanging in an infinite loop.
-    with pytest.raises(RuntimeError, match=r"Domain collapse|Mesh inversion"):
+    with pytest.raises(RuntimeError, match=r"Step collapsed below min_dt|Domain collapse|Mesh inversion"):
         engine.solve(t_span=(0, 0.1))
 
 

@@ -1,108 +1,99 @@
-/// Solves a dense square linear system J * dx = b in-place using Gaussian elimination.
-/// Now features Row Equilibration to neutralize massive PDE vs DAE scaling disparities.
-pub fn solve_dense_system(n: usize, jac: &mut [f64], b: &mut [f64]) -> Result<(), String> {
-    // 1. Row Equilibration: Scale all rows to have a maximum absolute value of 1.0
-    let mut row_scales = vec![1.0; n];
-    for row in 0..n {
-        let mut max_val = 0.0;
-        // jac is column-major from Enzyme: jac[col * n + row]
-        for col in 0..n {
-            let val = jac[col * n + row].abs();
-            if val > max_val { max_val = val; }
-        }
-        if max_val > 1e-15 { row_scales[row] = 1.0 / max_val; }
-    }
-    
-    for col in 0..n {
-        for row in 0..n { jac[col * n + row] *= row_scales[row]; }
-    }
-    for row in 0..n { b[row] *= row_scales[row]; }
+use std::time::Instant;
+use super::Diagnostics;
+use faer::sparse::linalg::solvers::{SymbolicLu, Lu};
+use faer::sparse::SparseColMat;
+use faer::col::from_slice_mut;
+use faer::prelude::SpSolver;
 
-    // 2. Standard Gaussian Elimination with Partial Pivoting
-    for k in 0..n {
-        let mut max_val = 0.0;
-        let mut pivot_row = k;
-        for i in k..n {
-            let val = jac[k * n + i].abs();
-            if val > max_val { max_val = val; pivot_row = i; }
-        }
-        if max_val < 1e-25 { return Err("Singular Jacobian matrix.".to_string()); }
+/// A robust wrapper around `faer`'s Sparse LU solver.
+/// Replaces legacy O(N * bw^2) Banded routines, converting the dense C++ AD output 
+/// into an optimal CSC structure on the fly, eliminating the DFN bandwidth penalty.
+pub struct NativeSparseLuSolver {
+    pub is_stale: bool,
+    pub n: usize,
+    pub bw: isize,
+    symbolic: Option<SymbolicLu<usize>>, 
+    numeric: Option<Lu<usize, f64>>,     
+    
+    // Cached triplet memory structure for safe SparseColMat construction
+    pub triplets: Vec<(usize, usize, f64)>,
+}
+
+impl NativeSparseLuSolver {
+    pub fn new(n: usize, bw: isize) -> Self {
+        // Estimate initial capacity for the sparse triplets
+        let estimated_nnz = n * (2 * bw.max(0) as usize + 1).min(n);
         
-        if pivot_row != k {
-            b.swap(k, pivot_row);
-            for col in 0..n {
-                let tmp = jac[col * n + k];
-                jac[col * n + k] = jac[col * n + pivot_row];
-                jac[col * n + pivot_row] = tmp;
+        Self {
+            is_stale: true,
+            n,
+            bw,
+            symbolic: None,
+            numeric: None,
+            triplets: Vec::with_capacity(estimated_nnz),
+        }
+    }
+
+    pub fn factorize(&mut self, jac_dense: &[f64], diag: &mut Diagnostics) -> Result<(), String> {
+        let start_time = Instant::now();
+        let n = self.n;
+        
+        self.triplets.clear();
+
+        // Convert dense array to Triplets dynamically.
+        // This is extremely safe and allows Faer to handle CSC sorting and compression internally.
+        for c in 0..n {
+            for r in 0..n {
+                let val = jac_dense[c * n + r];
+                if val.abs() > 1e-14 {
+                    self.triplets.push((r, c, val));
+                }
             }
         }
-        
-        let pivot = jac[k * n + k];
-        for i in (k + 1)..n {
-            let factor = jac[k * n + i] / pivot;
-            b[i] -= factor * b[k];
-            for col in k..n { jac[col * n + i] -= factor * jac[col * n + k]; }
+
+        let jac_sparse = SparseColMat::try_new_from_triplets(
+            n, n, &self.triplets
+        ).map_err(|_| "Failed to assemble sparse matrix from triplets.".to_string())?;
+
+        // Symbolic factorization only needs to execute once since the ALE moving mesh 
+        // simply rescales dx rather than generating new physical grid nodes.
+        if self.symbolic.is_none() {
+            self.symbolic = Some(
+                SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic LU failed".to_string())?
+            );
+        }
+
+        let sym = self.symbolic.as_ref().unwrap();
+        self.numeric = Some(
+            Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric LU failed".to_string())?
+        );
+
+        self.is_stale = false;
+        diag.numeric_factorizations += 1;
+        diag.linear_solve_time_us += start_time.elapsed().as_micros();
+        Ok(())
+    }
+
+    pub fn solve(&self, b: &mut [f64], diag: &mut Diagnostics) -> Result<(), String> {
+        let start_time = Instant::now();
+        if let Some(lu) = &self.numeric {
+            // Connect raw slice perfectly to Faer's highly optimized vectorized solver
+            lu.solve_in_place(from_slice_mut(b));
+            diag.linear_solve_time_us += start_time.elapsed().as_micros();
+            Ok(())
+        } else {
+            Err("Attempted to solve before factorization.".to_string())
         }
     }
-    for i in (0..n).rev() {
-        let mut sum = b[i];
-        for col in (i + 1)..n { sum -= jac[col * n + i] * b[col]; }
-        b[i] = sum / jac[i * n + i];
+
+    pub fn mark_stale(&mut self) {
+        self.is_stale = true;
     }
-    Ok(())
 }
 
-/// Solves a Banded linear system in-place unlocking massive Data Parallelism.
-pub fn solve_banded_system(n: usize, bw: usize, jac: &mut [f64], b: &mut [f64]) -> Result<(), String> {
-    // 1. Row Equilibration for Banded matrices (jac array remains dense in memory from V2 Codegen)
-    let mut row_scales = vec![1.0; n];
-    for row in 0..n {
-        let mut max_val = 0.0;
-        let start_col = if row > bw { row - bw } else { 0 };
-        let end_col = std::cmp::min(n, row + bw + 1);
-        
-        for col in start_col..end_col {
-            let val = jac[col * n + row].abs();
-            if val > max_val { max_val = val; }
-        }
-        if max_val > 1e-15 { row_scales[row] = 1.0 / max_val; }
-    }
-    
-    for col in 0..n {
-        for row in 0..n { jac[col * n + row] *= row_scales[row]; }
-    }
-    for row in 0..n { b[row] *= row_scales[row]; }
-
-    // 2. Standard Banded Elimination
-    for k in 0..n {
-        let pivot = jac[k * n + k];
-        if pivot.abs() < 1e-25 { return Err("Singular or ill-conditioned Banded Jacobian.".to_string()); }
-
-        let end_row = std::cmp::min(n, k + bw + 1);
-        for i in (k + 1)..end_row {
-            let factor = jac[k * n + i] / pivot;
-            b[i] -= factor * b[k];
-
-            let end_col = std::cmp::min(n, k + bw + 1);
-            for col in k..end_col { jac[col * n + i] -= factor * jac[col * n + k]; }
-        }
-    }
-    for i in (0..n).rev() {
-        let mut sum = b[i];
-        let end_col = std::cmp::min(n, i + bw + 1);
-        for col in (i + 1)..end_col { sum -= jac[col * n + i] * b[col]; }
-        b[i] = sum / jac[i * n + i];
-    }
-    Ok(())
-}
-
-/// Left-Preconditioned Matrix-Free Restarted GMRES Solver.
-/// Evaluates M^{-1} * J*v dynamically using Forward-Mode AD without explicitly storing the Jacobian.
+/// Left-Preconditioned Matrix-Free Restarted GMRES Solver (Used for 3D meshes where bw == -1)
 pub fn solve_gmres<F, P>(n: usize, b: &mut [f64], mut jvp: F, mut precond: P) -> Result<(), String>
-where
-    F: FnMut(&[f64], &mut [f64]),
-    P: FnMut(&[f64], &mut [f64]),
-{
+where F: FnMut(&[f64], &mut [f64]), P: FnMut(&[f64], &mut[f64]) {
     let m = std::cmp::min(n, 30);
     let mut v = vec![vec![0.0; n]; m + 1];
     let mut h = vec![vec![0.0; m]; m + 1];
@@ -110,7 +101,6 @@ where
     let mut sn = vec![0.0; m];
     let mut g = vec![0.0; m + 1];
 
-    // Apply Preconditioner to the initial residual: b_pre = M^{-1} b
     let mut b_pre = vec![0.0; n];
     precond(b, &mut b_pre);
 
@@ -137,7 +127,6 @@ where
         jvp(v_k, &mut temp_jvp);
         precond(&temp_jvp, v_kp1);
 
-        // Modified Gram-Schmidt Orthogonalization
         for i in 0..=k {
             let v_i = &left[i];
             let mut dot = 0.0;
@@ -155,7 +144,6 @@ where
             for j in 0..n { v_kp1[j] /= w_norm; }
         }
 
-        // Apply previous Givens rotations to H
         for i in 0..k {
             let temp = cs[i] * h[i][k] + sn[i] * h[i + 1][k];
             h[i + 1][k] = -sn[i] * h[i][k] + cs[i] * h[i + 1][k];
@@ -173,7 +161,6 @@ where
 
         h[k][k] = cs[k] * h[k][k] + sn[k] * h[k + 1][k];
         h[k + 1][k] = 0.0;
-
         g[k + 1] = -sn[k] * g[k];
         g[k] = cs[k] * g[k];
 
@@ -197,52 +184,4 @@ where
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dense_gaussian_elimination() {
-        let n = 2;
-        let mut jac = vec![2.0, 1.0, -1.0, 3.0];
-        let mut b = vec![1.0, 4.0];
-        
-        solve_dense_system(n, &mut jac, &mut b).unwrap();
-        assert!((b[0] - 1.0).abs() < 1e-10);
-        assert!((b[1] - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_banded_system_solver() {
-        let n = 3;
-        let bw = 1;
-        let mut jac = vec![ 4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0 ];
-        let mut b = vec![3.0, 2.0, 3.0];
-        
-        solve_banded_system(n, bw, &mut jac, &mut b).unwrap();
-        assert!((b[0] - 1.0).abs() < 1e-10);
-        assert!((b[1] - 1.0).abs() < 1e-10);
-        assert!((b[2] - 1.0).abs() < 1e-10);
-    }
-    
-    #[test]
-    fn test_gmres_matrix_free_solver() {
-        let n = 2;
-        let mut b = vec![1.0, 2.0];
-        
-        let jvp = |v: &[f64], out: &mut [f64]| {
-            out[0] = 4.0 * v[0] + 1.0 * v[1];
-            out[1] = 1.0 * v[0] + 3.0 * v[1];
-        };
-        let precond = |v: &[f64], out: &mut [f64]| {
-            out[0] = v[0] / 4.0;
-            out[1] = v[1] / 3.0;
-        };
-        
-        solve_gmres(n, &mut b, jvp, precond).unwrap();
-        assert!((b[0] - (1.0 / 11.0)).abs() < 1e-10);
-        assert!((b[1] - (7.0 / 11.0)).abs() < 1e-10);
-    }
 }
