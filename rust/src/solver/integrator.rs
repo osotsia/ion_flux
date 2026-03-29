@@ -93,7 +93,10 @@ pub fn step_bdf_vsvo(
 
         diag.total_steps += 1;
 
-        if (sub_dt - *current_dt).abs() > 1e-12 && *current_dt > 0.0 {
+        if *current_dt == 0.0 {
+            *current_dt = sub_dt;
+            lu_solver.mark_stale();
+        } else if (sub_dt - *current_dt).abs() > 1e-12 {
             history.rescale(sub_dt / *current_dt);
             lu_solver.mark_stale(); 
             *current_dt = sub_dt;
@@ -136,7 +139,7 @@ pub fn step_bdf_vsvo(
                     *current_dt *= shrink_ratio;
                     sub_dt *= shrink_ratio;
 
-                    if *current_dt < config.min_dt {
+                    if sub_dt < config.min_dt {
                         dump_diagnostics(diag);
                         return Err(format!("Step collapsed below min_dt ({})", config.min_dt));
                     }
@@ -184,7 +187,7 @@ pub fn step_bdf_vsvo(
                 sub_dt *= shrink_ratio;
                 lu_solver.mark_stale();
 
-                if *current_dt < config.min_dt {
+                if sub_dt < config.min_dt {
                     dump_diagnostics(diag);
                     return Err(format!("Step collapsed below min_dt ({})", config.min_dt));
                 }

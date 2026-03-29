@@ -82,7 +82,7 @@ pub fn solve_nonlinear_system(
         if iter > 0 {
             let rho = dy_norm / prev_dy_norm;
             if rho > config.max_rho {
-                return NewtonResult::DivergedStaleJac; 
+                return if is_stale_at_start { NewtonResult::DivergedFatal } else { NewtonResult::DivergedStaleJac };
             }
         }
         prev_dy_norm = dy_norm;

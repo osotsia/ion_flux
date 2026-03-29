@@ -22,6 +22,11 @@ class NativeRuntime:
         except OSError as e:
             raise RuntimeError(f"Failed to load compiled binary at {lib_path}: {e}")
 
+        # Bind OpenMP thread control if emitted
+        if hasattr(self.dll, "set_spatial_threads"):
+            self.dll.set_spatial_threads.argtypes = [ctypes.c_int]
+            self.dll.set_spatial_threads.restype = None
+
         # Signature: void evaluate_residual(y, ydot, p, res)
         self.dll.evaluate_residual.argtypes = [
             ctypes.POINTER(ctypes.c_double),
@@ -52,6 +57,10 @@ class NativeRuntime:
             ctypes.POINTER(ctypes.c_double),
         ]
         self.dll.evaluate_vjp.restype = None
+
+    def set_spatial_threads(self, num_threads: int) -> None:
+        if hasattr(self.dll, "set_spatial_threads"):
+            self.dll.set_spatial_threads(num_threads)
 
     def evaluate_vjp(self, y: List[float], ydot: List[float], p: List[float], lambda_vec: List[float]) -> Tuple[List[float], List[float], List[float]]:
         if len(y) != self.n_states or len(ydot) != self.n_states:

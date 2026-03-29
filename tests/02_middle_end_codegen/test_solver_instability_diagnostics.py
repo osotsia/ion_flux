@@ -53,7 +53,7 @@ def test_1d_poisson_ulp_precision_limit():
         engine.solve(t_span=(0, 0.1))
         pytest.fail("Solver should have crashed due to spatial DAE ULP noise.")
     except RuntimeError as e:
-        assert "Line Search exhausted" in str(e) or "NaN" in str(e)
+        assert "Line Search exhausted" in str(e) or "NaN" in str(e) or "Step collapsed" in str(e)
 
 
 # ==============================================================================

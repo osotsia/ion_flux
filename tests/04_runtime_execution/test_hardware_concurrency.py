@@ -44,7 +44,7 @@ async def test_scheduler_isolates_solver_failures(dae_model):
     
     # Bad params trigger solver singularity via divide-by-zero, throwing an exception through the threadpool
     assert isinstance(res_bad, Exception)
-    assert "Singular Jacobian" in str(res_bad) or "Newton" in str(res_bad) or "NaN" in str(res_bad)
+    assert "Singular Jacobian" in str(res_bad) or "Newton" in str(res_bad) or "NaN" in str(res_bad) or "Step collapsed" in str(res_bad)
     
     # Concurrency barrier successfully prevented the native panic from dragging down the healthy task
     assert not isinstance(res_good, Exception)

@@ -555,6 +555,8 @@ class Engine:
         
         if threads > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = str(threads)
+            if getattr(self, "runtime", None):
+                self.runtime.set_spatial_threads(threads)
             
         if self.mock_execution or not self.layout:
             return self._execute_mock(parameters, protocol)
@@ -708,6 +710,8 @@ class Engine:
         # Eliminate thread oversubscription by muting OpenMP during Rayon task parallelism
         if max_workers > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = "1"
+            if getattr(self, "runtime", None):
+                self.runtime.set_spatial_threads(1)
             
         if self.mock_execution or not RUST_FFI_AVAILABLE:
             return [self.solve(t_span=t_span, protocol=protocol, parameters=p) for p in parameters]

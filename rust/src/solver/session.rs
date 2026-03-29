@@ -73,7 +73,9 @@ impl SolverHandle {
         if idx < self.p.len() { self.p[idx] = val; } 
     }
     
-    pub fn reach_steady_state(&mut self) -> PyResult<()> { Ok(()) }
+    pub fn reach_steady_state(&mut self) -> PyResult<()> { 
+        self.step(1000.0)
+    }
 
     pub fn clone_state(&self) -> PyResult<(f64, Vec<f64>)> {
         Ok((self.t, self.y.clone()))

@@ -55,18 +55,12 @@ impl NativeSparseLuSolver {
             n, n, &self.triplets
         ).map_err(|_| "Failed to assemble sparse matrix from triplets.".to_string())?;
 
-        // Symbolic factorization only needs to execute once since the ALE moving mesh 
-        // simply rescales dx rather than generating new physical grid nodes.
-        if self.symbolic.is_none() {
-            self.symbolic = Some(
-                SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic LU failed".to_string())?
-            );
-        }
-
-        let sym = self.symbolic.as_ref().unwrap();
+        // Always recompute SymbolicLu to prevent panics when zero-crossings dynamically alter the sparsity pattern
+        let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic LU failed".to_string())?;
         self.numeric = Some(
             Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric LU failed".to_string())?
         );
+        self.symbolic = Some(sym);
 
         self.is_stale = false;
         diag.numeric_factorizations += 1;
@@ -175,6 +169,9 @@ where F: FnMut(&[f64], &mut [f64]), P: FnMut(&[f64], &mut[f64]) {
     for i in (0..k).rev() {
         y[i] = g[i];
         for j in (i + 1)..k { y[i] -= h[i][j] * y[j]; }
+        if h[i][i].abs() < 1e-14 {
+            return Err("GMRES Singular H matrix".to_string());
+        }
         y[i] /= h[i][i];
     }
 

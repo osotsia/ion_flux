@@ -35,6 +35,7 @@ class Session:
                     engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
                     y0, ydot0, id_arr, p_list, spatial_diag, self.debug
                 )
+                self.handle.calc_algebraic_roots()
         else:
             self.handle = None
             self._mock_y = np.array(y0)

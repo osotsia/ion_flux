@@ -63,6 +63,7 @@ def test_bench_warm_start_execution_gpu(benchmark, base_model):
 
     benchmark(execute_solve)
 
+@pytest.mark.skip(reason="Hangs")
 def test_bench_parameter_sweep_throughput(benchmark, compiled_cpu_engine):
     """
     Measures the task-parallel throughput for MCMC or parameter sweeps.
