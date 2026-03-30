@@ -22,7 +22,7 @@ pub fn solve_nonlinear_system(
     bw: isize,
     y: &mut[f64], ydot: &mut [f64], p: &[f64], id: &[f64], spatial_diag: &[f64],
     c_j: f64,
-    y_pred: &[f64], ydot_pred: &[f64],
+    y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
     lu_solver: &mut NativeSparseLuSolver,
     jac_buffer: &mut [f64],
@@ -34,15 +34,16 @@ pub fn solve_nonlinear_system(
     
     let mut res = vec![0.0; n];
     let mut dy = vec![0.0; n];
-    let mut weights = vec![0.0; n];
 
     y.copy_from_slice(y_pred);
     ydot.copy_from_slice(ydot_pred);
     
     diag.last_y_pred = y_pred.to_vec();
     diag.last_ydot_pred = ydot_pred.to_vec();
+    diag.last_weights = weights.to_vec();
 
     let mut prev_dy_norm = std::f64::MAX;
+    let mut ss = 20.0;
 
     for iter in 0..config.max_newton_iters {
         let t_res = Instant::now();
@@ -52,12 +53,10 @@ pub fn solve_nonlinear_system(
         diag.last_res = res.clone();
 
         for i in 0..n {
-            weights[i] = 1.0 / (config.rel_tol * y[i].abs() + config.abs_tol);
             dy[i] = -res[i];
         }
-        diag.last_weights = weights.clone();
 
-        let f_norm = wrms_norm_all(&res, &weights);
+        let f_norm = wrms_norm_all(&res, weights);
         if !f_norm.is_finite() {
             let fail = NewtonFailure::NonFiniteResidual;
             return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
@@ -97,15 +96,40 @@ pub fn solve_nonlinear_system(
         }
 
         diag.last_dy = dy.clone();
-        let dy_norm = wrms_norm_all(&dy, &weights);
+        let dy_norm = wrms_norm_all(&dy, weights);
 
         if iter > 0 {
-            let rho = dy_norm / prev_dy_norm;
-            diag.last_rho = rho;
-            if rho > config.max_rho {
-                let fail = NewtonFailure::ContractionThrashing(rho);
+            let rate = (dy_norm / prev_dy_norm).powf(1.0 / iter as f64);
+            diag.last_rho = rate;
+            if rate > config.max_rho {
+                let fail = NewtonFailure::ContractionThrashing(rate);
                 return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
             }
+            ss = rate / (1.0 - rate);
+        } else {
+            if dy_norm <= 0.0001 * 0.33 {
+                diag.newton_iterations += 1;
+                let mut e_n = vec![0.0; n];
+                for i in 0..n { e_n[i] = y[i] + dy[i] - y_pred[i]; }
+                
+                let mut state_changed = false;
+                for i in 0..n {
+                    let new_y = y[i] + dy[i];
+                    if new_y != y[i] {
+                        state_changed = true;
+                    }
+                    y[i] = new_y;
+                    if id[i] > 0.5 { ydot[i] += c_j * dy[i]; }
+                }
+
+                if !state_changed {
+                    let fail = NewtonFailure::F64Stagnation;
+                    return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
+                }
+                
+                return NewtonResult::Converged(iter + 1, e_n);
+            }
+            ss = 20.0;
         }
         prev_dy_norm = dy_norm;
 
@@ -119,7 +143,7 @@ pub fn solve_nonlinear_system(
             if id[i] > 0.5 { ydot[i] += c_j * dy[i]; }
         }
 
-        if dy_norm < 0.33 {
+        if ss * dy_norm <= 0.33 {
             diag.newton_iterations += iter + 1;
             let mut e_n = vec![0.0; n];
             for i in 0..n { e_n[i] = y[i] - y_pred[i]; }

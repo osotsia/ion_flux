@@ -4,6 +4,7 @@ use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::linalg::NativeSparseLuSolver;
 use super::newton::{solve_nonlinear_system, NewtonResult, NewtonFailure, wrms_norm_diff};
 
+#[derive(Clone)]
 pub struct NordsieckHistory {
     pub order: usize,
     pub z: Vec<Vec<f64>>, 
@@ -76,14 +77,14 @@ pub fn step_bdf_vsvo(
 ) -> Result<(), String> {
     
     let mut t_local = 0.0;
-    let mut sub_dt = if *current_dt > 0.0 { target_dt.min(*current_dt * 1.5).max(config.min_dt) } else { target_dt.min(1e-4) };
+    let mut next_dt = if *current_dt > 0.0 { *current_dt } else { target_dt.min(1e-4) };
 
     if diag.accepted_steps == 0 {
         history.set_order(1);
     }
 
     while target_dt - t_local > 1e-8 {
-        if t_local + sub_dt > target_dt { sub_dt = target_dt - t_local; }
+        let sub_dt = next_dt.min(target_dt - t_local).max(config.min_dt);
 
         diag.total_steps += 1;
 
@@ -98,40 +99,35 @@ pub fn step_bdf_vsvo(
 
         let c_j = history.l[1] / *current_dt;
 
+        let history_saved = history.clone();
         history.predict();
         let y_pred = history.z[0].clone();
         let mut ydot_pred = vec![0.0; n];
         for i in 0..n { ydot_pred[i] = history.z[1][i] / *current_dt; }
 
+        let mut weights = vec![0.0; n];
+        for i in 0..n { weights[i] = 1.0 / (config.rel_tol * y_pred[i].abs() + config.abs_tol); }
+
         let newton_res = solve_nonlinear_system(
             n, bw, y, ydot, p, id, spatial_diag, c_j,
-            &y_pred, &ydot_pred, res_fn, jac_fn, jvp_fn,
+            &y_pred, &ydot_pred, &weights, res_fn, jac_fn, jvp_fn,
             lu_solver, jac_buffer, config, diag
         );
 
         match newton_res {
             NewtonResult::Converged(iters, e_n) => {
-                let mut weights = vec![0.0; n];
-                for i in 0..n { weights[i] = 1.0 / (config.rel_tol * y[i].abs() + config.abs_tol); }
                 let err_norm = wrms_norm_diff(&e_n, &weights, id);
-                
-                let safety = 0.9;
-                let mut err_factor = if err_norm > 1e-10 { safety * (1.0 / err_norm).powf(1.0 / (history.order as f64 + 1.0)) } else { 2.0 };
-                err_factor = err_factor.clamp(0.2, 2.0);
+                let tmp = (2.0 * err_norm + 0.0001).powf(-1.0 / (history.order as f64 + 1.0));
 
                 if err_norm > 1.0 { 
                     diag.rejected_steps += 1;
-                    let mut e_rev = vec![0.0; n];
-                    for i in 0..n { e_rev[i] = y_pred[i] - history.z[0][i]; }
-                    history.correct(&e_rev); 
+                    *history = history_saved;
                     lu_solver.mark_stale();
                     
-                    let shrink_ratio = err_factor.max(0.25);
-                    history.rescale(shrink_ratio);
-                    *current_dt *= shrink_ratio;
-                    sub_dt *= shrink_ratio;
+                    let eta = (0.9 * tmp).max(0.25);
+                    next_dt = sub_dt * eta;
 
-                    if sub_dt < config.min_dt {
+                    if next_dt < config.min_dt {
                         dump_crash_report(diag, id, "Tolerance Starvation: Error estimator rejected step repeatedly.");
                         return Err(format!("Step collapsed at t={} below min_dt ({}). Cause: Truncation error > 1.0", abs_t + t_local, config.min_dt));
                     }
@@ -156,29 +152,29 @@ pub fn step_bdf_vsvo(
                     history.set_order(history.order + 1);
                 }
                 
-                sub_dt *= err_factor;
-                *current_dt = sub_dt;
+                let mut eta = 1.0;
+                if tmp >= 2.0 {
+                    eta = tmp.min(2.0);
+                } else if tmp <= 1.0 {
+                    eta = tmp.min(0.9).max(0.5);
+                }
+                
+                next_dt = sub_dt * eta;
             },
             NewtonResult::DivergedStaleJac(_) => {
-                let mut e_rev = vec![0.0; n];
-                for i in 0..n { e_rev[i] = y_pred[i] - history.z[0][i]; }
-                history.correct(&e_rev); 
+                *history = history_saved;
                 lu_solver.mark_stale();
                 continue;
             },
             NewtonResult::DivergedFatal(fail_reason) => {
                 diag.rejected_steps += 1;
-                let mut e_rev = vec![0.0; n];
-                for i in 0..n { e_rev[i] = y_pred[i] - history.z[0][i]; }
-                history.correct(&e_rev); 
+                *history = history_saved;
 
                 let shrink_ratio = 0.25;
-                history.rescale(shrink_ratio);
-                *current_dt *= shrink_ratio;
-                sub_dt *= shrink_ratio;
+                next_dt = sub_dt * shrink_ratio;
                 lu_solver.mark_stale();
 
-                if sub_dt < config.min_dt {
+                if next_dt < config.min_dt {
                     let reason_str = match fail_reason {
                         NewtonFailure::NonFiniteResidual => "Mathematical Singularity (NaN/Inf in residual)".to_string(),
                         NewtonFailure::SingularJacobian(ref e) => format!("Structural Singularity: {}", e),
@@ -192,6 +188,12 @@ pub fn step_bdf_vsvo(
             }
         }
     }
+    
+    if (*current_dt - next_dt).abs() > 1e-12 {
+        history.rescale(next_dt / *current_dt);
+        *current_dt = next_dt;
+    }
+    
     Ok(())
 }
 

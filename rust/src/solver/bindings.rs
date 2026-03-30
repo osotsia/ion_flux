@@ -65,23 +65,31 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, t_eval, bandwidth, spatial_diag, debug, max_workers=1))]
 pub fn solve_batch_native<'py>(
-    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, debug: bool,
+    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, debug: bool, max_workers: usize
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
-    let results: Result<Vec<Vec<f64>>, String> = p_batch.par_iter().map(|p| {
-        let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone(), debug.clone())
-            .map_err(|e| e.to_string())?;
-            
-        let mut out_traj = vec![0.0; t_eval.len() * handle.n];
-        for i in 0..handle.n { out_traj[i] = handle.y[i]; }
-        
-        for step in 1..t_eval.len() {
-            let dt = t_eval[step] - t_eval[step - 1];
-            handle.step(dt).map_err(|e| e.to_string())?;
-            for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
-        }
-        Ok(out_traj)
-    }).collect();
+    
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().unwrap();
+
+    let results: Result<Vec<Vec<f64>>, String> = py.allow_threads(|| {
+        pool.install(|| {
+            p_batch.par_iter().map(|p| {
+                let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone(), debug.clone())
+                    .map_err(|e| e.to_string())?;
+                    
+                let mut out_traj = vec![0.0; t_eval.len() * handle.n];
+                for i in 0..handle.n { out_traj[i] = handle.y[i]; }
+                
+                for step in 1..t_eval.len() {
+                    let dt = t_eval[step] - t_eval[step - 1];
+                    handle.step(dt).map_err(|e| e.to_string())?;
+                    for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
+                }
+                Ok(out_traj)
+            }).collect()
+        })
+    });
 
     let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();

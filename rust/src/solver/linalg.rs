@@ -51,11 +51,16 @@ impl NativeSparseLuSolver {
 
         // Assemble scaled triplets
         for c in 0..n {
+            let mut has_diag = false;
             for r in 0..n {
                 let val = jac_dense[c * n + r] * self.row_scales[r];
                 if val.abs() > 1e-14 {
                     self.triplets.push((r, c, val));
+                    if r == c { has_diag = true; }
                 }
+            }
+            if !has_diag {
+                self.triplets.push((c, c, 1e-14)); // Prevent structural singularity panic in faer
             }
         }
 
