@@ -6,7 +6,7 @@ pub enum NewtonFailure {
     NonFiniteResidual,
     SingularJacobian(String),
     ContractionThrashing(f64),
-    F64Stagnation,
+    ConstraintsViolated(f64), 
     MaxItersReached,
 }
 
@@ -16,54 +16,59 @@ pub enum NewtonResult {
     DivergedFatal(NewtonFailure),    
 }
 
-/// Inexact Newton-Raphson leveraging Jacobian staleness heuristics to minimize AD sweeps.
+/// SUNDIALS Inexact Newton-Raphson implementation
 pub fn solve_nonlinear_system(
-    n: usize,
-    bw: isize,
-    y: &mut[f64], ydot: &mut [f64], p: &[f64], id: &[f64], spatial_diag: &[f64],
-    c_j: f64,
+    n: usize, bw: isize,
+    y: &mut[f64], ydot: &mut [f64], p: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
+    c_j: f64, c_j_old: f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
-    lu_solver: &mut NativeSparseLuSolver,
-    jac_buffer: &mut [f64],
-    config: &SolverConfig,
-    diag: &mut Diagnostics,
+    lu_solver: &mut NativeSparseLuSolver, jac_buffer: &mut [f64],
+    config: &SolverConfig, diag: &mut Diagnostics,
 ) -> NewtonResult {
     
-    let is_stale_at_start = lu_solver.is_stale;
+    // 1. The 25% Staleness Rule
+    let cj_ratio = if c_j_old == 0.0 { 1.0 } else { c_j / c_j_old };
+    let cj_changed = (cj_ratio - 1.0).abs() > config.max_cj_ratio_change;
     
+    let mut is_stale_at_start = lu_solver.is_stale;
+    if cj_changed {
+        lu_solver.mark_stale();
+        is_stale_at_start = true;
+    }
+
+    let mut ee = vec![0.0; n];  // Accumulated Newton Correction
     let mut res = vec![0.0; n];
     let mut dy = vec![0.0; n];
-
-    y.copy_from_slice(y_pred);
-    ydot.copy_from_slice(ydot_pred);
     
-    diag.last_y_pred = y_pred.to_vec();
-    diag.last_ydot_pred = ydot_pred.to_vec();
-    diag.last_weights = weights.to_vec();
-
-    let mut prev_dy_norm = std::f64::MAX;
-    let mut ss = 20.0;
+    let mut old_fnorm = 0.0;
 
     for iter in 0..config.max_newton_iters {
+        diag.newton_iterations += 1;
+
+        // Evaluate Residual: F(y_pred + ee, ydot_pred + c_j*ee)
+        for i in 0..n {
+            y[i] = y_pred[i] + ee[i];
+            ydot[i] = ydot_pred[i] + c_j * ee[i];
+        }
+
         let t_res = Instant::now();
         unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), res.as_mut_ptr()) };
         diag.residual_time_us += t_res.elapsed().as_micros();
         
         diag.last_res = res.clone();
 
-        for i in 0..n {
-            dy[i] = -res[i];
-        }
-
+        // Newton convergence is measured against ALL variables (no algebraic suppression)
         let f_norm = wrms_norm_all(&res, weights);
         if !f_norm.is_finite() {
             let fail = NewtonFailure::NonFiniteResidual;
             return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
         }
 
+        for i in 0..n { dy[i] = -res[i]; }
+
+        // Linear Solve
         if bw == -1 {
-            let start = Instant::now();
             let jvp = jvp_fn.expect("evaluate_jvp missing.");
             let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p.as_ptr();
             let jvp_closure = |v: &[f64], out: &mut [f64]| {
@@ -73,10 +78,8 @@ pub fn solve_nonlinear_system(
                 for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
             };
             if let Err(e) = solve_gmres(n, &mut dy, jvp_closure, precond) {
-                let fail = NewtonFailure::SingularJacobian(e);
-                return NewtonResult::DivergedFatal(fail);
+                return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
             }
-            diag.linear_solve_time_us += start.elapsed().as_micros();
         } else {
             if lu_solver.is_stale {
                 let start = Instant::now();
@@ -85,74 +88,44 @@ pub fn solve_nonlinear_system(
                 diag.jacobian_evaluations += 1;
                 
                 if let Err(e) = lu_solver.factorize(jac_buffer, diag) {
-                    let fail = NewtonFailure::SingularJacobian(e);
-                    return NewtonResult::DivergedFatal(fail); 
+                    return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
                 }
             }
             if let Err(e) = lu_solver.solve(&mut dy, diag) {
-                let fail = NewtonFailure::SingularJacobian(e);
-                return NewtonResult::DivergedFatal(fail);
+                return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
             }
         }
 
-        diag.last_dy = dy.clone();
-        let dy_norm = wrms_norm_all(&dy, weights);
+        // 2. Linear Solution Scaling
+        if cj_ratio != 1.0 && !lu_solver.is_stale {
+            let scale = 2.0 / (1.0 + cj_ratio);
+            for i in 0..n { dy[i] *= scale; }
+        }
 
-        if iter > 0 {
-            let rate = (dy_norm / prev_dy_norm).powf(1.0 / iter as f64);
+        for i in 0..n { ee[i] += dy[i]; }
+        let dy_norm = wrms_norm_all(&dy, weights);
+        diag.last_dy = dy.clone();
+
+        // 3. Stringent SUNDIALS Convergence Criteria
+        if iter == 0 {
+            old_fnorm = dy_norm;
+            if dy_norm <= 1e-4 * config.eps_newt {
+                return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
+            }
+        } else {
+            let rate = (dy_norm / old_fnorm).powf(1.0 / iter as f64);
             diag.last_rho = rate;
+            
+            // 4. Early Divergence Detection (Thrashing)
             if rate > config.max_rho {
                 let fail = NewtonFailure::ContractionThrashing(rate);
                 return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
             }
-            ss = rate / (1.0 - rate);
-        } else {
-            if dy_norm <= 0.0001 * 0.33 {
-                diag.newton_iterations += 1;
-                let mut e_n = vec![0.0; n];
-                for i in 0..n { e_n[i] = y[i] + dy[i] - y_pred[i]; }
-                
-                let mut state_changed = false;
-                for i in 0..n {
-                    let new_y = y[i] + dy[i];
-                    if new_y != y[i] {
-                        state_changed = true;
-                    }
-                    y[i] = new_y;
-                    if id[i] > 0.5 { ydot[i] += c_j * dy[i]; }
-                }
-
-                if !state_changed {
-                    let fail = NewtonFailure::F64Stagnation;
-                    return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
-                }
-                
-                return NewtonResult::Converged(iter + 1, e_n);
+            
+            let ss = rate / (1.0 - rate);
+            if ss * dy_norm <= config.eps_newt {
+                return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
             }
-            ss = 20.0;
-        }
-        prev_dy_norm = dy_norm;
-
-        let mut state_changed = false;
-        for i in 0..n {
-            let new_y = y[i] + dy[i];
-            if new_y != y[i] {
-                state_changed = true;
-            }
-            y[i] = new_y;
-            if id[i] > 0.5 { ydot[i] += c_j * dy[i]; }
-        }
-
-        if ss * dy_norm <= 0.33 {
-            diag.newton_iterations += iter + 1;
-            let mut e_n = vec![0.0; n];
-            for i in 0..n { e_n[i] = y[i] - y_pred[i]; }
-            return NewtonResult::Converged(iter + 1, e_n);
-        }
-
-        if !state_changed {
-            let fail = NewtonFailure::F64Stagnation;
-            return if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) };
         }
     }
 
@@ -160,18 +133,47 @@ pub fn solve_nonlinear_system(
     if is_stale_at_start { NewtonResult::DivergedFatal(fail) } else { NewtonResult::DivergedStaleJac(fail) }
 }
 
+fn evaluate_constraints_and_return(n: usize, y: &[f64], ee: &[f64], phi_0: &[f64], constraints: &[f64], iter: usize) -> NewtonResult {
+    let mut min_eta = 1.0;
+    let mut violated = false;
+
+    for i in 0..n {
+        let c = constraints[i];
+        if c == 0.0 { continue; }
+        
+        if (c > 0.0 && y[i] <= 0.0) || (c < 0.0 && y[i] >= 0.0) {
+            violated = true;
+            let num = phi_0[i]; 
+            let den = phi_0[i] - y[i]; 
+            
+            if den.abs() > 1e-14 {
+                let eta = 0.9 * (num / den);
+                if eta > 0.0 && eta < min_eta { min_eta = eta; }
+            }
+        }
+    }
+
+    if violated {
+        NewtonResult::DivergedFatal(NewtonFailure::ConstraintsViolated(min_eta.clamp(0.1, 0.9)))
+    } else {
+        NewtonResult::Converged(iter + 1, ee.to_vec())
+    }
+}
+
+#[inline(always)]
 pub fn wrms_norm_all(v: &[f64], w: &[f64]) -> f64 {
     let mut sum = 0.0;
     for i in 0..v.len() { sum += (v[i] * w[i]).powi(2); }
     (sum / v.len() as f64).sqrt()
 }
 
-pub fn wrms_norm_diff(v: &[f64], w: &[f64], id: &[f64]) -> f64 {
+#[inline(always)]
+pub fn wrms_norm_mask(v: &[f64], w: &[f64], id: &[f64], suppress_alg: bool) -> f64 {
     let mut sum = 0.0;
     let mut active = 0.0;
-    for i in 0..v.len() { 
-        if id[i] > 0.5 {
-            sum += (v[i] * w[i]).powi(2); 
+    for i in 0..v.len() {
+        if !suppress_alg || id[i] > 0.5 {
+            sum += (v[i] * w[i]).powi(2);
             active += 1.0;
         }
     }

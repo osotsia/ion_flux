@@ -22,7 +22,12 @@ pub struct SolverConfig {
     pub max_newton_iters: usize,
     pub min_dt: f64,
     pub max_dt: f64,
-    pub max_rho: f64, // Contraction rate threshold for Jacobian staleness
+    
+    // SUNDIALS-Specific Internal Heuristics
+    pub max_rho: f64,             // Early divergence rate threshold (0.9)
+    pub eps_newt: f64,            // Newton convergence constant (0.33)
+    pub max_cj_ratio_change: f64, // Jacobian staleness threshold (0.25)
+    pub suppress_alg: bool,       // Exclude algebraic variables from truncation error tests
 }
 
 impl Default for SolverConfig {
@@ -30,10 +35,13 @@ impl Default for SolverConfig {
         Self {
             rel_tol: 1e-6,
             abs_tol: 1e-8,
-            max_newton_iters: 7,
+            max_newton_iters: 4,
             min_dt: 1e-12,
             max_dt: 10.0,
             max_rho: 0.9, 
+            eps_newt: 0.33,
+            max_cj_ratio_change: 0.25,
+            suppress_alg: true,   // Crucial for DAE robustness!
         }
     }
 }
@@ -49,6 +57,7 @@ pub struct Diagnostics {
     pub newton_iterations: usize,
     pub jacobian_evaluations: usize,
     pub numeric_factorizations: usize,
+    pub max_chromatic_number: usize,
     
     // --- Microsecond Timers ---
     pub jacobian_assembly_time_us: u128,

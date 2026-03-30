@@ -11,7 +11,10 @@ pub fn solve_ida_native<'py>(
     t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, record_history: bool, debug: bool,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     
-    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, p_list, spatial_diag, debug)?;
+    // Injected empty constraints array
+    let constraints = vec![0.0; y0_py.len()];
+    
+    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, constraints, p_list, spatial_diag, debug)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     
     let mut history = if record_history { Some(vec![(t_eval[0], y0_py.clone(), ydot0_py.clone())]) } else { None };
@@ -23,7 +26,7 @@ pub fn solve_ida_native<'py>(
         for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
     }
     
-    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).unwrap().to_pyarray_bound(py);
+    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
     
     if let Some(hist) = history {
         let h_len = hist.len();
@@ -37,7 +40,9 @@ pub fn solve_ida_native<'py>(
                 micro_ydot[i * handle.n + j] = ydot[j];
             }
         }
-        Ok((res_y, numpy::ndarray::Array1::from_vec(micro_t).to_pyarray_bound(py), numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_y).unwrap().to_pyarray_bound(py), numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_ydot).unwrap().to_pyarray_bound(py)))
+        Ok((res_y, numpy::ndarray::Array1::from_vec(micro_t).to_pyarray_bound(py), 
+            numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py), 
+            numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_ydot).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py)))
     } else {
         let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
         let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
@@ -58,7 +63,7 @@ pub fn solve_ida_sundials<'py>(
         handle.step(dt)?;
         for i in 0..handle.n { out_traj[step * handle.n + i] = handle._y_data[i]; }
     }
-    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).unwrap().to_pyarray_bound(py);
+    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
     let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
     let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
     Ok((res_y, empty_t, empty_y.clone(), empty_y))
@@ -70,12 +75,14 @@ pub fn solve_batch_native<'py>(
     py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, debug: bool, max_workers: usize
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let results: Result<Vec<Vec<f64>>, String> = py.allow_threads(|| {
         pool.install(|| {
             p_batch.par_iter().map(|p| {
-                let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), p.clone(), spatial_diag.clone(), debug.clone())
+                let constraints = vec![0.0; y0.len()]; // Injected empty constraints
+                
+                let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), spatial_diag.clone(), debug.clone())
                     .map_err(|e| e.to_string())?;
                     
                 let mut out_traj = vec![0.0; t_eval.len() * handle.n];
@@ -94,7 +101,7 @@ pub fn solve_batch_native<'py>(
     let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();
     for res in unwrapped { 
-        py_results.push(numpy::ndarray::Array2::from_shape_vec((t_eval.len(), y0.len()), res).unwrap().to_pyarray_bound(py)); 
+        py_results.push(numpy::ndarray::Array2::from_shape_vec((t_eval.len(), y0.len()), res).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py)); 
     }
     Ok(py_results)
 }

@@ -13,9 +13,9 @@ pub fn discrete_adjoint_native<'py>(
     let n_params = p_traj[0].len();
     let mut p_grad = vec![0.0; n_params];
 
-    let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT library") };
+    let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
     let jac_fn: Option<NativeJacFn> = unsafe { lib.get::<NativeJacFn>(b"evaluate_jacobian\0").map(|sym| *sym).ok() };
-    let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").expect("evaluate_vjp missing from binary.") };
+    let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
 
     let mut lambda = vec![0.0; n];
     let mut diag = Diagnostics::default();

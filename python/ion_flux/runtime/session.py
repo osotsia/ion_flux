@@ -8,6 +8,16 @@ try:
 except ImportError:
     RUST_FFI_AVAILABLE = False
 
+import numpy as np
+import scipy.linalg
+from typing import Dict, Any, Optional
+
+try:
+    from ion_flux._core import SolverHandle, SundialsHandle
+    RUST_FFI_AVAILABLE = True
+except ImportError:
+    RUST_FFI_AVAILABLE = False
+
 class Session:
     """
     Stateful execution session for Hardware/Software-in-the-Loop co-simulation.
@@ -24,6 +34,9 @@ class Session:
         p_list = engine._pack_parameters(self.parameters)
         self.id_arr = np.array(id_arr)
         
+        # Inject constraint array for SUNDIALS inequality bounds logic
+        constraints = [0.0] * engine.layout.n_states
+        
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
             if getattr(engine, "solver_backend", "native") == "sundials":
                 self.handle = SundialsHandle(
@@ -33,9 +46,12 @@ class Session:
             else:
                 self.handle = SolverHandle(
                     engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                    y0, ydot0, id_arr, p_list, spatial_diag, self.debug
+                    y0, ydot0, id_arr, constraints, p_list, spatial_diag, self.debug
                 )
-                self.handle.calc_algebraic_roots()
+                try:
+                    self.handle.calc_algebraic_roots()
+                except RuntimeError as e:
+                    self.engine._handle_native_crash(e)
         else:
             self.handle = None
             self._mock_y = np.array(y0)
@@ -71,12 +87,19 @@ class Session:
                     
             # Snap algebraic states instantly to the new hardware inputs before integrating
             if changed and self.handle:
-                self.handle.calc_algebraic_roots()
+                try:
+                    self.handle.calc_algebraic_roots()
+                except RuntimeError as e:
+                    self.engine._handle_native_crash(e)
                 
         if self.handle:
             if getattr(self, "record_history", False):
                 if hasattr(self.handle, "step_history"):
-                    mt, my, mydot = self.handle.step_history(dt)
+                    try:
+                        mt, my, mydot = self.handle.step_history(dt)
+                    except RuntimeError as e:
+                        self.engine._handle_native_crash(e)
+                        
                     if len(mt) > 0:
                         self.micro_t.extend(mt.tolist())
                         self.micro_y.extend(my.tolist())
@@ -84,9 +107,15 @@ class Session:
                         p_list = self.engine._pack_parameters(self.parameters)
                         self.micro_p.extend([p_list] * len(mt))
                 else:
-                    self.handle.step(dt) # Sundials does not yet pipe deep history logic
+                    try:
+                        self.handle.step(dt) # Sundials does not yet pipe deep history logic
+                    except RuntimeError as e:
+                        self.engine._handle_native_crash(e)
             else:
-                self.handle.step(dt)
+                try:
+                    self.handle.step(dt)
+                except RuntimeError as e:
+                    self.engine._handle_native_crash(e)
         self.time += dt
         self._history["Time [s]"].append(self.time)
 
@@ -117,7 +146,10 @@ class Session:
 
     def reach_steady_state(self) -> None:
         if self.handle: 
-            self.handle.reach_steady_state()
+            try:
+                self.handle.reach_steady_state()
+            except RuntimeError as e:
+                self.engine._handle_native_crash(e)
             self.time += 1000.0
         else:
             self.time += 1000.0

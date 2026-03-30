@@ -1,13 +1,11 @@
 use std::time::Instant;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use super::Diagnostics;
 use faer::sparse::linalg::solvers::{SymbolicLu, Lu};
 use faer::sparse::SparseColMat;
 use faer::col::from_slice_mut;
 use faer::prelude::SpSolver;
 
-/// A robust wrapper around `faer`'s Sparse LU solver.
-/// Replaces legacy O(N * bw^2) Banded routines, converting the dense C++ AD output 
-/// into an optimal CSC structure on the fly, eliminating the DFN bandwidth penalty.
 pub struct NativeSparseLuSolver {
     pub is_stale: bool,
     pub n: usize,
@@ -39,40 +37,66 @@ impl NativeSparseLuSolver {
         
         self.triplets.clear();
 
-        // Compute row equilibration scales
+        // 1. Compute row equilibration scales
         for r in 0..n {
             let mut max_val = 0.0_f64;
             for c in 0..n {
                 let val = jac_dense[c * n + r].abs();
+                if val.is_nan() { return Err("NaN detected in Jacobian".to_string()); }
                 if val > max_val { max_val = val; }
             }
-            self.row_scales[r] = if max_val > 1e-15 { 1.0 / max_val } else { 1.0 };
+            self.row_scales[r] = if max_val > 0.0 { 1.0 / max_val } else { 1.0 };
         }
 
-        // Assemble scaled triplets
+        // 2. Assemble scaled sparse triplets
         for c in 0..n {
             let mut has_diag = false;
             for r in 0..n {
-                let val = jac_dense[c * n + r] * self.row_scales[r];
-                if val.abs() > 1e-14 {
+                let unscaled = jac_dense[c * n + r];
+                if unscaled != 0.0 {
+                    let val = unscaled * self.row_scales[r];
                     self.triplets.push((r, c, val));
                     if r == c { has_diag = true; }
                 }
             }
             if !has_diag {
-                self.triplets.push((c, c, 1e-14)); // Prevent structural singularity panic in faer
+                self.triplets.push((c, c, 1e-14)); 
             }
         }
 
-        let jac_sparse = SparseColMat::try_new_from_triplets(
-            n, n, &self.triplets
-        ).map_err(|_| "Failed to assemble sparse matrix from triplets.".to_string())?;
+        let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| {
+            SparseColMat::try_new_from_triplets(n, n, &self.triplets)
+        }));
+        let jac_sparse = match jac_sparse_res {
+            Ok(Ok(mat)) => mat,
+            _ => return Err("Sparse matrix assembly failed or panicked".to_string()),
+        };
 
-        let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic LU failed".to_string())?;
-        self.numeric = Some(
-            Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric LU failed".to_string())?
-        );
-        self.symbolic = Some(sym);
+        // 3. Symbolic Cache
+        if self.symbolic.is_none() {
+            let sym_res = catch_unwind(AssertUnwindSafe(|| {
+                SymbolicLu::try_new(jac_sparse.symbolic())
+            }));
+            self.symbolic = match sym_res {
+                Ok(Ok(s)) => Some(s),
+                _ => return Err("Symbolic LU failed or panicked".to_string()),
+            };
+        }
+
+        // 4. Numeric Factorization
+        let num_res = catch_unwind(AssertUnwindSafe(|| {
+            Lu::try_new_with_symbolic(self.symbolic.as_ref().unwrap().clone(), jac_sparse.as_ref())
+        }));
+        
+        match num_res {
+            Ok(Ok(n_lu)) => self.numeric = Some(n_lu),
+            _ => {
+                // Fallback: Rebuild Symbolic
+                let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic Fallback failed".to_string())?;
+                self.numeric = Some(Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric Fallback failed".to_string())?);
+                self.symbolic = Some(sym);
+            }
+        };
 
         self.is_stale = false;
         diag.numeric_factorizations += 1;
@@ -83,10 +107,7 @@ impl NativeSparseLuSolver {
     pub fn solve(&self, b: &mut [f64], diag: &mut Diagnostics) -> Result<(), String> {
         let start_time = Instant::now();
         if let Some(lu) = &self.numeric {
-            // Apply equilibration row scales to RHS residual
-            for i in 0..self.n {
-                b[i] *= self.row_scales[i];
-            }
+            for i in 0..self.n { b[i] *= self.row_scales[i]; }
             lu.solve_in_place(from_slice_mut(b));
             diag.linear_solve_time_us += start_time.elapsed().as_micros();
             Ok(())

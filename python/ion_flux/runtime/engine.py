@@ -473,7 +473,8 @@ class Engine:
             _mark_differentials(eqs)
         
         # ID array masking strictly evaluated against Boundary Conditions
-        # Corrected extraction logic bypassing arbitrary child wrappers (e.g. UnaryOp fluxes)
+        # Enforce the Quasi-Steady-State assumption for ALL boundaries, stripping 
+        # dt(y) from the edge cells to exponentially increase numerical stability.
         for eq in self.ast_payload.get("boundaries", []):
             lhs = eq["lhs"]
             if lhs.get("type") == "Boundary":
@@ -542,6 +543,57 @@ class Engine:
         # Reliably works on both active JIT instances and stateless binary loads
         self.layout.pack_mesh_data(p_list)
         return p_list
+
+    def _handle_native_crash(self, original_error: Exception):
+        """Intercepts Rust native panics to parse the JSON diagnostic report, translating flat FFI 
+        indices back into human-readable Python AST state variables."""
+        import glob
+        import os
+        import json
+        crash_files = glob.glob("ion_flux_diagnostics/crash_*.json")
+        if not crash_files:
+            raise original_error
+            
+        latest_crash = max(crash_files, key=os.path.getctime)
+        try:
+            with open(latest_crash, "r") as f:
+                crash_data = json.load(f)
+            
+            idx_to_name = {}
+            for name, (offset, size) in self.layout.state_offsets.items():
+                for i in range(size):
+                    idx_to_name[offset + i] = f"{name}[{i}]" if size > 1 else name
+                    
+            msg = f"\n{'-'*85}\n"
+            msg += f"🔥 NATIVE SOLVER CRASH: {str(original_error)}\n"
+            msg += f"{'-'*85}\n"
+            msg += f"Reason: {crash_data.get('reason', 'Unknown')}\n"
+            msg += f"Accepted Steps: {crash_data.get('accepted_steps', 0)}\n\n"
+            
+            msg += "Top Offenders (Ranked by NaN presence, then Absolute Residual):\n"
+            msg += f"{'State Name':<30} | {'Type':<10} | {'Residual':<12} | {'y':<12} | {'y_dot':<12}\n"
+            msg += "-" * 85 + "\n"
+            
+            for off in crash_data.get("top_offenders", []):
+                idx = off["index"]
+                name = idx_to_name.get(idx, f"Unknown[{idx}]")
+                rtype = off.get("type", "")
+                
+                # Format numbers carefully to handle NaNs/strings from Rust
+                def fmt(v):
+                    try: return f"{float(v):<12.3e}"
+                    except: return f"{v:<12}"
+                    
+                res = fmt(off.get("residual", 0.0))
+                yv = fmt(off.get("y_val", 0.0))
+                ydv = fmt(off.get("ydot_val", 0.0))
+                
+                msg += f"{name[:29]:<30} | {rtype:<10} | {res} | {yv} | {ydv}\n"
+                
+            msg += f"{'-'*85}\n"
+            raise RuntimeError(msg) from None
+        except Exception:
+            raise original_error from None
 
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
         if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
@@ -679,15 +731,18 @@ class Engine:
         
         record_history = requires_grad is not None
         
-        if self.solver_backend == "sundials":
-            y_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
-                self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist()
-            )
-        else:
-            y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
-                self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), 
-                self.jacobian_bandwidth, spatial_diag, record_history, self.debug
-            )
+        try:
+            if self.solver_backend == "sundials":
+                y_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist()
+                )
+            else:
+                y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), 
+                    self.jacobian_bandwidth, spatial_diag, record_history, self.debug
+                )
+        except RuntimeError as e:
+            self._handle_native_crash(e)
         
         data = {"Time [s]": t_eval_arr}
         for state_name, (offset, size) in self.layout.state_offsets.items():
@@ -723,8 +778,11 @@ class Engine:
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
         
-        y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, self.debug)
-        
+        try:
+            y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, self.debug, max_workers)
+        except RuntimeError as e:
+            self._handle_native_crash(e)
+            
         results = []
         for p, y_res in zip(parameters, y_res_batch):
             data = {"Time [s]": t_eval_arr}
