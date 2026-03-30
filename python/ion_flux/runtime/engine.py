@@ -493,6 +493,54 @@ class Engine:
                         elif lhs["side"] == "right": id_arr[offset + size - 1] = 0.0
                 except ValueError:
                     pass
+        
+        # Normalize spatial_diag for GMRES Preconditioner on Spatial DAEs.
+        # Since `builder.py` normalizes Spatial DAE residuals by multiplying by dx^2,
+        # the diagonal coefficient becomes exactly 2.0 (from the Laplacian stencil).
+        for i in range(self.layout.n_states):
+            if id_arr[i] == 0.0 and spatial_diag[i] > 0.0:
+                spatial_diag[i] = 2.0
+                
+        def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
+            t = node.get("type")
+            if t == "Scalar": return float(node["value"])
+            if t == "BinaryOp":
+                l = _eval_ic(node["left"], idx, dx)
+                r = _eval_ic(node["right"], idx, dx)
+                op = node["op"]
+                if op == "add": return l + r
+                if op == "sub": return l - r
+                if op == "mul": return l * r
+                if op == "div": return l / r if r != 0 else 0.0
+                if op == "pow": return l ** r
+            if t == "UnaryOp":
+                c = _eval_ic(node["child"], idx, dx)
+                op = node["op"]
+                if op == "neg": return -c
+                if op == "coords": return idx * dx
+            return 0.0
+        
+        # Initial conditions safely isolated and extracted without parsing the rest of the AST
+        all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
+        for eqs in self.ast_payload.get("regions", {}).values():
+            all_eqs.extend(eqs)
+            
+        for eq in all_eqs:
+            lhs = eq["lhs"]
+            if lhs.get("type") == "InitialCondition":
+                state_name = extract_state_name(lhs, self.layout)
+                offset, size = self.layout.state_offsets[state_name]
+                
+                dx = 1.0
+                state_node = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
+                if state_node and getattr(state_node, "domain", None):
+                    ds = state_node.domain.domains if hasattr(state_node.domain, "domains") else [state_node.domain]
+                    dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
+                    
+                for i in range(size):
+                    y0[offset + i] = _eval_ic(eq["rhs"], i, dx)
+                    
+        return y0, ydot0, id_arr, spatial_diag
                 
         def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
             t = node.get("type")

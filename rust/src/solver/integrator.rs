@@ -1,3 +1,4 @@
+// --- File: rust/src/solver/integrator.rs ---
 use std::fs::File;
 use std::io::Write;
 use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
@@ -106,7 +107,7 @@ impl BdfHistory {
     }
 
     /// Cascading Phi Update & Order Evaluation (Matches IDACompleteStep)
-    pub fn complete_step(&mut self, err_k: f64, err_km1: f64, err_km2: f64, ee: &[f64], min_dt: f64, max_dt: f64) {
+    pub fn complete_step(&mut self, err_k: f64, err_km1: f64, err_km2: f64, err_kp1: f64, ee: &[f64], min_dt: f64, max_dt: f64) {
         let n = ee.len();
         let kdiff = self.order as isize - self.k_used as isize;
         self.k_used = self.order;
@@ -124,8 +125,7 @@ impl BdfHistory {
             let mut err_knew = err_k;
             let terr_k = (self.order as f64 + 1.0) * err_k;
 
-            let err_kp1 = f64::MAX;
-            let terr_kp1 = f64::MAX;
+            let terr_kp1 = (self.order as f64 + 2.0) * err_kp1;
 
             if self.order + 1 >= self.ns || kdiff == 1 { action = 0; }
             else if self.order == self.max_order { action = 0; } 
@@ -158,14 +158,15 @@ impl BdfHistory {
             self.phi[self.k_used + 1].copy_from_slice(ee);
         }
 
-        // CRITICAL: Ascending loop order mirrors SUNDIALS simultaneous X += Z update
-        for j in 0..self.k_used {
+        // Descending loop order ensures we cascade the NEW values of phi downwards, 
+        // exactly matching SUNDIALS simultaneous X += Z array behavior.
+        for i in 0..n {
+            self.phi[self.k_used][i] += ee[i];
+        }
+        for j in (0..self.k_used).rev() {
             for i in 0..n {
                 self.phi[j][i] += self.phi[j + 1][i];
             }
-        }
-        for i in 0..n {
-            self.phi[self.k_used][i] += ee[i];
         }
     }
 }
@@ -212,8 +213,10 @@ pub fn step_bdf_vsvo(
         let mut ydot_pred = vec![0.0; n];
         history.predict(&mut y_pred, &mut ydot_pred);
 
+        // Calculate weights using history.phi[0] (accepted state), 
+        // eliminating predictor feedback loops that caused false-positive success.
         let mut weights = vec![0.0; n];
-        for i in 0..n { weights[i] = 1.0 / (config.rel_tol * y_pred[i].abs() + config.abs_tol); }
+        for i in 0..n { weights[i] = 1.0 / (config.rel_tol * history.phi[0][i].abs() + config.abs_tol); }
 
         let newton_res = solve_nonlinear_system(
             n, bw, y, ydot, p, id, constraints, spatial_diag,
@@ -226,7 +229,6 @@ pub fn step_bdf_vsvo(
             NewtonResult::Converged(iters, ee) => {
                 
                 // 1. SUNDIALS Local Truncation Error Test (IDATestError)
-                // Note the crucial use of wrms_norm_mask to suppress algebraic errors!
                 let enorm_k = wrms_norm_mask(&ee, &weights, id, config.suppress_alg);
                 let err_k = ck * enorm_k / history.sigma[history.order];
 
@@ -270,7 +272,17 @@ pub fn step_bdf_vsvo(
 
                 // Success! Reset error_fails counter.
                 error_fails = 0;
-                history.complete_step(err_k, err_km1, err_km2, &ee, config.min_dt, config.max_dt);
+                
+                // Evaluate Truncation Error at Order K+1
+                let mut err_kp1 = 0.0;
+                if history.order < history.max_order {
+                    let mut delta = vec![0.0; n];
+                    for i in 0..n { delta[i] = ee[i] - history.phi[history.order + 1][i]; }
+                    let enorm_kp1 = wrms_norm_mask(&delta, &weights, id, config.suppress_alg);
+                    err_kp1 = enorm_kp1 / ((history.order + 2) as f64);
+                }
+
+                history.complete_step(err_k, err_km1, err_km2, err_kp1, &ee, config.min_dt, config.max_dt);
                 
                 diag.accepted_steps += 1;
                 diag.trace_t.push(abs_t + t_local); 

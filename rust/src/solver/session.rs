@@ -57,6 +57,14 @@ impl SolverHandle {
         let dt = 1e-11;
         self.step_with_history(dt, None)?;
         self.t -= dt; 
+        
+        // [CHANGED] Reset the BDF history to order 1 to prevent high-order extrapolation 
+        // across a discontinuous parameter jump (e.g. Current to Voltage control).
+        self.history.order = 1;
+        self.history.k_used = 0;
+        self.history.ns = 0;
+        self.lu_solver.mark_stale();
+        
         Ok(())
     }
 

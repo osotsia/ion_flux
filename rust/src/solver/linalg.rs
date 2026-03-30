@@ -91,10 +91,22 @@ impl NativeSparseLuSolver {
         match num_res {
             Ok(Ok(n_lu)) => self.numeric = Some(n_lu),
             _ => {
-                // Fallback: Rebuild Symbolic
-                let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic Fallback failed".to_string())?;
-                self.numeric = Some(Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric Fallback failed".to_string())?);
-                self.symbolic = Some(sym);
+                // Fallback: Rebuild Symbolic safely inside a catch_unwind boundary
+                // to prevent pyo3_runtime.PanicException on perfectly singular matrices.
+                // Explicitly define the Result type to resolve type inference errors.
+                let fallback_res = catch_unwind(AssertUnwindSafe(|| -> Result<(SymbolicLu<usize>, Lu<usize, f64>), String> {
+                    let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic Fallback failed".to_string())?;
+                    let num = Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric Fallback failed".to_string())?;
+                    Ok((sym, num))
+                }));
+                
+                match fallback_res {
+                    Ok(Ok((sym, num))) => {
+                        self.symbolic = Some(sym);
+                        self.numeric = Some(num);
+                    },
+                    _ => return Err("LU Factorization failed or panicked".to_string()),
+                }
             }
         };
 
