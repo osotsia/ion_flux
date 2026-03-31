@@ -1,3 +1,15 @@
+/* -----------------------------------------------------------------
+ * This file is a Rust port of the IDAS solver from the SUNDIALS library.
+ * 
+ * Original SUNDIALS Copyright Start
+ * Copyright (c) 2002-2026, Lawrence Livermore National Security, 
+ * University of Maryland Baltimore County, Southern Methodist University, 
+ * and the SUNDIALS contributors. All rights reserved.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ * SUNDIALS Copyright End
+ * -----------------------------------------------------------------*/
+ 
 use std::fs::File;
 use std::io::Write;
 use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
@@ -201,7 +213,7 @@ pub fn step_bdf_vsvo(
         lu_solver.mark_stale();
     }
 
-    while target_dt - t_local > 1e-8 {
+    while target_dt - t_local > 1e-10 * target_dt.abs() {
         history.h = history.h.min(target_dt - t_local).clamp(config.min_dt, config.max_dt);
         diag.total_steps += 1;
 

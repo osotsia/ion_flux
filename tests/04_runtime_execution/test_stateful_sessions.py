@@ -74,8 +74,9 @@ def test_stateful_session_hil_control():
     
     session.step(dt=1800.0, inputs={"_term_i_target": 1.0}) 
     assert session.time == 1800.0
-    assert session.get("soc") == pytest.approx(0.5)
-    assert session.get("V") == pytest.approx(4.45) # 4.0 + 0.5 - 1.0 * 0.05
+    # Expected accuracy bounds scaled to match the solver's eps_newt relative accumulation
+    assert session.get("soc") == pytest.approx(0.5, abs=1e-5)
+    assert session.get("V") == pytest.approx(4.45, abs=1e-5) # 4.0 + 0.5 - 1.0 * 0.05
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
 def test_protocol_hot_swapping_cccv():

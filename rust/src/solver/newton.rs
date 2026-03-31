@@ -1,3 +1,15 @@
+/* -----------------------------------------------------------------
+ * This file is a Rust port of the IDAS solver from the SUNDIALS library.
+ * 
+ * Original SUNDIALS Copyright Start
+ * Copyright (c) 2002-2026, Lawrence Livermore National Security, 
+ * University of Maryland Baltimore County, Southern Methodist University, 
+ * and the SUNDIALS contributors. All rights reserved.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ * SUNDIALS Copyright End
+ * -----------------------------------------------------------------*/
+ 
 use std::time::Instant;
 use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::linalg::{NativeSparseLuSolver, solve_gmres};

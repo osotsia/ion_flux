@@ -1,3 +1,4 @@
+# --- File: python/ion_flux/compiler/codegen/translator.py ---
 from typing import Dict, Any, Optional
 from .ast_analysis import extract_state_name
 from .topology import get_stride, get_local_index, get_coord_sys, get_resolution
@@ -219,19 +220,15 @@ class CppTranslator:
         if "right" in bcs:
             bc_expr = self.translate(bcs["right"]["rhs"], idx, face=None)
             right = f"(({local_idx}) == {res_val} - 1 ? ({bc_expr}) : ({right}))"
-            center = f"(({local_idx}) == {res_val} - 1 ? ({bc_expr}) : ({center}))"
         else:
             # Default to no-flux to hermetically seal uncoupled macro-micro boundaries
             right = f"(({local_idx}) == {res_val} - 1 ? (0.0) : ({right}))"
-            center = f"(({local_idx}) == {res_val} - 1 ? (0.0) : ({center}))"
             
         if "left" in bcs:
             bc_expr = self.translate(bcs["left"]["rhs"], idx, face=None)
             left = f"(({local_idx}) == 0 ? ({bc_expr}) : ({left}))"
-            center = f"(({local_idx}) == 0 ? ({bc_expr}) : ({center}))"
         else:
             left = f"(({local_idx}) == 0 ? (0.0) : ({left}))"
-            center = f"(({local_idx}) == 0 ? (0.0) : ({center}))"
             
         return left, center, right
 
