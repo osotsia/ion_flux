@@ -1,4 +1,3 @@
-// --- File: rust/src/solver/newton.rs ---
 use std::time::Instant;
 use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::linalg::{NativeSparseLuSolver, solve_gmres};
@@ -21,7 +20,7 @@ pub enum NewtonResult {
 pub fn solve_nonlinear_system(
     n: usize, bw: isize,
     y: &mut[f64], ydot: &mut [f64], p: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
-    c_j: f64, c_j_old: f64, phi_0: &[f64],
+    c_j: f64, c_j_last_setup: &mut f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
     lu_solver: &mut NativeSparseLuSolver, jac_buffer: &mut [f64],
@@ -29,8 +28,8 @@ pub fn solve_nonlinear_system(
 ) -> NewtonResult {
     
     // 1. The 25% Staleness Rule
-    let cj_ratio = if c_j_old == 0.0 { 1.0 } else { c_j / c_j_old };
-    let cj_changed = (cj_ratio - 1.0).abs() > config.max_cj_ratio_change;
+    let mut cj_ratio = if *c_j_last_setup == 0.0 { 1.0 } else { c_j / *c_j_last_setup };
+    let cj_changed = cj_ratio < 0.6 || cj_ratio > 1.6666666666666667;
     
     let mut is_stale_at_start = lu_solver.is_stale;
     if cj_changed {
@@ -46,6 +45,7 @@ pub fn solve_nonlinear_system(
     // WITHOUT collapsing the integration step size `dt`.
     loop {
         let mut old_fnorm = 0.0;
+        let mut retry = false;
 
         for iter in 0..config.max_newton_iters {
             diag.newton_iterations += 1;
@@ -67,10 +67,8 @@ pub fn solve_nonlinear_system(
             if !f_norm.is_finite() {
                 let fail = NewtonFailure::NonFiniteResidual;
                 if is_stale_at_start && bw != -1 {
-                    is_stale_at_start = false;
-                    lu_solver.mark_stale();
-                    ee.fill(0.0);
-                    break; // break inner iteration loop, retry outer loop
+                    retry = true;
+                    break;
                 }
                 return NewtonResult::DivergedFatal(fail);
             }
@@ -90,6 +88,7 @@ pub fn solve_nonlinear_system(
                 if let Err(e) = solve_gmres(n, &mut dy, jvp_closure, precond) {
                     return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
                 }
+                cj_ratio = 1.0;
             } else {
                 if lu_solver.is_stale {
                     let start = Instant::now();
@@ -101,14 +100,16 @@ pub fn solve_nonlinear_system(
                     if let Err(e) = lu_solver.factorize(jac_buffer, diag) {
                         return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
                     }
+                    *c_j_last_setup = c_j;
+                    cj_ratio = 1.0;
                 }
                 if let Err(e) = lu_solver.solve(&mut dy, diag) {
                     return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
                 }
             }
 
-            // 2. Linear Solution Scaling
-            if cj_ratio != 1.0 && !lu_solver.is_stale {
+            // 2. Linear Solution Scaling (Ensures step is valid when c_j changes but Jacobian is retained)
+            if bw != -1 && cj_ratio != 1.0 {
                 let scale = 2.0 / (1.0 + cj_ratio);
                 for i in 0..n { dy[i] *= scale; }
             }
@@ -121,7 +122,7 @@ pub fn solve_nonlinear_system(
             // 3. Stringent SUNDIALS Convergence Criteria
             if iter == 0 {
                 old_fnorm = dy_norm;
-                if dy_norm <= 1e-4 * config.eps_newt {
+                if dy_norm <= 1e-8 * config.eps_newt {
                     return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
                 }
             } else {
@@ -132,10 +133,8 @@ pub fn solve_nonlinear_system(
                 if rate > config.max_rho {
                     let fail = NewtonFailure::ContractionThrashing(rate);
                     if is_stale_at_start && bw != -1 {
-                        is_stale_at_start = false;
-                        lu_solver.mark_stale();
-                        ee.fill(0.0);
-                        break; // break inner iteration loop, retry outer loop
+                        retry = true;
+                        break;
                     }
                     return NewtonResult::DivergedFatal(fail);
                 }
@@ -148,11 +147,11 @@ pub fn solve_nonlinear_system(
         }
         
         // If we reach here, we either hit max iterations or broke out to retry.
-        if is_stale_at_start && bw != -1 {
+        if retry || (is_stale_at_start && bw != -1) {
             is_stale_at_start = false;
             lu_solver.mark_stale();
             ee.fill(0.0);
-            continue; // Retry outer loop
+            continue; // Retry outer loop with a fresh Jacobian
         }
         
         return NewtonResult::DivergedFatal(NewtonFailure::MaxItersReached);
@@ -201,6 +200,5 @@ pub fn wrms_norm_mask(v: &[f64], w: &[f64], id: &[f64], suppress_alg: bool) -> f
             sum += (v[i] * w[i]).powi(2);
         }
     }
-    // Divide strictly by N, preventing artificial step truncation failures
     (sum / (v.len() as f64)).sqrt()
 }

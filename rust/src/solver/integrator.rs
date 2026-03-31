@@ -1,4 +1,3 @@
-// --- File: rust/src/solver/integrator.rs ---
 use std::fs::File;
 use std::io::Write;
 use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
@@ -66,7 +65,6 @@ impl BdfHistory {
             alpha0 -= self.alpha[i];
         }
         
-        self.c_j_old = self.c_j;
         self.c_j = -alphas / self.h;
         
         let mut ck = (self.alpha[self.order] + alphas - alpha0).abs();
@@ -220,7 +218,7 @@ pub fn step_bdf_vsvo(
 
         let newton_res = solve_nonlinear_system(
             n, bw, y, ydot, p, id, constraints, spatial_diag,
-            history.c_j, history.c_j_old, &history.phi[0],
+            history.c_j, &mut history.c_j_old, &history.phi[0],
             &y_pred, &ydot_pred, &weights, res_fn, jac_fn, jvp_fn,
             lu_solver, jac_buffer, config, diag
         );
@@ -255,7 +253,21 @@ pub fn step_bdf_vsvo(
                     lu_solver.mark_stale();
                     
                     if error_fails == 1 {
-                        let eta = (0.9 * (2.0 * err_k + 0.0001).powf(-1.0 / (history.order as f64 + 1.0))).clamp(0.25, 0.9);
+                        let mut knew = history.order;
+                        let mut err_knew = err_k;
+                        
+                        if history.order > 1 {
+                            let terr_k = (history.order as f64 + 1.0) * err_k;
+                            let terr_km1 = (history.order as f64) * err_km1;
+                            
+                            if terr_km1 <= 0.5 * terr_k {
+                                knew = history.order - 1;
+                                err_knew = err_km1;
+                            }
+                        }
+                        
+                        history.order = knew;
+                        let eta = (0.9 * (2.0 * err_knew + 0.0001).powf(-1.0 / (history.order as f64 + 1.0))).clamp(0.25, 0.9);
                         history.h *= eta;
                     } else {
                         // Hard backoff on consecutive LTE failures
