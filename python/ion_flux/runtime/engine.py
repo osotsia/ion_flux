@@ -3,6 +3,7 @@ import logging
 import shutil
 import json
 import os
+import tempfile
 from typing import Dict, Any, List, Optional, Tuple, Sequence as TypingSequence
 import numpy as np
 
@@ -44,20 +45,16 @@ class Engine:
         self.mock_execution = mock_execution
         self.debug = debug
         
-        # Introspect PDE attributes recursively for accurate hardware memory layouts
         states = model.components(State) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, State)]
         params = model.components(Parameter) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Parameter)]
         
         self.layout = MemoryLayout(states, params)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
-        
         self.ast_payload: Dict[str, List[Dict[str, Any]]] = model.ast() if hasattr(model, "ast") else {}
         
-        # Topological validation: detect unconstrained states prior to LLVM emission
         if self.ast_payload:
             targeted_states = set()
             from ion_flux.compiler.codegen.ast_analysis import extract_state_names
-            
             all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
             for eqs in self.ast_payload.get("regions", {}).values():
                 all_eqs.extend(eqs)
@@ -71,38 +68,19 @@ class Engine:
                 if state_name not in targeted_states:
                     raise ValueError(f"Unconstrained state detected: '{state_name}'. Rank deficiency in system.")
 
-        # Map -1 to trigger Matrix-Free Krylov Iterative solver natively in Rust
         if jacobian_bandwidth is None:
-            if any(getattr(s.domain, "coord_sys", "") == "unstructured" for s in states):
-                self.jacobian_bandwidth = -1 
-            else:
-                has_spatial = any(s.domain is not None for s in states)
-                has_scalar = any(s.domain is None for s in states)
-                has_composite = any(type(s.domain).__name__ == "CompositeDomain" for s in states if s.domain)
-                
-                def _has_integral(node: Any) -> bool:
-                    if isinstance(node, dict):
-                        if node.get("type") == "UnaryOp" and node.get("op") == "integral": return True
-                        return any(_has_integral(v) for v in node.values())
-                    elif isinstance(node, list): return any(_has_integral(v) for v in node)
-                    return False
-                    
-                if (has_spatial and has_scalar) or _has_integral(self.ast_payload) or has_composite: 
-                    self.jacobian_bandwidth = 0
-                else: 
-                    self.jacobian_bandwidth = 2 if has_spatial else 0
+            self.jacobian_bandwidth = self._compute_symbolic_bandwidth(states, self.ast_payload)
         else:
             self.jacobian_bandwidth = jacobian_bandwidth
         
-        # JIT Compilation Pipeline
         if hasattr(model, "ast"):
             self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, bandwidth=self.jacobian_bandwidth, target=self.target)
             self.runtime = None
             if not self.mock_execution:
                 try:
-                    self.runtime = NativeCompiler().compile(self.cpp_source, self.layout.n_states)
+                    compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
+                    self.runtime = compiler.compile(self.cpp_source, self.layout.n_states)
                 except RuntimeError as e:
-                    import logging
                     logging.warning(f"Compilation failed, falling back to mock execution: {e}")
                     self.mock_execution = True
         else:
@@ -110,19 +88,49 @@ class Engine:
             
         for k, v in kwargs.items(): setattr(self, k, v)
 
-    @classmethod
-    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native") -> "Engine":
-        meta_path = binary_path + ".meta.json"
+    def _compute_symbolic_bandwidth(self, states, ast_payload) -> int:
+        from ion_flux.compiler.codegen.ast_analysis import extract_state_names
         
-        if not os.path.exists(meta_path):
-            raise FileNotFoundError(f"Missing layout manifest at {meta_path}. Ensure it was exported correctly.")
+        if any(getattr(s.domain, "coord_sys", "") == "unstructured" for s in states):
+            return -1
             
-        with open(meta_path, "r") as f:
-            meta = json.load(f)
+        max_bw = 0
+        all_eqs = ast_payload.get("global", []) + ast_payload.get("boundaries", [])
+        for eqs in ast_payload.get("regions", {}).values():
+            all_eqs.extend(eqs)
+            
+        for eq in all_eqs:
+            if eq["lhs"].get("type") == "InitialCondition": continue
+            
+            targets = extract_state_names(eq["lhs"])
+            deps = extract_state_names(eq["rhs"])
+            
+            for t in targets:
+                if t not in self.layout.state_offsets: continue
+                off_t, size_t = self.layout.state_offsets[t]
+                
+                if size_t > 1: max_bw = max(max_bw, 2)
+                    
+                for d in deps:
+                    if d not in self.layout.state_offsets: continue
+                    off_d, _ = self.layout.state_offsets[d]
+                    
+                    if abs(off_t - off_d) > 0:
+                        return 0
+                        
+        return max_bw if max_bw > 0 else 0
+
+    @classmethod
+    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native", debug: bool = False) -> "Engine":
+        meta_path = binary_path + ".meta.json"
+        if not os.path.exists(meta_path): raise FileNotFoundError(f"Missing layout manifest at {meta_path}.")
+            
+        with open(meta_path, "r") as f: meta = json.load(f)
             
         engine = cls.__new__(cls)
         engine.target = target
         engine.solver_backend = solver_backend
+        engine.debug = debug
         engine.mock_execution = False
         engine.layout = MemoryLayout.from_dict(meta["layout"])
         engine.parameters = {name: _ParamHandle(name, val) for name, val in meta["parameters"].items()}
@@ -148,6 +156,7 @@ class Engine:
                 "n_states": self.layout.n_states,
                 "n_params": self.layout.n_params,
                 "p_length": self.layout.p_length,
+                "m_length": self.layout.m_length,
                 "mesh_offsets": self.layout.mesh_offsets,
                 "mesh_cache": self.layout.mesh_cache
             },
@@ -178,7 +187,6 @@ class Engine:
         id_arr = [0.0] * self.layout.n_states
         spatial_diag = [0.0] * self.layout.n_states
         
-        # Extract the discrete spatial stiffness term directly from the topology to feed the GMRES Preconditioner
         for state_name, (offset, size) in self.layout.state_offsets.items():
             state_obj = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
             if state_obj and getattr(state_obj, "domain", None):
@@ -191,8 +199,7 @@ class Engine:
                     ds = state_obj.domain.domains if hasattr(state_obj.domain, "domains") else [state_obj.domain]
                     dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
                     val = 2.0 / max(dx ** 2, 1e-12)
-                    for i in range(size):
-                        spatial_diag[offset + i] = val
+                    for i in range(size): spatial_diag[offset + i] = val
 
         def _mark_differentials(node: Any) -> None:
             if isinstance(node, dict):
@@ -208,9 +215,6 @@ class Engine:
         for eqs in self.ast_payload.get("regions", {}).values():
             _mark_differentials(eqs)
         
-        # ID array masking strictly evaluated against Boundary Conditions
-        # Enforce the Quasi-Steady-State assumption for ALL boundaries, stripping 
-        # dt(y) from the edge cells to exponentially increase numerical stability.
         for eq in self.ast_payload.get("boundaries", []):
             lhs = eq["lhs"]
             if lhs.get("type") == "Boundary":
@@ -230,9 +234,6 @@ class Engine:
                 except ValueError:
                     pass
         
-        # Normalize spatial_diag for GMRES Preconditioner on Spatial DAEs.
-        # Since `builder.py` normalizes Spatial DAE residuals by multiplying by dx^2,
-        # the diagonal coefficient becomes exactly 2.0 (from the Laplacian stencil).
         for i in range(self.layout.n_states):
             if id_arr[i] == 0.0 and spatial_diag[i] > 0.0:
                 spatial_diag[i] = 2.0
@@ -256,7 +257,6 @@ class Engine:
                 if op == "coords": return idx * dx
             return 0.0
         
-        # Initial conditions safely isolated and extracted without parsing the rest of the AST
         all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
         for eqs in self.ast_payload.get("regions", {}).values():
             all_eqs.extend(eqs)
@@ -282,9 +282,6 @@ class Engine:
         p_list = [0.0] * self.layout.p_length
         for p_name, (offset, _) in self.layout.param_offsets.items():
             p_list[offset] = overrides.get(p_name, self.parameters[p_name].value)
-            
-        # Reliably works on both active JIT instances and stateless binary loads
-        self.layout.pack_mesh_data(p_list)
         return p_list
 
     def _handle_native_crash(self, original_error: Exception):
@@ -294,13 +291,11 @@ class Engine:
         import os
         import json
         crash_files = glob.glob("ion_flux_diagnostics/crash_*.json")
-        if not crash_files:
-            raise original_error
+        if not crash_files: raise original_error
             
         latest_crash = max(crash_files, key=os.path.getctime)
         try:
-            with open(latest_crash, "r") as f:
-                crash_data = json.load(f)
+            with open(latest_crash, "r") as f: crash_data = json.load(f)
             
             idx_to_name = {}
             for name, (offset, size) in self.layout.state_offsets.items():
@@ -312,7 +307,6 @@ class Engine:
             msg += f"{'-'*85}\n"
             msg += f"Reason: {crash_data.get('reason', 'Unknown')}\n"
             msg += f"Accepted Steps: {crash_data.get('accepted_steps', 0)}\n\n"
-            
             msg += "Top Offenders (Ranked by NaN presence, then Absolute Residual):\n"
             msg += f"{'State Name':<30} | {'Type':<10} | {'Residual':<12} | {'y':<12} | {'y_dot':<12}\n"
             msg += "-" * 85 + "\n"
@@ -322,7 +316,6 @@ class Engine:
                 name = idx_to_name.get(idx, f"Unknown[{idx}]")
                 rtype = off.get("type", "")
                 
-                # Format numbers carefully to handle NaNs/strings from Rust
                 def fmt(v):
                     try: return f"{float(v):<12.3e}"
                     except: return f"{v:<12}"
@@ -339,14 +332,18 @@ class Engine:
             raise original_error from None
 
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
+        """Provides direct Python wrapper to evaluate the analytical residual map F(y, ydot, p, m)."""
         if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
         p_list = self._pack_parameters(parameters or {})
-        return self.runtime.evaluate_residual(y, ydot, p_list)
+        m_list = self.layout.get_mesh_data()
+        return self.runtime.evaluate_residual(y, ydot, p_list, m_list)
 
     def evaluate_jacobian(self, y: List[float], ydot: List[float], c_j: float, parameters: Optional[Dict[str, float]] = None) -> List[List[float]]:
+        """Provides direct Python wrapper to evaluate the exact analytical Jacobian using Enzyme AD."""
         if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
         p_list = self._pack_parameters(parameters or {})
-        return self.runtime.evaluate_jacobian(y, ydot, p_list, c_j)
+        m_list = self.layout.get_mesh_data()
+        return self.runtime.evaluate_jacobian(y, ydot, p_list, m_list, c_j)
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
                 t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1) -> SimulationResult:
@@ -377,16 +374,14 @@ class Engine:
 
             for step in protocol.steps:
                 target_condition = getattr(step, "until", None)
-                
                 inputs = {}
                 step_name = type(step).__name__
                 
-                # Dynamic translation of Cycler sequences to Hardware Terminals
                 if step_name == "CC":
                     if "_term_mode" in self.parameters:
                         inputs["_term_mode"] = 1.0
                         inputs["_term_i_target"] = step.rate
-                    else: # Legacy fallback
+                    else: 
                         if "mode" in self.parameters: inputs["mode"] = 1.0
                         if "i_target" in self.parameters: inputs["i_target"] = step.rate
                         elif "i_app" in self.parameters: inputs["i_app"] = step.rate
@@ -394,19 +389,18 @@ class Engine:
                     if "_term_mode" in self.parameters:
                         inputs["_term_mode"] = 0.0
                         inputs["_term_v_target"] = step.voltage
-                    else: # Legacy fallback
+                    else: 
                         if "mode" in self.parameters: inputs["mode"] = 0.0
                         if "v_target" in self.parameters: inputs["v_target"] = step.voltage
                 elif step_name == "Rest":
                     if "_term_mode" in self.parameters:
                         inputs["_term_mode"] = 1.0
                         inputs["_term_i_target"] = 0.0
-                    else: # Legacy fallback
+                    else: 
                         if "mode" in self.parameters: inputs["mode"] = 1.0
                         if "i_target" in self.parameters: inputs["i_target"] = 0.0
                         elif "i_app" in self.parameters: inputs["i_app"] = 0.0
                 
-                # If gradients requested, limit macro integration step sizes to capture high-res history for Adjoint solver
                 dt_step = 0.5 if requires_grad else 1.0 
                 t_max = getattr(step, "time", float('inf'))
                 t_elapsed = 0.0
@@ -421,13 +415,10 @@ class Engine:
                         for _ in range(15):
                             mid = (low + high) / 2.0
                             session.step(mid, inputs=inputs)
-                            if session.triggered(target_condition):
-                                high = mid
-                            else:
-                                low = mid
+                            if session.triggered(target_condition): high = mid
+                            else: low = mid
                             session.restore()
                         
-                        # Evaluate to the precise boundary that triggers the event
                         session.step(high, inputs=inputs)
                         
                         t_elapsed += high
@@ -469,19 +460,19 @@ class Engine:
             
         y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
         p_list = self._pack_parameters(parameters or {})
+        m_list = self.layout.get_mesh_data()
         
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
-        
         record_history = requires_grad is not None
         
         try:
             if self.solver_backend == "sundials":
                 y_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
-                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist()
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist()
                 )
             else:
                 y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
-                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, t_eval_arr.tolist(), 
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), 
                     self.jacobian_bandwidth, spatial_diag, record_history, self.debug
                 )
         except RuntimeError as e:
@@ -507,8 +498,6 @@ class Engine:
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 
                     protocol: Any = None, max_workers: int = 1) -> List[SimulationResult]:
-        
-        # Eliminate thread oversubscription by muting OpenMP during Rayon task parallelism
         if max_workers > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = "1"
             if getattr(self, "runtime", None):
@@ -520,9 +509,13 @@ class Engine:
         y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
+        m_list = self.layout.get_mesh_data()
         
         try:
-            y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, self.debug, max_workers)
+            y_res_batch = solve_batch_native(
+                self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, 
+                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, self.debug, max_workers
+            )
         except RuntimeError as e:
             self._handle_native_crash(e)
             

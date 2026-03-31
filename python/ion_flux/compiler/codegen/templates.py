@@ -14,7 +14,7 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
                     dres[i] = 0.0;
                 }}
         #ifdef ENZYME_ACTIVE
-                __enzyme_fwddiff((void*)evaluate_residual, enzyme_dup, y, dy.data(), enzyme_dup, ydot, dydot.data(), enzyme_const, p, enzyme_dup, res_dummy.data(), dres.data());
+                __enzyme_fwddiff((void*)evaluate_residual, enzyme_dup, y, dy.data(), enzyme_dup, ydot, dydot.data(), enzyme_const, p, enzyme_const, m, enzyme_dup, res_dummy.data(), dres.data());
         #endif
                 for (int row = 0; row < N; ++row) {{
                     int col_base = row - (row % stride) + color;
@@ -37,7 +37,7 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
                     dres[i] = 0.0;
                 }
         #ifdef ENZYME_ACTIVE
-                __enzyme_fwddiff((void*)evaluate_residual, enzyme_dup, y, dy.data(), enzyme_dup, ydot, dydot.data(), enzyme_const, p, enzyme_dup, res_dummy.data(), dres.data());
+                __enzyme_fwddiff((void*)evaluate_residual, enzyme_dup, y, dy.data(), enzyme_dup, ydot, dydot.data(), enzyme_const, p, enzyme_const, m, enzyme_dup, res_dummy.data(), dres.data());
         #endif
                 for (int row = 0; row < N; ++row) {
                     jac_out[col * N + row] = dres[row];
@@ -71,11 +71,11 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
         #endif
         }}
 
-        void evaluate_residual(const double* y, const double* ydot, const double* p, double* res) {{
+        void evaluate_residual(const double* y, const double* ydot, const double* p, const double* m, double* res) {{
         {body}
         }}
 
-        void evaluate_jacobian(const double* y, const double* ydot, const double* p, double c_j, double* jac_out) {{
+        void evaluate_jacobian(const double* y, const double* ydot, const double* p, const double* m, double c_j, double* jac_out) {{
             int N = {n_states};
             std::vector<double> dy(N, 0.0);
             std::vector<double> dydot(N, 0.0);
@@ -85,8 +85,7 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
         {textwrap.indent(jacobian_logic, '    ')}
         }}
 
-        // Matrix-Free Exact Jacobian-Vector Product via Enzyme Forward-Mode AD
-        void evaluate_jvp(const double* y, const double* ydot, const double* p, double c_j, const double* v, double* jvp_out) {{
+        void evaluate_jvp(const double* y, const double* ydot, const double* p, const double* m, double c_j, const double* v, double* jvp_out) {{
             int N = {n_states};
             std::vector<double> dy(N, 0.0);
             std::vector<double> dydot(N, 0.0);
@@ -103,13 +102,12 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
                 enzyme_dup, y, dy.data(), 
                 enzyme_dup, ydot, dydot.data(), 
                 enzyme_const, p, 
+                enzyme_const, m,
                 enzyme_dup, res_dummy.data(), jvp_out);
         #endif
         }}
 
-        // Modified for Matrix-Free Adjoints: Outputs exact dydot_out sensitivities 
-        // to reconstruct J^T v = (dF/dy)^T v + c_j * (dF/dydot)^T v dynamically.
-        void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* lambda_vec, double* dp_out, double* dy_out, double* dydot_out) {{
+        void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* m, const double* lambda_vec, double* dp_out, double* dy_out, double* dydot_out) {{
             int N = {n_states};
             int N_P = {n_params};
             std::vector<double> res_dummy(N, 0.0);
@@ -122,6 +120,7 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
                 enzyme_dup, y, dy_out, 
                 enzyme_dup, ydot, dydot_out, 
                 enzyme_dup, p, dp_out, 
+                enzyme_const, m,
                 enzyme_dup, res_dummy.data(), (double*)lambda_vec);
         #endif
         }}

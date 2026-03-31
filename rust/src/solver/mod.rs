@@ -9,11 +9,10 @@ pub mod sundials;
 use std::os::raw::c_double;
 use std::time::SystemTime;
 
-// --- C-ABI Signatures ---
-pub type NativeResFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *mut c_double);
-pub type NativeJacFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, c_double, *mut c_double);
-pub type NativeJvpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, c_double, *const c_double, *mut c_double);
-pub type NativeVjpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *mut c_double, *mut c_double, *mut c_double);
+pub type NativeResFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *mut c_double);
+pub type NativeJacFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, c_double, *mut c_double);
+pub type NativeJvpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, c_double, *const c_double, *mut c_double);
+pub type NativeVjpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *const c_double, *mut c_double, *mut c_double, *mut c_double);
 
 #[derive(Clone, Copy)]
 pub struct SolverConfig {

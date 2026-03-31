@@ -98,11 +98,9 @@ def test_v1_experiment_cccv_hot_swapping_cross_validation():
     engine_native = Engine(model=model, target="cpu:serial", solver_backend="native")
     engine_sundials = Engine(model=model, target="cpu:serial", solver_backend="sundials")
     
-    # Time limits expanded to 5000s to allow the 1000s diffusion time constant 
-    # to naturally hit the -0.1A trigger via the bisection event catcher.
     protocol = Sequence([
-        CC(rate=-2.0, until=fx.Condition("V_cell >= 4.2"), time=5000),
-        CV(voltage=4.2, until=fx.Condition("i_app >= -0.1"), time=5000)
+        CC(rate=-2.0, until=model.V_cell >= 4.2, time=5000),
+        CV(voltage=4.2, until=model.i_app >= -0.1, time=5000)
     ])
     
     res_native = engine_native.solve(protocol=protocol)

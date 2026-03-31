@@ -4,6 +4,54 @@ from .ast_analysis import extract_state_name
 from .translator import CppTranslator
 from .templates import generate_cpp_skeleton
 
+def _assign_boundary_targets(boundary_eqs: List[Dict[str, Any]], layout: Any) -> None:
+    """
+    Uses maximum bipartite matching to formally assign each boundary equation 
+    to a specific state constraint, completely eliminating DSL ordering dependencies.
+    """
+    graph = {}
+    for i, eq in enumerate(boundary_eqs):
+        targets = []
+        for side in ["lhs", "rhs"]:
+            node = eq[side]
+            if node.get("type") == "Boundary":
+                try:
+                    name = extract_state_name(node, layout)
+                    targets.append((name, node["side"]))
+                except ValueError:
+                    pass
+        graph[i] = targets
+        
+    match = {}
+    def dfs(u, visited):
+        for target_tuple in graph[u]:
+            if target_tuple not in visited:
+                visited.add(target_tuple)
+                if target_tuple not in match or dfs(match[target_tuple], visited):
+                    match[target_tuple] = u
+                    return True
+        return False
+        
+    for i in range(len(boundary_eqs)):
+        dfs(i, set())
+        
+    eq_to_target = {u: v for v, u in match.items()}
+    for i, eq in enumerate(boundary_eqs):
+        if i in eq_to_target:
+            assigned_state, assigned_side = eq_to_target[i]
+            lhs_node = eq["lhs"]
+            needs_flip = True
+            
+            if lhs_node.get("type") == "Boundary":
+                try:
+                    if extract_state_name(lhs_node, layout) == assigned_state and lhs_node["side"] == assigned_side:
+                        needs_flip = False
+                except ValueError: 
+                    pass
+                
+            if needs_flip:
+                eq["lhs"], eq["rhs"] = eq["rhs"], eq["lhs"]
+
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
     """Orchestrates the conversion of a pure Python AST into a native C++ simulation binary."""
     state_map = {s.name: s for s in states}
@@ -47,8 +95,7 @@ def _parse_buckets(ast_payload: Dict[str, Any], layout: Any) -> Tuple[dict, list
             lhs = eq["lhs"]
             if lhs.get("type") == "DomainBoundary": 
                 dynamic_domains[lhs["domain"]] = {"side": lhs["side"], "rhs": eq["rhs"]}
-            elif lhs.get("type") == "InitialCondition":
-                continue
+            elif lhs.get("type") == "InitialCondition": continue
             else:
                 eq_copy = eq.copy()
                 eq_copy["target_domain"] = dom_name
@@ -59,47 +106,20 @@ def _parse_buckets(ast_payload: Dict[str, Any], layout: Any) -> Tuple[dict, list
         lhs = eq["lhs"]
         if lhs.get("type") == "DomainBoundary":
             dynamic_domains[lhs["domain"]] = {"side": lhs["side"], "rhs": eq["rhs"]}
-        elif lhs.get("type") == "InitialCondition":
-            continue
+        elif lhs.get("type") == "InitialCondition": continue
         else:
             eq_copy = eq.copy()
             eq_copy["target_domain"] = None
             bulk_eqs.append(eq_copy)
             
-    # Boundaries dictate local Dirichlet overrides or Neumann flux injections
-    targeted_boundaries = set()
+    # Formally assign boundary constraints via Bipartite Matching
+    _assign_boundary_targets(ast_payload.get("boundaries", []), layout)
     
     for eq in ast_payload.get("boundaries", []):
         lhs = eq["lhs"]
-        rhs = eq["rhs"]
-        
-        # --- Commutative DSL Auto-Flipper ---
-        # Automatically swaps LHS and RHS if the LHS node is already fully constrained
-        # by a previous equation, allowing researchers to write intuitive A == B syntax.
-        def get_bnd_target(node):
-            if node.get("type") == "Boundary":
-                try:
-                    return (extract_state_name(node, layout), node["side"])
-                except ValueError:
-                    pass
-            return None
-            
-        lhs_target = get_bnd_target(lhs)
-        rhs_target = get_bnd_target(rhs)
-        
-        if lhs_target and lhs_target in targeted_boundaries and rhs_target and rhs_target not in targeted_boundaries:
-            eq["lhs"], eq["rhs"] = rhs, lhs
-            lhs = eq["lhs"]
-            lhs_target = rhs_target
-            
-        if lhs_target:
-            targeted_boundaries.add(lhs_target)
-        # ------------------------------------
-
         if lhs.get("type") == "DomainBoundary":
             dynamic_domains[lhs["domain"]] = {"side": lhs["side"], "rhs": eq["rhs"]}
-        elif lhs.get("type") == "InitialCondition":
-            continue
+        elif lhs.get("type") == "InitialCondition": continue
         elif lhs.get("type") == "Boundary":
             if lhs["child"].get("type") == "State":
                 dirichlet_eqs.append(eq)
@@ -117,8 +137,7 @@ def _emit_domain_constants(lines: List[str], states: List[Any], layout: Any, dyn
     for s in states:
         if s.domain:
             ds = s.domain.domains if type(s.domain).__name__ in ("CompositeDomain", "ConcatenatedDomain") else [s.domain]
-            for d in ds:
-                all_domains[d.name] = d
+            for d in ds: all_domains[d.name] = d
             
     for d in all_domains.values():
         denom = max(d.resolution - 1, 1)
@@ -135,8 +154,7 @@ def _emit_domain_constants(lines: List[str], states: List[Any], layout: Any, dyn
 def _has_dt(node: Any) -> bool:
     """Recursively checks if an AST node contains a time derivative (dt)."""
     if isinstance(node, dict):
-        if node.get("type") == "UnaryOp" and node.get("op") == "dt":
-            return True
+        if node.get("type") == "UnaryOp" and node.get("op") == "dt": return True
         return any(_has_dt(v) for v in node.values())
     elif isinstance(node, list):
         return any(_has_dt(v) for v in node)
@@ -170,9 +188,6 @@ def _emit_residual_loop(lines: List[str], eq: Dict[str, Any], target: str, layou
                     loop_size = getattr(d, "resolution", 1)
                     break
                 current_offset += getattr(d, "resolution", 1)
-        elif type(domain).__name__ == "CompositeDomain":
-            # For macro-micro (e.g., x_n * r_n), if the target_domain matches exactly, keep full layout size.
-            pass 
 
     omp_pragma = "    #pragma omp parallel for\n" if ("omp" in target and loop_size > 50) else ""
 
@@ -220,7 +235,7 @@ def _emit_dirichlet_override(lines: List[str], eq: Dict[str, Any], layout: Any, 
         if state_obj.domain.name in layout.mesh_offsets and side in layout.mesh_offsets[state_obj.domain.name]["surfaces"]:
             off_surf = layout.mesh_offsets[state_obj.domain.name]["surfaces"][side]
             lines.append(f"    for (int i = 0; i < {size}; ++i) {{")
-            lines.append(f"        if (p[{off_surf} + i] > 0.5) {{")
+            lines.append(f"        if (m[{off_surf} + i] > 0.5) {{")
             lhs_cpp = translator.translate(eq["lhs"]["child"], "i")
             rhs_cpp = translator.translate(eq["rhs"], "i")
             lines.append(f"            res[{offset} + i] = ({lhs_cpp}) - ({rhs_cpp});")

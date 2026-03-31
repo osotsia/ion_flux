@@ -65,16 +65,16 @@ class ThermoCoupledECM(fx.PDE):
         }
 
 if __name__ == "__main__":
-    engine = fx.Engine(model=ThermoCoupledECM(), target="cpu:serial")
+    model = ThermoCoupledECM()
+    engine = fx.Engine(model=model, target="cpu:serial", solver_backend="native")
     
     # Matching PyBaMM's 100A discharge profile
     protocol = Sequence([
-        CC(rate=100.0, until=fx.Condition("V_cell <= 3.2"), time=3600)
+        CC(rate=100.0, until=model.V_cell <= 3.2, time=3600)
     ])
     
     res = engine.solve(protocol=protocol)
     
-    # Isolate variables for the dashboard to mirror the PyBaMM layout
     variables_to_plot = [
         "i_app",
         ["V_cell"], # OCV can be tracked natively if added as an output state

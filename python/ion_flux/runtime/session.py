@@ -9,17 +9,6 @@ try:
 except ImportError:
     RUST_FFI_AVAILABLE = False
 
-import numpy as np
-from .eis import solve_eis
-import scipy.linalg
-from typing import Dict, Any, Optional
-
-try:
-    from ion_flux._core import SolverHandle, SundialsHandle
-    RUST_FFI_AVAILABLE = True
-except ImportError:
-    RUST_FFI_AVAILABLE = False
-
 class Session:
     """
     Stateful execution session for Hardware/Software-in-the-Loop co-simulation.
@@ -34,21 +23,21 @@ class Session:
         
         y0, ydot0, id_arr, spatial_diag = engine._extract_metadata()
         p_list = engine._pack_parameters(self.parameters)
+        m_list = engine.layout.get_mesh_data()
         self.id_arr = np.array(id_arr)
         
-        # Inject constraint array for SUNDIALS inequality bounds logic
         constraints = [0.0] * engine.layout.n_states
         
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
             if getattr(engine, "solver_backend", "native") == "sundials":
                 self.handle = SundialsHandle(
                     engine.runtime.lib_path, engine.layout.n_states,
-                    y0, ydot0, id_arr, p_list
+                    y0, ydot0, id_arr, p_list, m_list
                 )
             else:
                 self.handle = SolverHandle(
                     engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                    y0, ydot0, id_arr, constraints, p_list, spatial_diag, self.debug
+                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, self.debug
                 )
                 try:
                     self.handle.calc_algebraic_roots()
@@ -65,7 +54,6 @@ class Session:
             self.handle.set_parameter(offset, value)
 
     def get_array(self, variable_name: str) -> np.ndarray:
-        """Returns the full underlying spatial array for localized condition triggers."""
         y = self.handle.get_state() if self.handle else self._mock_y
         if variable_name in self.engine.layout.state_offsets:
             offset, size = self.engine.layout.state_offsets[variable_name]
@@ -75,7 +63,6 @@ class Session:
         raise KeyError(f"Variable '{variable_name}' not found in the current state.")
 
     def get(self, variable_name: str) -> float:
-        """Provides backwards-compatible scalar averaging for telemetry and legacy logging."""
         return float(np.mean(self.get_array(variable_name)))
 
     def step(self, dt: float, inputs: Optional[Dict[str, float]] = None) -> None:
@@ -87,7 +74,6 @@ class Session:
                     self.set_parameter(k, v)
                     changed = True
                     
-            # Snap algebraic states instantly to the new hardware inputs before integrating
             if changed and self.handle:
                 try:
                     self.handle.calc_algebraic_roots()
@@ -110,7 +96,7 @@ class Session:
                         self.micro_p.extend([p_list] * len(mt))
                 else:
                     try:
-                        self.handle.step(dt) # Sundials does not yet pipe deep history logic
+                        self.handle.step(dt) 
                     except RuntimeError as e:
                         self.engine._handle_native_crash(e)
             else:

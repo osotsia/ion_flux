@@ -47,8 +47,8 @@ def test_unstructured_3d_fem_mesh_codegen(mesh_3d_tetrahedron):
     cpp = generate_cpp(model.ast(), layout, states, bandwidth=-1)
     
     assert "static const int row_ptr_mesh3d" not in cpp
-    assert "int start = (int)p[" in cpp
-    assert "double w = p[" in cpp
+    assert "int start = (int)m[" in cpp
+    assert "double w = m[" in cpp
     assert " > 0.5 ?" in cpp
     
     # Validation that JVP Matrix-Free signatures have been correctly stamped

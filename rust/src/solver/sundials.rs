@@ -54,17 +54,18 @@ pub struct SundialsUserData {
     pub res_fn: NativeResFn,
     pub jac_fn: NativeJacFn,
     pub p: Vec<f64>,
+    pub m: Vec<f64>,
 }
 
 unsafe extern "C" fn ida_res_callback(_t: c_double, y: N_Vector, yp: N_Vector, res: N_Vector, user_data: *mut c_void) -> c_int {
     let ud = &*(user_data as *const SundialsUserData);
-    (ud.res_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), N_VGetArrayPointer(res));
+    (ud.res_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), N_VGetArrayPointer(res));
     0
 }
 
 unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, yp: N_Vector, _r: N_Vector, jac: SUNMatrix, user_data: *mut c_void, _t1: N_Vector, _t2: N_Vector, _t3: N_Vector) -> c_int {
     let ud = &*(user_data as *const SundialsUserData);
-    (ud.jac_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), c_j, SUNDenseMatrix_Data(jac));
+    (ud.jac_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), c_j, SUNDenseMatrix_Data(jac));
     0
 }
 
@@ -77,26 +78,19 @@ unsafe fn get_safe_sundials_context() -> SUNContext {
     
     #[cfg(unix)]
     {
-        #[cfg(target_os = "macos")]
-        let rtld_search = -2isize as *mut c_void; // RTLD_DEFAULT
-        #[cfg(not(target_os = "macos"))]
-        let rtld_search = 0isize as *mut c_void;  // RTLD_DEFAULT
+        #[cfg(target_os = "macos")] let rtld_search = -2isize as *mut c_void; 
+        #[cfg(not(target_os = "macos"))] let rtld_search = 0isize as *mut c_void;  
         
-        // Dynamically locate symbols directly from the loaded SUNDIALS instance or global map
         let mut get_sym = |name: &str| -> *mut c_void {
             let c_name = std::ffi::CString::new(name).unwrap();
             let mut ptr = dlsym(rtld_search, c_name.as_ptr());
             
-            // If Python's sandbox hid the MPI symbols, elevate SUNDIALS' dependencies to RTLD_GLOBAL
             if ptr.is_null() {
                 #[cfg(target_os = "macos")] let flags = 2 | 8; 
                 #[cfg(target_os = "linux")] let flags = 2 | 256; 
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))] let flags = 2;
                 
-                let libs =[
-                    "libsundials_core.dylib\0", "libsundials_core.so\0",
-                    "libsundials_core.7.6.0.dylib\0"
-                ];
+                let libs =["libsundials_core.dylib\0", "libsundials_core.so\0", "libsundials_core.7.6.0.dylib\0"];
                 for lib in &libs {
                     let h = dlopen(lib.as_ptr() as *const c_char, flags);
                     if !h.is_null() {
@@ -117,21 +111,15 @@ unsafe fn get_safe_sundials_context() -> SUNContext {
                 let mpi_init_check: unsafe extern "C" fn(*mut c_int) -> c_int = std::mem::transmute(mpi_init_check_ptr);
                 let mut flag = 0;
                 mpi_init_check(&mut flag);
-                if flag == 0 {
-                    mpi_init(std::ptr::null_mut(), std::ptr::null_mut());
-                }
+                if flag == 0 { mpi_init(std::ptr::null_mut(), std::ptr::null_mut()); }
             }
             
-            // Explicitly extract OpenMPI's communicator pointer 
             let ompi_world = get_sym("ompi_mpi_comm_world");
             if !ompi_world.is_null() {
                 comm = ompi_world;
             } else {
-                // MPICH defines MPI_COMM_WORLD as 0x44000000 statically. Check if MPICH is loaded.
                 let mpich_sym = get_sym("MPIR_Comm_direct");
-                if !mpich_sym.is_null() {
-                    comm = 0x44000000_usize as *mut c_void;
-                }
+                if !mpich_sym.is_null() { comm = 0x44000000_usize as *mut c_void; }
             }
         }
     }
@@ -162,7 +150,7 @@ pub struct SundialsHandle {
 #[pymethods]
 impl SundialsHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, p: Vec<f64>) -> PyResult<Self> {
+    pub fn new(lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, p: Vec<f64>, m: Vec<f64>) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
         let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
@@ -174,7 +162,7 @@ impl SundialsHandle {
         let id_vec = unsafe { N_VMake_Serial(n as i64, id.as_mut_ptr(), sunctx) };
         
         let ida_mem = unsafe { IDACreate(sunctx) };
-        let user_data = Box::new(SundialsUserData { res_fn, jac_fn, p });
+        let user_data = Box::new(SundialsUserData { res_fn, jac_fn, p, m });
         
         unsafe {
             IDAInit(ida_mem, Some(ida_res_callback), 0.0, y_vec, yp_vec);
@@ -226,16 +214,31 @@ impl SundialsHandle {
         if idx < self.user_data.p.len() { self.user_data.p[idx] = val; }
     }
     
-    /// Re-evaluates the algebraic manifold dynamically upon discrete input jumps (e.g., CC to CV)
     pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {
-        let res = unsafe { IDAReInit(self.ida_mem, self.t, self.y_vec, self.yp_vec) };
-        if res < 0 {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDAReInit failed with error code {}", res)));
+        let mut res = vec![0.0; self.n];
+        unsafe { (self.user_data.res_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), res.as_mut_ptr()); }
+
+        let mut jac = vec![0.0; self.n * self.n];
+        unsafe { (self.user_data.jac_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+
+        // Take a 1-step exact diagonal Newton update exclusively for algebraic variables to bridge giant protocol jumps.
+        for i in 0..self.n {
+            if self._id_data[i] < 0.5 { 
+                let diag = jac[i * self.n + i];
+                if diag.abs() > 1e-12 {
+                    self._y_data[i] -= res[i] / diag;
+                }
+            }
         }
-        let ic_res = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-3) };
-        if ic_res < 0 {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed during manifold recalculation with error code {}", ic_res)));
-        }
+
+        let y_ptr = unsafe { N_VGetArrayPointer(self.y_vec) };
+        for i in 0..self.n { unsafe { *y_ptr.add(i) = self._y_data[i]; } }
+
+        let err = unsafe { IDAReInit(self.ida_mem, self.t, self.y_vec, self.yp_vec) };
+        if err < 0 { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDAReInit failed."))); }
+        let ic_res = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-3) }; 
+        if ic_res < 0 { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed."))); }
+        
         self.sync_from_sundials();
         Ok(())
     }

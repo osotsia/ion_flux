@@ -183,7 +183,7 @@ impl BdfHistory {
 
 pub fn step_bdf_vsvo(
     n: usize, bw: isize,
-    y: &mut[f64], ydot: &mut[f64], p: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
+    y: &mut[f64], ydot: &mut[f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
     target_dt: f64,
     history: &mut BdfHistory,
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
@@ -229,7 +229,7 @@ pub fn step_bdf_vsvo(
         for i in 0..n { weights[i] = 1.0 / (config.rel_tol * history.phi[0][i].abs() + config.abs_tol); }
 
         let newton_res = solve_nonlinear_system(
-            n, bw, y, ydot, p, id, constraints, spatial_diag,
+            n, bw, y, ydot, p, m, id, constraints, spatial_diag,
             history.c_j, &mut history.c_j_old, &history.phi[0],
             &y_pred, &ydot_pred, &weights, res_fn, jac_fn, jvp_fn,
             lu_solver, jac_buffer, config, diag

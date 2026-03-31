@@ -7,6 +7,7 @@ import subprocess
 import shutil
 import logging
 import tempfile
+import uuid
 from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -29,32 +30,25 @@ class NativeRuntime:
 
         # Signature: void evaluate_residual(y, ydot, p, res)
         self.dll.evaluate_residual.argtypes = [
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double),
         ]
         self.dll.evaluate_residual.restype = None
 
         # Signature: void evaluate_jacobian(y, ydot, p, c_j, jac_out)
         self.dll.evaluate_jacobian.argtypes = [
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.c_double,
-            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.c_double, ctypes.POINTER(ctypes.c_double),
         ]
         self.dll.evaluate_jacobian.restype = None
 
-        # Signature: void evaluate_vjp(y, ydot, p, lambda, dp_out, dy_out, dydot_out)
         self.dll.evaluate_vjp.argtypes = [
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
         ]
         self.dll.evaluate_vjp.restype = None
 
@@ -62,43 +56,38 @@ class NativeRuntime:
         if hasattr(self.dll, "set_spatial_threads"):
             self.dll.set_spatial_threads(num_threads)
 
-    def evaluate_vjp(self, y: List[float], ydot: List[float], p: List[float], lambda_vec: List[float]) -> Tuple[List[float], List[float], List[float]]:
-        if len(y) != self.n_states or len(ydot) != self.n_states:
-            raise ValueError(f"Expected state vectors of length {self.n_states}.")
+    def evaluate_vjp(self, y: List[float], ydot: List[float], p: List[float], m: List[float], lambda_vec: List[float]) -> Tuple[List[float], List[float], List[float]]:
         y_arr = (ctypes.c_double * self.n_states)(*y)
         ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
         p_arr = (ctypes.c_double * len(p))(*p)
+        m_arr = (ctypes.c_double * len(m))(*m)
         lam_arr = (ctypes.c_double * self.n_states)(*lambda_vec)
         
         dp_out = (ctypes.c_double * len(p))()
         dy_out = (ctypes.c_double * self.n_states)()
         dydot_out = (ctypes.c_double * self.n_states)()
         
-        self.dll.evaluate_vjp(y_arr, ydot_arr, p_arr, lam_arr, dp_out, dy_out, dydot_out)
+        self.dll.evaluate_vjp(y_arr, ydot_arr, p_arr, m_arr, lam_arr, dp_out, dy_out, dydot_out)
         return list(dp_out), list(dy_out), list(dydot_out)
 
-    def evaluate_residual(self, y: List[float], ydot: List[float], p: List[float]) -> List[float]:
-        if len(y) != self.n_states or len(ydot) != self.n_states:
-            raise ValueError(f"Expected state vectors of length {self.n_states}.")
-            
+    def evaluate_residual(self, y: List[float], ydot: List[float], p: List[float], m: List[float]) -> List[float]:
         y_arr = (ctypes.c_double * self.n_states)(*y)
         ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
         p_arr = (ctypes.c_double * len(p))(*p)
+        m_arr = (ctypes.c_double * len(m))(*m)
         res_arr = (ctypes.c_double * self.n_states)()
         
-        self.dll.evaluate_residual(y_arr, ydot_arr, p_arr, res_arr)
+        self.dll.evaluate_residual(y_arr, ydot_arr, p_arr, m_arr, res_arr)
         return list(res_arr)
 
-    def evaluate_jacobian(self, y: List[float], ydot: List[float], p: List[float], c_j: float) -> List[List[float]]:
-        if len(y) != self.n_states or len(ydot) != self.n_states:
-            raise ValueError(f"Expected state vectors of length {self.n_states}.")
-            
+    def evaluate_jacobian(self, y: List[float], ydot: List[float], p: List[float], m: List[float], c_j: float) -> List[List[float]]:
         y_arr = (ctypes.c_double * self.n_states)(*y)
         ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
         p_arr = (ctypes.c_double * len(p))(*p)
+        m_arr = (ctypes.c_double * len(m))(*m)
         jac_arr = (ctypes.c_double * (self.n_states * self.n_states))()
         
-        self.dll.evaluate_jacobian(y_arr, ydot_arr, p_arr, ctypes.c_double(c_j), jac_arr)
+        self.dll.evaluate_jacobian(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), jac_arr)
         
         jac_2d = []
         for row in range(self.n_states):
@@ -125,26 +114,22 @@ class NativeCompiler:
     def _find_compiler(self) -> str:
         if sys.platform == "darwin":
             for path in ["/opt/homebrew/opt/llvm/bin/clang++", "/usr/local/opt/llvm/bin/clang++"]:
-                if os.path.exists(path):
-                    return path
+                if os.path.exists(path): return path
         return shutil.which("clang++") or shutil.which("g++")
 
     def _find_enzyme_plugin(self) -> str:
         if sys.platform == "darwin":
             for base in ["/opt/homebrew/lib", "/usr/local/lib"]:
                 matches = glob.glob(os.path.join(base, "ClangEnzyme*.dylib"))
-                if matches:
-                    return matches[0]
+                if matches: return matches[0]
         elif sys.platform == "linux":
             conda_prefix = os.environ.get("CONDA_PREFIX", "")
             if conda_prefix:
                 matches = glob.glob(os.path.join(conda_prefix, "lib", "ClangEnzyme*.so"))
-                if matches:
-                    return matches[0]
+                if matches: return matches[0]
             for base in ["/usr/lib", "/usr/local/lib"]:
                 matches = glob.glob(os.path.join(base, "ClangEnzyme*.so"))
-                if matches:
-                    return matches[0]
+                if matches: return matches[0]
         return ""
 
     def compile(self, cpp_source: str, n_states: int) -> NativeRuntime:
@@ -159,18 +144,20 @@ class NativeCompiler:
         if os.path.exists(lib_path):
             return NativeRuntime(lib_path, n_states)
             
-        source_path = os.path.join(self.cache_dir, f"res_{source_hash}.cpp")
+        tmp_uuid = uuid.uuid4().hex
+        source_path = os.path.join(self.cache_dir, f"res_{source_hash}_{tmp_uuid}.cpp")
+        tmp_lib_path = os.path.join(self.cache_dir, f"lib_{source_hash}_{tmp_uuid}{ext}")
+
         with open(source_path, "w") as f:
             f.write(cpp_source)
             
-        cmd = [self.compiler_cmd, "-O3", "-fPIC", "-shared", "-o", lib_path, source_path]
+        cmd = [self.compiler_cmd, "-O3", "-fPIC", "-shared", "-o", tmp_lib_path, source_path]
         
         if "#pragma omp" in cpp_source:
             cmd.append("-fopenmp")
             if sys.platform == "darwin":
                 cmd.extend(["-lomp", "-Wl,-rpath,/opt/homebrew/lib", "-Wl,-rpath,/usr/local/lib"])
             elif sys.platform == "linux":
-                # Statically link OpenMP to guarantee zero-dependency Serverless/AWS Lambda execution
                 cmd.extend(["-static-libgcc", "-static-libstdc++", "-Wl,-Bstatic", "-lgomp", "-Wl,-Bdynamic"])
         
         if self.enzyme_plugin:
@@ -181,7 +168,14 @@ class NativeCompiler:
         
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
+            # Atomic rename prevents JIT collisions in scalable Serverless environments
+            os.replace(tmp_lib_path, lib_path)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Clang compilation failed. cmd: {' '.join(cmd)}\nstderr:\n{e.stderr}")
+        finally:
+            if os.path.exists(source_path):
+                os.remove(source_path)
+            if os.path.exists(tmp_lib_path):
+                os.remove(tmp_lib_path)
             
         return NativeRuntime(lib_path, n_states)

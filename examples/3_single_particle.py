@@ -57,10 +57,12 @@ class SingleParticleModel(fx.PDE):
         }
 
 if __name__ == "__main__":
-    engine = fx.Engine(model=SingleParticleModel(), target="cpu:serial")
+
+    model=SingleParticleModel()
+    engine = fx.Engine(model, target="cpu:serial")
     
     protocol = Sequence([
-        CC(rate=10.0, until=fx.Condition("V_cell <= 3.0"), time=3600),
+        CC(rate=10.0, until=model.V_cell <= 3.0, time=3600),
         Rest(time=600)
     ])
     

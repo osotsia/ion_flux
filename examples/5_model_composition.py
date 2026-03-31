@@ -66,10 +66,11 @@ class ModularSPM(fx.PDE):
     
 if __name__ == "__main__":
     # Standard compilation and execution payload
-    engine = fx.Engine(model=ModularSPM(), target="cpu:serial")
+    model=ModularSPM()
+    engine = fx.Engine(model, target="cpu:serial")
         
     protocol = Sequence([
-        CC(rate=1.0, until=fx.Condition("V_cell <= -5"), time=3600),
+        CC(rate=1.0, until=model.V_cell <= -5, time=3600),
         Rest(time=600)
     ])
 

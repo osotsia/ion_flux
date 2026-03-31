@@ -37,7 +37,6 @@ impl NativeSparseLuSolver {
         
         self.triplets.clear();
 
-        // 1. Compute row equilibration scales
         for r in 0..n {
             let mut max_val = 0.0_f64;
             for c in 0..n {
@@ -48,7 +47,6 @@ impl NativeSparseLuSolver {
             self.row_scales[r] = if max_val > 0.0 { 1.0 / max_val } else { 1.0 };
         }
 
-        // 2. Assemble scaled sparse triplets
         for c in 0..n {
             let mut has_diag = false;
             for r in 0..n {
@@ -64,6 +62,7 @@ impl NativeSparseLuSolver {
             }
         }
 
+        // FAER v0.20 panic boundary trap for structurally singular networks
         let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| {
             SparseColMat::try_new_from_triplets(n, n, &self.triplets)
         }));
@@ -72,7 +71,6 @@ impl NativeSparseLuSolver {
             _ => return Err("Sparse matrix assembly failed or panicked".to_string()),
         };
 
-        // 3. Symbolic Cache
         if self.symbolic.is_none() {
             let sym_res = catch_unwind(AssertUnwindSafe(|| {
                 SymbolicLu::try_new(jac_sparse.symbolic())
@@ -83,7 +81,6 @@ impl NativeSparseLuSolver {
             };
         }
 
-        // 4. Numeric Factorization
         let num_res = catch_unwind(AssertUnwindSafe(|| {
             Lu::try_new_with_symbolic(self.symbolic.as_ref().unwrap().clone(), jac_sparse.as_ref())
         }));
@@ -92,8 +89,6 @@ impl NativeSparseLuSolver {
             Ok(Ok(n_lu)) => self.numeric = Some(n_lu),
             _ => {
                 // Fallback: Rebuild Symbolic safely inside a catch_unwind boundary
-                // to prevent pyo3_runtime.PanicException on perfectly singular matrices.
-                // Explicitly define the Result type to resolve type inference errors.
                 let fallback_res = catch_unwind(AssertUnwindSafe(|| -> Result<(SymbolicLu<usize>, Lu<usize, f64>), String> {
                     let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic Fallback failed".to_string())?;
                     let num = Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric Fallback failed".to_string())?;
@@ -133,7 +128,6 @@ impl NativeSparseLuSolver {
     }
 }
 
-/// Left-Preconditioned Matrix-Free Restarted GMRES Solver (Used for 3D meshes where bw == -1)
 pub fn solve_gmres<F, P>(n: usize, b: &mut [f64], mut jvp: F, mut precond: P) -> Result<(), String>
 where F: FnMut(&[f64], &mut [f64]), P: FnMut(&[f64], &mut[f64]) {
     let m = std::cmp::min(n, 30);

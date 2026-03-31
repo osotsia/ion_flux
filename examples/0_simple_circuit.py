@@ -41,10 +41,12 @@ class EquivalentCircuit(fx.PDE):
         }
 
 if __name__ == "__main__":
-    engine = fx.Engine(model=EquivalentCircuit(), target="cpu:serial", solver_backend="native")
+
+    model=EquivalentCircuit()
+    engine = fx.Engine(model, target="cpu:serial", solver_backend="native")
     
     protocol = Sequence([
-        CC(rate=5.0, until=fx.Condition("V_cell <= 3.2"), time=3600),
+        CC(rate=5.0, until=model.V_cell <= 3.2, time=3600),
         Rest(time=600)
     ])
     

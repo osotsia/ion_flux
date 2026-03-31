@@ -1,7 +1,5 @@
 import copy
-import re
-import numpy as np
-from typing import Dict, Any, Union, List, Optional
+from typing import Dict, Any, List
 from .nodes import Node, State, Parameter, _wrap, SystemDict
 from .spatial import Domain, CompositeDomain, ConcatenatedDomain
 
@@ -20,42 +18,37 @@ def merge(*systems: SystemDict) -> SystemDict:
 
 
 class Condition:
-    """Compiled Boolean trigger for event detection and protocol hot-swapping."""
+    """Compiled Boolean trigger for event detection and protocol hot-swapping via pure AST."""
     __slots__ = ["expression", "_compiled_logic"]
-    def __init__(self, expression: Union[str, Node]):
+
+    def __init__(self, expression: Any):
+        # Validate that the condition is a strict AST Node, eliminating brittle regex string parsing
+        if not (hasattr(expression, "type") and getattr(expression, "type") == "BinaryOp" or type(expression).__name__ == "BinaryOp"):
+            raise TypeError("Condition must be instantiated with a valid AST BinaryOp node (e.g., model.V_cell <= 3.2)")
+
         self.expression = expression
         
-        if hasattr(expression, "type") and getattr(expression, "type") == "BinaryOp" or type(expression).__name__ == "BinaryOp":
-            op_map = {"ge": ">=", "le": "<=", "gt": ">", "lt": "<", "eq": "==", "ne": "!="}
-            mapped_op = op_map.get(expression.op)
-            left = expression.left_node
-            right = expression.right_node
-            
-            var_name = getattr(left, "name", str(left))
+        op_map = {"ge": ">=", "le": "<=", "gt": ">", "lt": "<", "eq": "==", "ne": "!="}
+        mapped_op = op_map.get(expression.op)
         
-            if type(right).__name__ == "Scalar":
-                target = right.value
-            elif type(right).__name__ in ("Parameter", "State"):
-                target = right.name
-            else:
-                target = float(str(right))
-            
-            self._compiled_logic = (var_name, mapped_op, target)
-            return
-
-        match = re.search(r"([A-Za-z0-9_]+)\s*(>=|<=|>|<|==|!=)\s*([A-Za-z0-9_.-]+)", str(expression))
-        if match:
-            target_str = match.group(3)
-            try: 
-                target = float(target_str)
-            except ValueError: 
-                target = target_str
-            self._compiled_logic = (match.group(1), match.group(2), target)
+        left = expression.left_node
+        right = expression.right_node
+        
+        var_name = getattr(left, "name", str(left))
+    
+        if type(right).__name__ == "Scalar":
+            target = right.value
+        elif type(right).__name__ in ("Parameter", "State"):
+            target = right.name
         else:
-            self._compiled_logic = None
+            target = float(str(right))
+        
+        self._compiled_logic = (var_name, mapped_op, target)
 
     def evaluate(self, session: Any) -> bool:
+        """Evaluates the boolean condition against the active memory session."""
         if not self._compiled_logic: return False
+        
         import numpy as np
         var, op, val_target = self._compiled_logic
         
@@ -113,15 +106,12 @@ class PDE:
         """
         to_copy = {}
         for name in dir(self.__class__):
-            if name.startswith("__"):
-                continue
+            if name.startswith("__"): continue
             
             attr = getattr(self.__class__, name)
-            # Include ConcatenatedDomain and package all valid AST nodes for a single group deepcopy
             if isinstance(attr, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal, PDE)):
                 to_copy[name] = attr
 
-        # Deepcopying as a group preserves shared object references (e.g. State.domain -> Domain)
         clones = copy.deepcopy(to_copy)
         
         has_terminal = False
@@ -132,7 +122,6 @@ class PDE:
                 if isinstance(clone, Terminal):
                     has_terminal = True
             elif isinstance(clone, PDE):
-                # Recursively mangle names of sub-models
                 clone._apply_namespace(prefix=name)
                 setattr(self, name, clone)
         
@@ -145,9 +134,7 @@ class PDE:
     def _apply_namespace(self, prefix: str) -> None:
         """Recursively prefixes all internal AST nodes to prevent compilation collisions."""
         for name, attr in self.__dict__.items():
-            # Ensure ConcatenatedDomain is captured in the namespace mapping
             if isinstance(attr, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
-                # Cache the true un-mangled root name to prevent double-prefixing in deep hierarchies
                 if not hasattr(attr, "_original_name"):
                     attr._original_name = getattr(attr, "name", "") or name
                 attr.name = f"{prefix}_{attr._original_name}"
@@ -155,7 +142,6 @@ class PDE:
                 attr._apply_namespace(prefix=f"{prefix}_{name}")
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Safely intercepts submodels assigned dynamically at runtime (e.g. inside __init__)."""
         if getattr(self, "_pde_init_done", False):
             if isinstance(value, PDE):
                 clone = copy.deepcopy(value)
@@ -165,7 +151,6 @@ class PDE:
         super().__setattr__(name, value)
 
     def components(self, node_type: type) -> List[Any]:
-        """Recursively extracts all AST nodes of a given type, ensuring topological uniqueness."""
         gathered = []
         seen = set()
         for attr in self.__dict__.values():
@@ -191,46 +176,37 @@ class PDE:
         valid_keys = {"regions", "global", "boundaries"}
         invalid_keys = set(raw_math.keys()) - valid_keys
         if invalid_keys:
-            raise ValueError(
-                f"Invalid keys found: {invalid_keys}.\n"
-                f"Please group your equations into 'regions', 'global', or 'boundaries' and use the '==' operator."
-            )
+            raise ValueError(f"Invalid keys found: {invalid_keys}.")
         
-        # Initialize the strict payload structure expected by the compiler
         compiled_system: Dict[str, Any] = {
             "regions": {}, "global": [], "boundaries": []
         }
         
-        # Parse regional equations bound to physical topologies
         if "regions" in raw_math:
             for dom, eqs in raw_math["regions"].items():
                 dom_name = getattr(dom, "name", str(dom))
                 compiled_system["regions"][dom_name] = []
                 for eq in eqs:
                     if getattr(eq, "op", "") != "eq":
-                        raise ValueError(f"Equations in regions must be declared using '=='. Got: {eq}")
+                        raise ValueError(f"Equations in regions must use '=='. Got: {eq}")
                     compiled_system["regions"][dom_name].append({
                         "lhs": eq.left_node.to_dict(), 
                         "rhs": _wrap(eq.right_node).to_dict()
                     })
                     
-        # Parse global and boundary equations
         for bucket in ["global", "boundaries"]:
             if bucket in raw_math:
                 for eq in raw_math[bucket]:
                     if getattr(eq, "op", "") != "eq":
-                        raise ValueError(f"Equations in '{bucket}' must be declared using '=='. Got: {eq}")
+                        raise ValueError(f"Equations in '{bucket}' must use '=='. Got: {eq}")
                     compiled_system[bucket].append({
                         "lhs": eq.left_node.to_dict(), 
                         "rhs": _wrap(eq.right_node).to_dict()
                     })
 
-        # Automagically inject the compiled constraint multiplexer safely into the global bucket
         for name in dir(self):
             attr = getattr(self, name)
             if isinstance(attr, Terminal):
-                # Mode 1 (CC): i_app = i_target
-                # Mode 0 (CV): V_cell = v_target
                 m = self._term_mode
                 rhs = m * self._term_i_target + (1.0 - m) * (attr.current - attr.voltage + self._term_v_target)
                 compiled_system["global"].append({"lhs": attr.current.to_dict(), "rhs": rhs.to_dict()})

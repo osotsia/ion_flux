@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Union, Any
+from typing import List, Any
 from ion_flux.dsl.core import Condition
 
 class ConstantCurrent:
@@ -29,16 +29,16 @@ class ProtocolStep:
 
 class CC(ProtocolStep):
     __slots__ = ["rate", "until", "time"]
-    def __init__(self, rate: float, until: Union[Condition, float] = float('inf'), time: float = float('inf')):
+    def __init__(self, rate: float, until: Any = None, time: float = float('inf')):
         self.rate = float(rate)
-        self.until = Condition(until) if isinstance(until, str) else until
+        self.until = Condition(until) if until is not None else None
         self.time = float(time)
 
 class CV(ProtocolStep):
     __slots__ = ["voltage", "until", "time"]
-    def __init__(self, voltage: float, until: Union[Condition, float] = float('inf'), time: float = float('inf')):
+    def __init__(self, voltage: float, until: Any = None, time: float = float('inf')):
         self.voltage = float(voltage)
-        self.until = Condition(until) if isinstance(until, str) else until
+        self.until = Condition(until) if until is not None else None
         self.time = float(time)
 
 class Rest(ProtocolStep):

@@ -103,7 +103,8 @@ def test_stateless_binary_deployment(tmp_path):
     y = [5.0]
     ydot = [-10.0]
     p = stateless_engine._pack_parameters({})
-    res = stateless_engine.runtime.evaluate_residual(y, ydot, p)
+    m = stateless_engine.layout.get_mesh_data()
+    res = stateless_engine.runtime.evaluate_residual(y, ydot, p, m)
     
     # ydot - (-k * y) -> -10.0 - (-2.0 * 5.0) = 0.0
     assert res[0] == pytest.approx(0.0)

@@ -251,19 +251,13 @@ def test_terminal_mode_inversion():
     off_i, _ = engine.layout.state_offsets["i_app"]
     off_V, _ = engine.layout.state_offsets["V_cell"]
     
-    # Test Mode 1: Constant Current (CC) -> The constraint equation should be `i_app = i_target`
-    # Therefore, dF_terminal / di_app == 1.0, dF_terminal / dV_cell == 0.0
-    p_cc = engine._pack_parameters({"_term_mode": 1.0, "_term_i_target": 5.0})
-    J_cc = np.array(engine.runtime.evaluate_jacobian(y.tolist(), ydot.tolist(), p_cc, 1.0))
-    
+    # Test Mode 1: Constant Current (CC)
+    J_cc = np.array(engine.evaluate_jacobian(y.tolist(), ydot.tolist(), c_j=1.0, parameters={"_term_mode": 1.0, "_term_i_target": 5.0}))
     assert J_cc[off_i, off_i] == 1.0, "CC Multiplexer failed to map i_app constraint."
     assert J_cc[off_i, off_V] == 0.0, "CC Multiplexer erroneously coupled to V_cell."
     
-    # Test Mode 0: Constant Voltage (CV) -> The constraint equation should be `V_cell = v_target`
-    # Therefore, dF_terminal / di_app == 0.0, dF_terminal / dV_cell == -1.0 (or 1.0 depending on lhs/rhs subtraction)
-    p_cv = engine._pack_parameters({"_term_mode": 0.0, "_term_v_target": 4.2})
-    J_cv = np.array(engine.runtime.evaluate_jacobian(y.tolist(), ydot.tolist(), p_cv, 1.0))
-    
+    # Test Mode 0: Constant Voltage (CV) 
+    J_cv = np.array(engine.evaluate_jacobian(y.tolist(), ydot.tolist(), c_j=1.0, parameters={"_term_mode": 0.0, "_term_v_target": 4.2}))
     assert J_cv[off_i, off_i] == 0.0, "CV Multiplexer failed to decouple i_app."
     assert abs(J_cv[off_i, off_V]) == 1.0, "CV Multiplexer failed to map V_cell constraint."
 

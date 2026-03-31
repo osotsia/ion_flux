@@ -27,7 +27,7 @@ def test_dfn_flat_parameter_overrides(dfn_engine):
         "electrolyte.initial_concentration": 1200.0
     }
     
-    protocol = Sequence([CC(rate=1.0, until=fx.Condition("V <= 2.5"))])
+    protocol = Sequence([CC(rate=1.0, until=dfn_engine.model.V <= 2.5)])
     
     result = dfn_engine.solve(protocol=protocol, parameters={**base_params, **overrides})
     

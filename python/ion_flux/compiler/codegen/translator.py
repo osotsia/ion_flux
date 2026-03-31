@@ -1,4 +1,3 @@
-# --- File: python/ion_flux/compiler/codegen/translator.py ---
 from typing import Dict, Any, Optional
 from .ast_analysis import extract_state_name
 from .topology import get_stride, get_local_index, get_coord_sys, get_resolution
@@ -153,7 +152,6 @@ class CppTranslator:
             left_face = self.translate(node["child"], idx, face="left")
             center = self.translate(node["child"], idx, face=None)
 
-            # Neumann conditions implicitly override the discrete face fluxes
             left_face, center, right_face = self._apply_neumann_bcs(
                 state_name, idx, local_idx, res_val, left_face, center, right_face
             )
@@ -166,7 +164,6 @@ class CppTranslator:
                 )
             return fd_stencil
         else:
-            # Gradients consume the face context to generate perfectly compact 2-point stencils
             if face == "right":
                 right = self.translate(node["child"], f"({idx}) + {stride}", face=None)
                 curr = self.translate(node["child"], idx, face=None)
@@ -180,8 +177,6 @@ class CppTranslator:
                 right = self.translate(node["child"], f"({idx}) + {stride}", face=None)
                 left = self.translate(node["child"], f"({idx}) - {stride}", face=None)
                 denominator = f"(2.0 * {target_dx})"
-                # Fixed to prevent topological bleeding across nested grids.
-                # Uses mathematically exact asymmetric backward/forward differences at boundaries.
                 return (
                     f"(({local_idx}) == 0 ? (({right}) - ({curr})) / {target_dx} : "
                     f"(({local_idx}) == {res_val} - 1 ? (({curr}) - ({left})) / {target_dx} : "
@@ -207,8 +202,6 @@ class CppTranslator:
         r_coord_safe = f"(std::max(1e-12, {r_coord}))"
         std_div = f"({fd_stencil}) + (2.0 / {r_coord_safe}) * ({center})"
         
-        # L'Hopital's Limit at r=0. Distance from center to right face is dx/2.
-        # Approximating dF/dr as (F_{1/2} - 0) / (0.5 * dx). Resulting limit simplifies to 6 * F_{1/2} / dx
         if lower_bound == 0.0:
             return f"(({local_idx}) == 0 ? (6.0 * ({right_face}) / {target_dx}) : ({std_div}))"
             
@@ -221,7 +214,6 @@ class CppTranslator:
             bc_expr = self.translate(bcs["right"]["rhs"], idx, face=None)
             right = f"(({local_idx}) == {res_val} - 1 ? ({bc_expr}) : ({right}))"
         else:
-            # Default to no-flux to hermetically seal uncoupled macro-micro boundaries
             right = f"(({local_idx}) == {res_val} - 1 ? (0.0) : ({right}))"
             
         if "left" in bcs:
@@ -272,12 +264,12 @@ class CppTranslator:
         std_div = (
             f"[&]() {{\n"
             f"    double s = 0.0;\n"
-            f"    int start = (int)p[{off_rp} + {local_idx}];\n"
-            f"    int end = (int)p[{off_rp} + {local_idx} + 1];\n"
+            f"    int start = (int)m[{off_rp} + {local_idx}];\n"
+            f"    int end = (int)m[{off_rp} + {local_idx} + 1];\n"
             f"    for(int k = start; k < end; ++k) {{\n"
-            f"        int j_local = (int)p[{off_ci} + k];\n"
+            f"        int j_local = (int)m[{off_ci} + k];\n"
             f"        int j = {j_global_expr};\n"
-            f"        double w = p[{off_w} + k];\n"
+            f"        double w = m[{off_w} + k];\n"
             f"        s += {sum_expr};\n"
             f"    }}\n"
             f"    return s;\n"
@@ -289,7 +281,7 @@ class CppTranslator:
                 if tag in offsets.get("surfaces", {}):
                     off_surf = offsets["surfaces"][tag]
                     bc_expr = self.translate(bc_data["rhs"], idx, face=None)
-                    std_div = f"(p[{off_surf} + {local_idx}] > 0.5 ? ({std_div} + ({bc_expr})) : ({std_div}))"
+                    std_div = f"(m[{off_surf} + {local_idx}] > 0.5 ? ({std_div} + ({bc_expr})) : ({std_div}))"
                     
         return std_div
 

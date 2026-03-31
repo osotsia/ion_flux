@@ -1,6 +1,6 @@
 # ion_flux: The End-to-End Differentiable Engine for Battery Physics
 
-![CI Status](https://github.com/organization/ion_flux/actions/workflows/build_and_test.yml/badge.svg)
+![CI Status](https://github.com/organization/osotsia/ion_flux/actions/workflows/build_and_test.yml/badge.svg)
 [![PyPI version](https://badge.fury.io/py/ion-flux.svg)](https://badge.fury.io/py/ion-flux)
 
 `ion_flux` is a next-generation execution engine for battery simulations, built on a pure Python Abstract Syntax Tree (AST) compiler, a custom native implicit solver, and Enzyme Automatic Differentiation (AD). 

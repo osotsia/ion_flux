@@ -31,7 +31,7 @@ pub enum NewtonResult {
 /// SUNDIALS Inexact Newton-Raphson implementation
 pub fn solve_nonlinear_system(
     n: usize, bw: isize,
-    y: &mut[f64], ydot: &mut [f64], p: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
+    y: &mut[f64], ydot: &mut [f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
     c_j: f64, c_j_last_setup: &mut f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
@@ -69,7 +69,7 @@ pub fn solve_nonlinear_system(
             }
 
             let t_res = Instant::now();
-            unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), res.as_mut_ptr()) };
+            unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), res.as_mut_ptr()) };
             diag.residual_time_us += t_res.elapsed().as_micros();
             
             diag.last_res = res.clone();
@@ -90,9 +90,9 @@ pub fn solve_nonlinear_system(
             // Linear Solve
             if bw == -1 {
                 let jvp = jvp_fn.expect("evaluate_jvp missing.");
-                let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p.as_ptr();
+                let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p.as_ptr(); let m_ptr = m.as_ptr();
                 let jvp_closure = |v: &[f64], out: &mut [f64]| {
-                    unsafe { jvp(y_ptr, ydot_ptr, p_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
+                    unsafe { jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
                 };
                 let precond = |v: &[f64], out: &mut [f64]| {
                     for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
@@ -104,8 +104,7 @@ pub fn solve_nonlinear_system(
             } else {
                 if lu_solver.is_stale {
                     let start = Instant::now();
-                    // SUNDIALS natively evaluates the Jacobian strictly at the PREDICTOR state!
-                    unsafe { jac_fn(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), c_j, jac_buffer.as_mut_ptr()) };
+                    unsafe { jac_fn(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, jac_buffer.as_mut_ptr()) };
                     diag.jacobian_assembly_time_us += start.elapsed().as_micros();
                     diag.jacobian_evaluations += 1;
                     

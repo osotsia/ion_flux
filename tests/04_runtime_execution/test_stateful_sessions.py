@@ -85,7 +85,7 @@ def test_protocol_hot_swapping_cccv_cross_validation():
     engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
     
     protocol = Sequence([
-        CC(rate=10.0, until="V <= 3.2"),
+        CC(rate=10.0, until=model.V <= 3.2),
         CV(voltage=3.2, time=5.0)
     ])
     

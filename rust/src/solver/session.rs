@@ -18,6 +18,7 @@ pub struct SolverHandle {
     pub id: Vec<f64>,
     pub constraints: Vec<f64>,
     pub p: Vec<f64>,
+    pub m: Vec<f64>,
     pub spatial_diag: Vec<f64>,
     
     // Architectural State
@@ -31,7 +32,7 @@ pub struct SolverHandle {
 #[pymethods]
 impl SolverHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, constraints: Vec<f64>, p: Vec<f64>, spatial_diag: Vec<f64>, _debug: bool) -> PyResult<Self> {
+    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, _debug: bool) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let res_fn: NativeResFn = unsafe { *lib.get(b"evaluate_residual\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let jac_fn: NativeJacFn = unsafe { *lib.get(b"evaluate_jacobian\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
@@ -41,7 +42,7 @@ impl SolverHandle {
 
         let handle = SolverHandle { 
             _lib: lib, res_fn, jac_fn, jvp_fn, n, bw, 
-            t: 0.0, y: y0, ydot: ydot0, id, constraints, p, spatial_diag,
+            t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag,
             history, lu_solver: NativeSparseLuSolver::new(n, bw), jac_buffer: vec![0.0; n * n],
             config: SolverConfig::default(), diag: Diagnostics::default(),
         };
@@ -58,8 +59,6 @@ impl SolverHandle {
         self.step_with_history(dt, None)?;
         self.t -= dt; 
         
-        // [CHANGED] Reset the BDF history to order 1 to prevent high-order extrapolation 
-        // across a discontinuous parameter jump (e.g. Current to Voltage control).
         self.history.order = 1;
         self.history.k_used = 0;
         self.history.ns = 0;
@@ -92,7 +91,7 @@ impl SolverHandle {
     }
 
     pub fn get_jacobian<'py>(&mut self, py: Python<'py>, c_j: f64) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
-        unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), c_j, self.jac_buffer.as_mut_ptr()) };
+        unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), c_j, self.jac_buffer.as_mut_ptr()) };
         let jac_2d = numpy::ndarray::Array2::from_shape_vec((self.n, self.n), self.jac_buffer.clone())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(jac_2d.to_pyarray_bound(py))
@@ -102,7 +101,7 @@ impl SolverHandle {
 impl SolverHandle {
     pub fn step_with_history(&mut self, dt: f64, hist: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>) -> PyResult<()> {
         step_bdf_vsvo(
-            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.id, &self.constraints, &self.spatial_diag,
+            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.m, &self.id, &self.constraints, &self.spatial_diag,
             dt, &mut self.history,
             self.res_fn, self.jac_fn, self.jvp_fn,
             &mut self.lu_solver, &mut self.jac_buffer, &self.config, &mut self.diag, hist, self.t

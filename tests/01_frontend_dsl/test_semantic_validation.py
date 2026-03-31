@@ -102,7 +102,7 @@ def test_ast_validation_rejects_missing_equality():
         def math(self):
             return {"global": [self.c.t0]} 
             
-    with pytest.raises(ValueError, match="must be declared using '=='"):
+    with pytest.raises(ValueError, match="Equations in 'global' must use '=='"):
         BadEqModel().ast()
 
 def test_compiler_payload_integrity():

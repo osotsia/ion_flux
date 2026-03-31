@@ -6,7 +6,7 @@ use super::linalg::{NativeSparseLuSolver, solve_gmres};
 #[pyfunction]
 pub fn discrete_adjoint_native<'py>(
     py: Python<'py>, lib_path: String, y_traj: Vec<Vec<f64>>, ydot_traj: Vec<Vec<f64>>,
-    t_eval: Vec<f64>, id_arr: Vec<f64>, p_traj: Vec<Vec<f64>>, dl_dy: Vec<Vec<f64>>, bandwidth: isize,
+    t_eval: Vec<f64>, id_arr: Vec<f64>, p_traj: Vec<Vec<f64>>, m_list: Vec<f64>, dl_dy: Vec<Vec<f64>>, bandwidth: isize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let n_steps = y_traj.len();
     let n = y_traj[0].len();
@@ -35,19 +35,19 @@ pub fn discrete_adjoint_native<'py>(
         for i in 0..n { rhs[i] = -dl_dy[step][i] + lambda[i] * id_arr[i] * c_j; }
         
         if bandwidth == -1 {
-            let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p_list.as_ptr();
+            let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p_list.as_ptr(); let m_ptr = m_list.as_ptr();
             let jvp_t = |v: &[f64], out: &mut [f64]| {
                 let mut dp_dummy = vec![0.0; n_params];
                 let mut dy_out = vec![0.0; n];
                 let mut dydot_out = vec![0.0; n];
-                unsafe { vjp_fn(y_ptr, ydot_ptr, p_ptr, v.as_ptr(), dp_dummy.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
+                unsafe { vjp_fn(y_ptr, ydot_ptr, p_ptr, m_ptr, v.as_ptr(), dp_dummy.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
                 for i in 0..n { out[i] = dy_out[i] + c_j * dydot_out[i]; }
             };
             let precond = |v: &[f64], out: &mut[f64]| { for i in 0..n { out[i] = v[i] / (c_j * id_arr[i] + 1.0); } };
             solve_gmres(n, &mut rhs, jvp_t, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         } else {
             let jac_fn_ptr = jac_fn.expect("evaluate_jacobian required for Dense/Banded adjoints.");
-            unsafe { jac_fn_ptr(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), c_j, jac.as_mut_ptr()) };
+            unsafe { jac_fn_ptr(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), c_j, jac.as_mut_ptr()) };
             
             let mut jac_t = vec![0.0; n * n];
             for r in 0..n { for c in 0..n { jac_t[r * n + c] = jac[c * n + r]; } }
@@ -61,7 +61,7 @@ pub fn discrete_adjoint_native<'py>(
         let mut dp_out = vec![0.0; n_params];
         let mut dy_out = vec![0.0; n];
         let mut dydot_out = vec![0.0; n];
-        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
+        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
         for p_idx in 0..n_params { p_grad[p_idx] += dp_out[p_idx]; }
     }
     Ok(numpy::ndarray::Array1::from_vec(p_grad).to_pyarray_bound(py))

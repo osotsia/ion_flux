@@ -31,6 +31,9 @@ class Loss:
         req_grad = self._trajectory.get("requires_grad", list(self._engine.parameters.keys()))
         self.grads = {}
         
+        # Extract the isolated mesh topology array to pass to the Native Runtime
+        m_list = self._engine.layout.get_mesh_data()
+        
         # Native Differentiable EIS (Frequency Domain)
         if self._trajectory.get("type") == "eis":
             w_arr = self._trajectory["w_arr"]
@@ -68,11 +71,12 @@ class Loss:
                     adj_lambda = solve_J_trans(C)
                     
                     # Pull dF/dp via VJP: Enzyme gives us (lambda^T * dF/dp) directly
-                    # Signature: evaluate_vjp(y, ydot, p, lambda) -> (dp_out, dy_out, dydot_out)
+                    # Signature: evaluate_vjp(y, ydot, p, m, lambda) -> (dp_out, dy_out, dydot_out)
                     dp_out, _, _ = self._engine.runtime.evaluate_vjp(
                         y_ss.tolist(), 
                         np.zeros_like(y_ss).tolist(), 
                         p_list, 
+                        m_list,
                         adj_lambda.tolist()
                     )
                     
@@ -110,7 +114,7 @@ class Loss:
         
         p_grad = discrete_adjoint_native(
             self._engine.runtime.lib_path, y_traj.tolist(), ydot_traj.tolist(), 
-            t_eval.tolist(), id_arr, p_traj, dl_dy.tolist(), bw
+            t_eval.tolist(), id_arr, p_traj, m_list, dl_dy.tolist(), bw
         )
         
         for p_name in req_grad:

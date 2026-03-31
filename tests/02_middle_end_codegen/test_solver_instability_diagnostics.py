@@ -138,11 +138,12 @@ def test_manual_ast_equilibration_fixes_macro_micro():
     completely stabilizes the implicit solver, and fixing the wiring allows
     the time-integrator to traverse the entire CCCV sequence normally.
     """
-    engine = Engine(model=MacroMicroSPM_Equilibrated(), target="cpu", mock_execution=False)
+    model = MacroMicroSPM_Equilibrated()
+    engine = Engine(model=model, target="cpu", mock_execution=False)
     
     from ion_flux.protocols import Sequence, CC, Rest
     protocol = Sequence([
-        CC(rate=30.0, until=fx.Condition("V_cell <= 3.0"), time=3600),
+        CC(rate=30.0, until=model.V_cell <= 3.0, time=3600),
         Rest(time=60)
     ])
     
