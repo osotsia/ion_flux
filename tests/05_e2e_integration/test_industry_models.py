@@ -3,6 +3,7 @@ E2E Integration: Industry Models
 
 End-to-End tests validating the implicit solver against highly coupled
 PDE-ODE-DAE industry architectures (e.g., lumped thermals and SEI degradation).
+Cross-validates the custom `native` backend against the `sundials` backend.
 """
 
 import pytest
@@ -108,13 +109,17 @@ class SPM_SEIGrowth(fx.PDE):
 
 
 # ==============================================================================
-# 2. End-to-End Execution Tests
+# 2. End-to-End Execution & Cross-Validation Tests
 # ==============================================================================
 
-def test_e2e_thermal_coupling_execution():
-    """Proves the implicit solver successfully handles highly coupled PDE-ODE-DAE systems."""
+@pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires native C++ toolchain.")
+def test_e2e_thermal_coupling_cross_validation():
+    """Proves the native implicit solver matches SUNDIALS IDAS for highly coupled PDE-ODE-DAE systems."""
     model = SPM_LumpedThermal()
-    engine = Engine(model=model, target="cpu", mock_execution=not RUST_FFI_AVAILABLE, jacobian_bandwidth=0)
+    
+    # Instantiate both solver backends
+    engine_native = Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
     
     # 1C discharge protocol
     protocol = Sequence([
@@ -122,26 +127,44 @@ def test_e2e_thermal_coupling_execution():
         Rest(time=600)
     ])
     
-    res = engine.solve(protocol=protocol)
-    assert res.status == "completed"
+    res_native = engine_native.solve(protocol=protocol)
+    res_sundials = engine_sundials.solve(protocol=protocol)
     
-    if RUST_FFI_AVAILABLE:
-        T_end = res["T_cell"].data[-1]
-        assert T_end > 298.15 # Cell must have heated up during discharge
+    assert res_native.status == "completed"
+    assert res_sundials.status == "completed"
+    
+    T_end_native = res_native["T_cell"].data[-1]
+    assert T_end_native > 298.15 # Cell must have heated up during discharge
+    
+    # Cross-Validate Native vs. SUNDIALS IDAS
+    # Adaptive step boundaries perfectly align during `Sequence` evaluation blocks
+    np.testing.assert_allclose(res_native["V_cell"].data, res_sundials["V_cell"].data, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(res_native["T_cell"].data, res_sundials["T_cell"].data, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(res_native["c_s"].data, res_sundials["c_s"].data, rtol=1e-3, atol=1e-2)
 
 
-def test_e2e_sei_degradation_execution():
-    """Proves the JIT handles classic degradation physics seamlessly."""
+@pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires native C++ toolchain.")
+def test_e2e_sei_degradation_cross_validation():
+    """Proves the Native solver matches SUNDIALS IDAS tracking stiff degradation physics."""
     model = SPM_SEIGrowth()
-    engine = Engine(model=model, target="cpu", mock_execution=not RUST_FFI_AVAILABLE, jacobian_bandwidth=0)
     
-    # Rest condition using t_span to allow implicit micro-stepping over the stiff initial transient
-    res = engine.solve(t_span=(0, 3600), parameters={"_term_mode": 1.0, "_term_i_target": 0.0}) 
-    assert res.status == "completed"
+    engine_native = Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
     
-    if RUST_FFI_AVAILABLE:
-        L_end = res["L_sei"].data[-1]
-        assert L_end > 1e-8 # SEI must have grown via solvent diffusion even at rest
+    # Rest condition using t_span allows implicit micro-stepping over the stiff initial transient
+    # t_span naturally forces both solvers onto the exact same output grid (t_eval = np.linspace)
+    res_native = engine_native.solve(t_span=(0, 3600), parameters={"_term_mode": 1.0, "_term_i_target": 0.0}) 
+    res_sundials = engine_sundials.solve(t_span=(0, 3600), parameters={"_term_mode": 1.0, "_term_i_target": 0.0}) 
+    
+    assert res_native.status == "completed"
+    assert res_sundials.status == "completed"
+    
+    assert res_native["L_sei"].data[-1] > 1e-8 # SEI must have grown via solvent diffusion even at rest
+
+    # Cross-Validate Native vs. SUNDIALS IDAS
+    np.testing.assert_allclose(res_native["L_sei"].data, res_sundials["L_sei"].data, rtol=1e-3, atol=1e-10)
+    np.testing.assert_allclose(res_native["V_cell"].data, res_sundials["V_cell"].data, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(res_native["c_s"].data, res_sundials["c_s"].data, rtol=1e-3, atol=1e-2)
 
 
 # ==============================================================================

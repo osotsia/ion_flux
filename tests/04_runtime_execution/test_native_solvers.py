@@ -119,20 +119,28 @@ def test_engine_telemetry_reporting():
     assert tel.sparsity == 0.0
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
-def test_end_to_end():
+def test_end_to_end_cross_validation():
     """
-    Proves Phase 1 completion: JIT -> Clang -> Rust FFI -> Solver (Native) -> Numpy
+    Proves Phase 1 completion: JIT -> Clang -> Rust FFI -> Solver (Native & Sundials) -> Numpy
+    Cross-validates that the native VSVO algorithm perfectly traces SUNDIALS IDAS.
     """
     model = ExponentialDecay()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
-    if engine.mock_execution: pytest.skip("Compilation environment absent.")
+    engine_native = Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
     
     t_eval = np.linspace(0, 2.0, 50)
-    res = engine.solve(parameters={"k": 1.5}, t_eval=t_eval)
+    
+    res_native = engine_native.solve(parameters={"k": 1.5}, t_eval=t_eval)
+    res_sundials = engine_sundials.solve(parameters={"k": 1.5}, t_eval=t_eval)
     
     # Analytical solution: y(t) = y_0 * e^{-kt}
     y_analytical = 5.0 * np.exp(-1.5 * t_eval)
-    y_simulated = res["y"].data
     
-    # Updated tolerance due to adaptive scale-up inside implicit BDF1 formulation allowing larger integration truncation
-    np.testing.assert_allclose(y_simulated, y_analytical, rtol=0.02, atol=1e-3)
+    y_sim_native = res_native["y"].data
+    y_sim_sundials = res_sundials["y"].data
+    
+    # Native vs. Analytical
+    np.testing.assert_allclose(y_sim_native, y_analytical, rtol=0.02, atol=1e-3)
+    
+    # Native vs. SUNDIALS IDAS (Should be extremely tight)
+    np.testing.assert_allclose(y_sim_native, y_sim_sundials, rtol=1e-3, atol=1e-4)

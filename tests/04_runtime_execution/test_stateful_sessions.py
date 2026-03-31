@@ -66,7 +66,6 @@ class AdjointDecay(fx.PDE):
 def test_stateful_session_hil_control():
     """Validates the SolverHandle safely caching persistent memory structures without OS file read operations."""
     engine = Engine(model=SimpleBatteryProtocol(), target="cpu", mock_execution=False)
-    if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     # Init at Rest (0 current) using hardware terminal defaults
     session = engine.start_session(parameters={"_term_i_target": 0.0, "_term_mode": 1.0})
@@ -79,28 +78,37 @@ def test_stateful_session_hil_control():
     assert session.get("V") == pytest.approx(4.45, abs=1e-5) # 4.0 + 0.5 - 1.0 * 0.05
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
-def test_protocol_hot_swapping_cccv():
-    """Validates Python bisection root-finding triggers mapping the native DAE to CC/CV constraint arrays iteratively."""
-    engine = Engine(model=SimpleBatteryProtocol(), target="cpu", mock_execution=False)
-    if engine.mock_execution: pytest.skip("Compilation environment absent.")
+def test_protocol_hot_swapping_cccv_cross_validation():
+    """Validates Python bisection root-finding triggers map DAE constraints gracefully on both solvers."""
+    model = SimpleBatteryProtocol()
+    engine_native = Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
     
     protocol = Sequence([
         CC(rate=10.0, until="V <= 3.2"),
         CV(voltage=3.2, time=5.0)
     ])
     
-    res = engine.solve(protocol=protocol)
-    assert res.status == "completed"
+    res_native = engine_native.solve(protocol=protocol)
+    res_sundials = engine_sundials.solve(protocol=protocol)
     
-    V_traj = res["V"].data
-    assert len(V_traj) > 0
-    assert V_traj[-1] == pytest.approx(3.2, rel=1e-3)
+    assert res_native.status == "completed"
+    assert res_sundials.status == "completed"
+    
+    # Native checks
+    V_n = res_native["V"].data
+    assert len(V_n) > 0
+    assert V_n[-1] == pytest.approx(3.2, rel=1e-3)
+    
+    # Cross Validation
+    assert res_native["Time [s]"].data[-1] == pytest.approx(res_sundials["Time [s]"].data[-1], rel=1e-3)
+    assert res_native["V"].data[-1] == pytest.approx(res_sundials["V"].data[-1], rel=1e-3)
+    assert res_native["i_app"].data[-1] == pytest.approx(res_sundials["i_app"].data[-1], rel=1e-3)
 
 @pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires compiled Rust backend.")
 def test_native_eis_frequency_domain_solver():
     """Validates the JIT pulling analytical steady state Jacobian to evaluate (jwM + J)^-1 B."""
     engine = Engine(model=ParallelRCCircuit(), target="cpu", mock_execution=False)
-    if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     session = engine.start_session(parameters={"R": 10.0, "C": 0.1, "i_app": 1.0})
     
@@ -126,7 +134,6 @@ def test_discrete_adjoint_backward_propagation():
     and an unconditionally stable implicit backward integration scheme.
     """
     engine = Engine(model=AdjointDecay(), target="cpu", mock_execution=False)
-    if engine.mock_execution: pytest.skip("Compilation environment absent.")
     
     res = engine.solve(t_span=(0, 1.0), parameters={"k": 2.0}, requires_grad=["k"])
        
