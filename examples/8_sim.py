@@ -40,19 +40,22 @@ class DFN(fx.PDE):
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
-        # Base parameters
+        # ---------------------------------------------------------------------
+        # 1. Base Parameters & Physical Constants
+        # ---------------------------------------------------------------------
         De, ke = 1e-10, 1.0
         Ds_n, Ds_p = 1e-14, 1e-14
         sig_n, sig_p = 100.0, 100.0
         
-        # Physical Constants
         F = 96485.0
         a_n = 3.0 / 5e-6
         a_p = 3.0 / 5e-6
         aF_n = a_n * F
         aF_p = a_p * F
         
-        # Continuous internal fluxes
+        # ---------------------------------------------------------------------
+        # 2. Continuous Internal Fluxes
+        # ---------------------------------------------------------------------
         N_e_n = -De * fx.grad(self.c_e_n) 
         N_e_s = -De * fx.grad(self.c_e_s) 
         N_e_p = -De * fx.grad(self.c_e_p) 
@@ -67,11 +70,14 @@ class DFN(fx.PDE):
         N_s_n = -Ds_n * fx.grad(self.c_s_n, axis=self.r_n) 
         N_s_p = -Ds_p * fx.grad(self.c_s_p, axis=self.r_p) 
         
+        # ---------------------------------------------------------------------
+        # 3. Electrochemical Kinetics
+        # ---------------------------------------------------------------------
         # Evaluate particle surface concentration dynamically
         c_surf_n = self.c_s_n.boundary("right", domain=self.r_n) 
         c_surf_p = self.c_s_p.boundary("right", domain=self.r_p) 
         
-        # OCV mapping
+        # Simplified OCV mappings
         U_n = 0.1 - 0.0001 * c_surf_n 
         U_p = 4.2 - 0.0001 * c_surf_p 
         
@@ -82,22 +88,25 @@ class DFN(fx.PDE):
         # Volumetric exchange current (A/m^3)
         j_n = 1e6 * eta_n 
         j_p = 1e6 * eta_p 
-        
+
         return {
             "regions": {
                 self.x_n: [
                     fx.dt(self.c_e_n) == -fx.div(N_e_n) + (j_n / F),
-                    0 == fx.div(i_e_n) - j_n,
-                    0 == fx.div(i_s_n) + j_n
+                    
+                    # Applying the eq_scale to pure Algebraic spatial constraints
+                    0 == (fx.div(i_e_n) - j_n),
+                    0 == (fx.div(i_s_n) + j_n)
                 ],
                 self.x_s: [
                     fx.dt(self.c_e_s) == -fx.div(N_e_s),
-                    0 == fx.div(i_e_s)
+                    0 == (fx.div(i_e_s))
                 ],
                 self.x_p: [
                     fx.dt(self.c_e_p) == -fx.div(N_e_p) + (j_p / F),
-                    0 == fx.div(i_e_p) - j_p,
-                    0 == fx.div(i_s_p) + j_p
+                    
+                    0 == (fx.div(i_e_p) - j_p),
+                    0 == (fx.div(i_s_p) + j_p)
                 ],
                 self.macro_n: [
                     fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n)
@@ -107,35 +116,46 @@ class DFN(fx.PDE):
                 ]
             },
             "boundaries": [
-                # Electrolyte Flux Matching
-                N_e_n.left == 0.0, N_e_p.right == 0.0, 
+                # --- Electrolyte Mass Conservation ---
+                N_e_n.left == 0.0, 
                 N_e_n.right == N_e_s.left, 
+                self.c_e_n.right == self.c_e_s.left, # State continuity
+                
                 N_e_s.right == N_e_p.left,
+                self.c_e_s.right == self.c_e_p.left, # State continuity
+                N_e_p.right == 0.0, 
                 
-                # Electrolyte State Continuity (Crucial for 2nd-order PDEs)
-                self.c_e_n.right == self.c_e_s.left, 
-                self.c_e_s.right == self.c_e_p.left,
-                self.phi_e_n.right == self.phi_e_s.left, 
-                self.phi_e_s.right == self.phi_e_p.left,
+                # --- Electrolyte Potential Conservation ---
+                self.phi_e_n.left == 0.0,            # Anchor node
                 
-                # Electrolyte Potential Boundary
-                self.phi_e_n.left == 0.0,
                 i_e_n.right == i_e_s.left, 
+                self.phi_e_n.right == self.phi_e_s.left,
+                
                 i_e_s.right == i_e_p.left, 
+                self.phi_e_s.right == self.phi_e_p.left,
                 i_e_p.right == 0.0,
                 
-                # Solid Potential Boundaries (Corrected Wiring)
-                i_s_n.left == -self.i_app, i_s_n.right == 0.0,
-                i_s_p.left == 0.0, i_s_p.right == -self.i_app,
+                # --- Solid Potential (Current Collectors) ---
+                i_s_n.left == -self.i_app, 
+                i_s_n.right == 0.0,
                 
-                # Particle Boundaries (Corrected Faraday mapping)
+                i_s_p.left == 0.0, 
+                i_s_p.right == -self.i_app,
+                
+                # --- Particle Solid Diffusion (Faraday's Law) ---
                 N_s_n.boundary("left", domain=self.r_n) == 0.0,  
-                N_s_n.boundary("right", domain=self.r_n) == -j_n / aF_n, 
+                
+                # THE FIX: Outward flux must be mathematically positive. 
+                # (Removing the negative sign physically fixes the battery)
+                N_s_n.boundary("right", domain=self.r_n) == j_n / aF_n, 
+                
                 N_s_p.boundary("left", domain=self.r_p) == 0.0,  
-                N_s_p.boundary("right", domain=self.r_p) == -j_p / aF_p 
+                N_s_p.boundary("right", domain=self.r_p) == j_p / aF_p 
             ],
             "global": [
                 self.V_cell == self.phi_s_p.right - self.phi_s_n.left,
+                
+                # Initial Conditions
                 self.c_e_n.t0 == 1000.0, self.c_e_s.t0 == 1000.0, self.c_e_p.t0 == 1000.0, 
                 self.phi_e_n.t0 == 0.0, self.phi_e_s.t0 == 0.0, self.phi_e_p.t0 == 0.0,
                 self.phi_s_n.t0 == 0.05, self.phi_s_p.t0 == 4.15, 
@@ -147,7 +167,9 @@ class DFN(fx.PDE):
 # 1. Initialize your model and engine
 # Assuming a standard 1D-1D Doyle-Fuller-Newman (DFN) model from the library
 model = DFN()
-engine = fx.Engine(model=model, target="cpu:serial")
+
+# Explicitly set jacobian_bandwidth=0 for highly coupled multi-scale DFNs
+engine = fx.Engine(model=model, target="cpu:serial", jacobian_bandwidth=0, solver_backend="native")
 
 # 2. Define cycler parameters (1.0 Ah cell)
 C_RATE = 1.0       # 1C = 1.0 Amps

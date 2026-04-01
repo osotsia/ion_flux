@@ -3,14 +3,14 @@
 ![CI Status](https://github.com/organization/osotsia/ion_flux/actions/workflows/build_and_test.yml/badge.svg)
 [![PyPI version](https://badge.fury.io/py/ion-flux.svg)](https://badge.fury.io/py/ion-flux)
 
-`ion_flux` is a next-generation execution engine for battery simulations, built on a pure Python Abstract Syntax Tree (AST) compiler, a custom native implicit solver, and Enzyme Automatic Differentiation (AD). 
+`ion_flux` is a next-generation execution engine for battery simulations. It is built on a pure Python Abstract Syntax Tree (AST) compiler, a custom native Rust implicit solver, and Enzyme Automatic Differentiation (AD). 
 
 Designed with a philosophy of **zero boilerplate and infinite scalability**, `ion_flux` ruthlessly separates *Physical Intent* from *Computational Execution*. Researchers declare physics using topology-agnostic math; the engine automatically deduces how to difference, linearize, compile, and solve them across 1D grids, massive 3D unstructured meshes, or scalable cloud infrastructure.
 
-## Quick Start (MacOS)
+## Quick Start (MacOS / Linux)
 ```bash
-# ion_flux relies on LLVM and Enzyme for compilation and automatic differentiation.
-brew install llvm enzyme sundials cmake
+# ion_flux relies on LLVM and Enzyme for JIT compilation and automatic differentiation.
+brew install llvm enzyme cmake
 
 # Clone the repository
 git clone https://github.com/organization/ion_flux.git
@@ -19,168 +19,173 @@ cd ion_flux
 # Create a strict Python environment
 python3.11 -m venv .venv
 source .venv/bin/activate
+# Install Maturin (required to build the Rust backend), plus numerical/data libraries
 pip install maturin pytest pytest-asyncio numpy scipy pandas matplotlib
 
-# Install the package
-pip install ion-flux
+# Compile the Rust backend and Python bindings natively for your hardware
+pip install .
 
-# Run the examples
-python examples/1_swelling_electrode.py
+# Run the showcase DFN example
+python examples/6_DFN.py
 ```
 
 ## Key Paradigm Shifts
 
-*   **Topology-Agnostic Math:** Spatial operators (`fx.grad`, `fx.div`) dynamically adapt. The exact same equation syntax compiles to a tridiagonal matrix on a 1D line or a massive sparse stiffness matrix on a 3D pouch cell mesh.
-*   **No "Math Gymnastics":** Complex phenomena are native syntax. Cross-product pseudo-dimensions are just `macro * micro`. Moving boundaries (Stefan problems) are simply `domain.right = state`. 
-*   **Differentiable by Default:** The custom native solver doesn't just push state forward; it pushes exact gradients backward. Extract analytical Jacobians or compute full-trajectory adjoint sensitivities (`loss.backward()`) for free.
-*   **Stateful Co-Simulation:** Microsecond-latency `session.step(dt)` allows for real-time Hardware-in-the-Loop (HIL) and Battery Management System (BMS) testing without recompiling or reallocating solver memory.
-*   **Cloud-Native SaaS Scale:** Export compiled physics to portable `.so` binaries for 0ms serverless cold-starts.
+*   **Topology-Agnostic Math:** Spatial operators (`fx.grad`, `fx.div`) dynamically adapt. The exact same equation syntax compiles to a tridiagonal banded matrix on a 1D line, or a Matrix-Free CSR graph traversal on a 3D pouch cell mesh.
+*   **The Hardware Abstraction (`fx.Terminal`):** Completely decouples battery physics from cycler testing logic. The native engine automatically handles the zero-sum structural DAEs required to toggle between Constant Current (CC) and Constant Voltage (CV) mid-solve without re-initializing the Jacobian.
+*   **Compile-Time Automatic Differentiation:** `ion_flux` does not build massive Python memory graphs (like JAX/CasADi). The AST generates C++ which is differentiated *Ahead-of-Time* by Enzyme via LLVM. The Rust native solver pushes exact continuous gradients backward (`loss.backward()`) using compiled Vector-Jacobian Products (VJPs) in $O(1)$ memory.
+*   **Stateful Co-Simulation:** Microsecond-latency `session.step(dt)` allows for real-time Hardware-in-the-Loop (HIL) and Battery Management System (BMS) testing. The Rust backend keeps the BDF history vectors and factored LU matrices "hot" in RAM.
+*   **Cloud-Native SaaS Scale:** Export compiled physics to portable `.so` binaries for 0ms serverless cold-starts. Bypass the Python GIL entirely using Rust's Rayon thread-pool for massive `solve_batch` parameter sweeps.
 
 ---
 
 ## Core Concepts
 
-### 1. The Researcher View: Declarative Physics & Moving Boundaries
+### 1. The Researcher View: Declarative Physics
 
-Physics are defined by inheriting from `fx.PDE`. The `math()` method traces the AST of the system. 
+Physics are defined by inheriting from `fx.PDE`. The `math()` method acts as a tracer: it maps your equations to specific spatial regions, boundaries, or 0D global states to build a computational graph.
 
-Here is how easily `ion_flux` handles a historically complex problem: a macro-scale electrode coupled to a micro-scale particle, complete with physical swelling (a moving boundary).
+Here is how `ion_flux` handles the foundational Single Particle Model (SPM). Notice how the code reads exactly like a math textbook, devoid of numerical for-loops or array slicing.
 
 ```python
 import ion_flux as fx
 
-class SwellingElectrode(fx.PDE):
-    # 1. Topology: Cross-Product Domains
-    # 'macro_micro' places a spherical particle (r) at every node in the electrode (x)
-    x = fx.Domain(bounds=(0, 100e-6), resolution=20)
-    r = fx.Domain(bounds=(0, 5e-6), resolution=15, coord_sys="spherical")
-    macro_micro = x * r 
-    
-    # 2. States
-    c_s = fx.State(domain=macro_micro)  # Solid concentration (2D pseudo-domain)
-    thickness = fx.State(domain=None)   # Scalar tracking the expanding electrode
-    
+class SingleParticleModel(fx.PDE):
+    # -------------------------------------------------------------------------
+    # 1. Topology Declaration
+    # Defines the spatial discretization. The Python AST operates independently 
+    # of the underlying mesh, making the math highly reusable.
+    # -------------------------------------------------------------------------
+    r_n = fx.Domain(bounds=(0, 10e-6), resolution=15, coord_sys="spherical")
+    r_p = fx.Domain(bounds=(0, 10e-6), resolution=15, coord_sys="spherical")
+
+    # -------------------------------------------------------------------------
+    # 2. State Variable Registration
+    # These are the unknowns targeted by the implicit solver. 
+    # States bound to a `Domain` compile into spatial C-arrays; 
+    # unbound states (None) compile as 0D scalars.
+    # -------------------------------------------------------------------------
+    c_s_n = fx.State(domain=r_n)
+    c_s_p = fx.State(domain=r_p)
+    V_cell = fx.State(domain=None) 
+    i_app = fx.State(domain=None)  
+
+    # -------------------------------------------------------------------------
+    # 3. Hardware Abstraction (The Cycler Terminal)
+    # Explicitly decouples internal physics from the cycler testing logic. 
+    # This prevents the user from having to manually cancel out algebraic terms 
+    # to switch between Current Control and Voltage Control.
+    # -------------------------------------------------------------------------
+    terminal = fx.Terminal(current=i_app, voltage=V_cell)
+
+    # -------------------------------------------------------------------------
+    # 4. Parameters
+    # Constants dynamically mapped into the C-ABI memory buffer.
+    # They can be overridden at runtime without triggering LLVM recompilation.
+    # -------------------------------------------------------------------------
+    Ds_n = fx.Parameter(default=1e-14)
+    Ds_p = fx.Parameter(default=1e-14)
+
     def math(self):
-        # 3. Dimensional Reduction
-        # Integrate the micro-scale (r) to feed information to the macro-scale (x)
-        average_soc = fx.integral(self.c_s, over=self.r)
-        
+        # Topology-agnostic operators. The AST compiler automatically applies
+        # the correct spherical finite-volume Jacobian transformations here.
+        flux_n = -self.Ds_n * fx.grad(self.c_s_n, axis=self.r_n)
+        flux_p = -self.Ds_p * fx.grad(self.c_s_p, axis=self.r_p)
+
+        # Extract specific boundaries cleanly using the `.boundary()` method
+        c_surf_n = self.c_s_n.boundary("right", domain=self.r_n)
+        c_surf_p = self.c_s_p.boundary("right", domain=self.r_p)
+
+        # Faraday's flux conversion (assuming specific area was parameterized)
+        j_flux = self.i_app / 96485.0
+
         return {
-            # 4. Moving Boundaries
-            # Define the physical expansion rate as an ODE
-            fx.dt(self.thickness): 1e-9 * average_soc,
+            # --- Regional Physics (PDEs) ---
+            # Maps bulk governing equations to specific spatial meshes.
+            "regions": {
+                self.r_n: [ fx.dt(self.c_s_n) == -fx.div(flux_n, axis=self.r_n) ],
+                self.r_p: [ fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p) ]
+            },
             
-            # Dynamically bind the right edge of the 'x' domain to the expanding state.
-            # The compiler automatically handles mesh deformation and ALE advection!
-            self.x.right: self.thickness, 
+            # --- Spatial Boundaries ---
+            # Dictates local Dirichlet overrides or Neumann flux injections.
+            "boundaries": [
+                flux_n.left == 0.0, flux_n.right == -j_flux,
+                flux_p.left == 0.0, flux_p.right == j_flux
+            ],
             
-            # ... standard transport PDEs (grad/div adapt automatically) ...
+            # --- Global Mathematics (DAEs & ODEs) ---
+            # Captures 0D physics, pure Algebraic Constraints, and Initial Conditions.
+            "global": [
+                # Algebraic Voltage constraint. Notice cycler logic is omitted!
+                self.V_cell == (4.2 - 0.0001 * c_surf_p) - (0.1 - 0.0001 * c_surf_n) - 0.02 * self.i_app,
+                
+                # Initial Conditions (.t0)
+                self.c_s_n.t0 == 800.0,
+                self.c_s_p.t0 == 200.0,
+                self.V_cell.t0 == 4.18,
+                self.i_app.t0 == 0.0
+            ]
         }
 ```
 
 ### 2. The Engineer View: Co-Simulation & Multi-Mode Protocols
 
-The compiled `Engine` handles execution. For Software-in-the-Loop (SIL), V2 uses a **Stateful Session Generator**. The compiled sparse matrices stay "hot" in the target hardware's memory. Only scalar inputs cross the Python boundary, enabling microsecond-latency control loops.
+The compiled `Engine` handles execution. For lab testing (e.g., CCCV cycling), engineers supply a compiled state-machine (`fx.protocols.Sequence`). The native solver dynamically hot-swaps the active constraints utilizing safe root-finding to land perfectly on voltage trigger asymptotes.
 
 ```python
-engine = fx.Engine(model=FullCell(), target="cuda:0")
+from ion_flux.protocols import Sequence, CC, CV, Rest
 
-# Start a hot session on the GPU
-session = engine.start_session(parameters={"D": 2e-14})
+model = SingleParticleModel()
+engine = fx.Engine(model=model, target="cpu:serial")
 
-# Real-time control loop (e.g., 100ms BMS cycle)
-while session.time < 3600:
-    # 1. Read from external BMS logic
-    i_req = my_bms.compute_current(v_cell=session.get("Voltage"))
+# Declarative, compiled state machine.
+# Notice how we use Python operator overloading (`model.V_cell <= 3.0`) 
+# to build strictly-typed AST trigger conditions safely, rather than using strings.
+protocol = Sequence([
+    CC(rate=10.0, until=model.V_cell <= 3.0, time=3600),
+    CV(voltage=3.0, until=model.i_app >= -0.05, time=1800),
+    Rest(time=600)
+])
+
+result = engine.solve(protocol=protocol)
+result.plot_dashboard() # Launches an interactive time-scrubbing UI
+```
+
+For **Real-Time HIL/SIL (Battery Management Systems)**, V2 uses a **Stateful Session Generator**. Only simple scalar inputs cross the Python/Rust FFI boundary, enabling microsecond-latency control loops.
+
+```python
+session = engine.start_session(parameters={"Ds_n": 2e-14})
+
+# Real-time control loop (e.g., 10ms BMS cycle over 60 seconds)
+while session.time < 60.0:
+    # 1. Read state directly from the underlying C-array with zero overhead
+    current_v = session.get("V_cell")
     
-    # 2. Step the native implicit solver forward. 
-    # High-order integration history is seamlessly preserved.
-    session.step(dt=0.1, inputs={"i_app": i_req})
+    # 2. Custom external control logic (Software-in-the-Loop)
+    i_req = -5.0 if current_v < 4.15 else 0.0 
     
-    # 3. Arbitrary event catching
-    if session.triggered("Lithium Plating"):
-        break
+    # 3. Step the native implicit solver forward. 
+    # High-order BDF integration history vectors are seamlessly preserved in Rust.
+    # The `_term_mode` parameter safely toggles the `Terminal` abstraction
+    # (1.0 = Current Control, 0.0 = Voltage Control).
+    session.step(dt=0.01, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
 ```
-
-For standard lab testing (e.g., CCCV), engineers supply a compiled state-machine (`fx.protocols.Sequence`). The native solver dynamically hot-swaps the differential and algebraic constraints (e.g., Current Control to Voltage Control) on the fly without halting.
-
-### 3. Advanced Analytics: Differentiability & EIS
-
-Because the Python compiler uses Enzyme AD natively at the LLVM level, the entire execution loop is a differentiable computational graph.
-
-#### End-to-End Differentiable Simulation
-Optimize charging protocols or empirical parameters using exact, continuous adjoint gradients extracted directly from the native solver.
-
-```python
-# Pass `requires_grad` to track sensitivities through the integration trajectory
-result = engine.solve(protocol=fast_charge, requires_grad=["porosity", "D"])
-
-# Compute a loss function against experimental lab data
-loss = fx.metrics.rmse(result["Voltage"], lab_data)
-
-# Backpropagate through the entire implicit solver!
-loss.backward()
-
-# Access exact gradients for gradient descent / Adam optimizers
-print(engine.parameters["porosity"].grad) 
-```
-
-#### Native Frequency-Domain Solvers (EIS)
-Simulating Electrochemical Impedance Spectroscopy (EIS) no longer requires complex AC perturbation math. The engine extracts the analytical Jacobian at steady-state and solves the transfer function algebraically in milliseconds.
-
-```python
-import numpy as np
-
-session = engine.start_session(soc=0.5)
-session.reach_steady_state()
-
-frequencies = np.logspace(-3, 5, 100)
-eis_spectrum = session.solve_eis(frequencies=frequencies, input="i_app", output="Voltage")
-```
-
-### 4. DevOps & Cloud Scale: JIT Caching & Hardware Targets
-
-In a production environment (e.g., a Battery Digital Twin SaaS), compilation is an expensive bottleneck. `ion_flux` allows you to export compiled physics to portable binaries for stateless, zero-start deployment.
-
-```python
-# --- 1. Compile on your CI/CD Pipeline ---
-engine = fx.Engine(model=FullCell())
-engine.export_binary("models/dfn_prod_v1.so")
-
-# --- 2. Load instantly on a Serverless Worker (e.g., AWS Lambda / FastAPI) ---
-engine = fx.Engine.load("models/dfn_prod_v1.so", target="cpu:serial")
-
-async def simulate_endpoint(payload: dict):
-    # Stateless, thread-safe execution perfect for concurrent web requests
-    return await engine.solve_async(parameters=payload["params"])
-```
-
-Hardware targeting is explicit and declarative:
-*   `target="cpu:serial"`: Emits scalar C++. Ideal for task parallelism (thousands of independent models for MCMC sweeps or fleet monitoring) via `engine.solve_batch()`.
-*   `target="cpu:omp"`: Identifies spatial domains in the AST and generates OpenMP loops. Ideal for data parallelism (massive 3D unstructured meshes) distributing sparse linear algebra across dozens of cores.
-*   `target="cuda:0"`: Emits PTX kernels. The native implicit solver runs entirely on the GPU, keeping all memory in VRAM during the integration loop.
 
 ---
 
 ## Frequently Asked Questions
 
-**Q1: Why did `ion_flux` drop SUNDIALS in favor of a custom native implicit solver?**
+**Q1: How does the "Topology-Agnostic Math" actually work under the hood?**
 
-**A:** SUNDIALS is an incredible, battle-tested library, but its monolithic C architecture restricts deep control over the integration loop. By building a custom native solver tightly coupled to our AST, we unlocked three critical capabilities:
-1.  **Seamless BMS Co-Simulation:** We can "pause" the solver, yield to Python (`session.step(dt)`), and resume without destroying the history vectors required for high-order BDF integration.
-2.  **Hot-Swapping Equations:** We can dynamically swap algebraic constraints (e.g., switching from Constant Current to Constant Voltage) mid-solve without re-initializing the Jacobian sparsity pattern.
-3.  **End-to-End AD:** Integrating Enzyme AD directly into our own solver loops allows us to natively generate analytical Jacobians for Newton-Raphson steps *and* continuous adjoints for `loss.backward()`.
+**A:** When you write `fx.grad(T)`, you are simply placing a node in the Python AST. During compilation, the Python codegen layer inspects the `Domain` assigned to `T`. If it is a 1D spherical domain, it lowers `fx.grad` into a finite-volume tridiagonal stencil (applying L'Hopital's limits at the origin natively to prevent 0/0 singularities). If the domain was loaded via `Domain.from_mesh("3d_cell.msh")`, it lowers the exact same AST node into a 3D unstructured Matrix-Free CSR graph traversal before passing the C++ code to LLVM.
 
-**Q2: How does the "Topology-Agnostic Math" actually work under the hood?**
+**Q2: How does the compiler handle Moving Boundaries (ALE) without severe performance penalties?**
 
-**A:** When you write `fx.grad(T)`, you are simply placing a node in the Python AST. The actual mathematics are not finalized until you instantiate the `Engine(model, target=...)`. During compilation, the Python compiler inspects the `Domain` assigned to `T`. If it is a 1D spherical domain, it lowers `fx.grad` into a finite-volume tridiagonal stencil. If the domain was loaded via `Domain.from_mesh("3d_cell.msh")`, it lowers the exact same AST node into a 3D unstructured finite-element stiffness matrix assembly routine before passing the Intermediate Representation (IR) to LLVM.
+**A:** In a Stefan problem (like particle swelling or lithium plating), you bind a state to a domain boundary (`self.x.right == self.L`). The AST compiler detects this and dynamically flags the domain as deformable. It automatically injects an Arbitrary Lagrangian-Eulerian (ALE) grid velocity advection term into any transport equations evaluating over that mesh. It also implements directional upwinding to guarantee advective stability. Because the native solver and the AST are tightly coupled, the Jacobian sparsity pattern remains constant; only the spatial derivatives shift smoothly as the mesh stretches.
 
 **Q3: How does Enzyme Automatic Differentiation (AD) interact with stiff PDEs?**
 
 **A:** Traditional autodiff frameworks (like JAX or PyTorch) build massive computational graphs in memory, which scales poorly for stiff PDEs requiring thousands of implicit time steps. Enzyme operates at the LLVM IR level, performing AD *after* the code is optimized. `ion_flux` uses Enzyme in two passes:
 1.  **Forward-mode:** To automatically generate exact, analytical Jacobians for the implicit solver's Newton iterations (guaranteeing quadratic convergence).
 2.  **Reverse-mode (Adjoint):** To trace sensitivities backward through the time-stepping trajectory, allowing you to compute the gradient of a loss function with respect to any parameter without storing the entire forward memory state.
-
-**Q4: How does the compiler handle Moving Boundaries (ALE) without severe performance penalties?**
-
-**A:** When you bind a state to a domain boundary (`self.x.right: self.thickness`), the AST compiler automatically injects an Arbitrary Lagrangian-Eulerian (ALE) grid velocity term into your transport equations (e.g., an extra advection term proportional to the moving boundary velocity). Because the native solver and the AST are tightly coupled, the Jacobian sparsity pattern remains constant; only the matrix coefficients change as the mesh stretches, ensuring the linear solver remains highly performant.
