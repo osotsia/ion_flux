@@ -157,7 +157,7 @@ impl BdfHistory {
 
             let tmp = (2.0 * err_knew + 0.0001).powf(-1.0 / (self.order as f64 + 1.0));
             let mut eta = 1.0;
-            if tmp >= 2.0 { eta = tmp.min(10.0); }
+            if tmp >= 2.0 { eta = tmp.min(2.0); }
             else if tmp <= 1.0 { eta = tmp.min(0.9).max(0.5); }
             
             self.h = (self.h * eta).clamp(min_dt, max_dt);
@@ -201,7 +201,9 @@ pub fn step_bdf_vsvo(
         let mut weights = vec![0.0; n];
         for i in 0..n { weights[i] = 1.0 / (config.rel_tol * y[i].abs() + config.abs_tol); }
         let ypnorm = wrms_norm_mask(ydot, &weights, id, config.suppress_alg);
-        let h0 = if ypnorm > 0.0 { (0.5 / ypnorm).min(target_dt) } else { target_dt.min(1e-4) };
+        
+        let mut h0 = 0.001 * target_dt.abs();
+        if ypnorm > 0.5 / h0 { h0 = 0.5 / ypnorm; }
 
         history.h = h0.max(config.min_dt);
         history.phi[0].copy_from_slice(y);
@@ -240,7 +242,7 @@ pub fn step_bdf_vsvo(
                 
                 // 1. SUNDIALS Local Truncation Error Test (IDATestError)
                 let enorm_k = wrms_norm_mask(&ee, &weights, id, config.suppress_alg);
-                let err_k = ck * enorm_k / history.sigma[history.order];
+                let err_k = history.sigma[history.order] * enorm_k;
 
                 let mut err_km1 = 0.0;
                 let mut err_km2 = 0.0;
@@ -258,7 +260,7 @@ pub fn step_bdf_vsvo(
                     }
                 }
 
-                if err_k * ck > 1.0 { // Error test failed
+                if ck * enorm_k > 1.0 { // Error test failed
                     error_fails += 1;
                     diag.rejected_steps += 1;
                     history.restore();

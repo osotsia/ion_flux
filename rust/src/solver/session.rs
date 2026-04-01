@@ -40,13 +40,14 @@ impl SolverHandle {
         
         let history = BdfHistory::new(n);
 
-        let handle = SolverHandle { 
+        let mut handle = SolverHandle { 
             _lib: lib, res_fn, jac_fn, jvp_fn, n, bw, 
             t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag,
             history, lu_solver: NativeSparseLuSolver::new(n, bw), jac_buffer: vec![0.0; n * n],
             config: SolverConfig::default(), diag: Diagnostics::default(),
         };
         
+        handle.calc_algebraic_roots()?;
         Ok(handle)
     }
 
@@ -55,14 +56,33 @@ impl SolverHandle {
     }
 
     pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {
-        let dt = 1e-11;
-        self.step_with_history(dt, None)?;
-        self.t -= dt; 
+        let mut res = vec![0.0; self.n];
+        unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), res.as_mut_ptr()); }
+
+        // If the residual is already perfectly zero, do nothing!
+        let mut max_res = 0.0_f64;
+        for i in 0..self.n {
+            if self.id[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
+        }
+        if max_res < 1e-8 { return Ok(()); }
+
+        let mut jac = vec![0.0; self.n * self.n];
+        unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+
+        for i in 0..self.n {
+            if self.id[i] < 0.5 { 
+                let diag = jac[i * self.n + i];
+                if diag.abs() > 1e-12 {
+                    self.y[i] -= res[i] / diag;
+                }
+            }
+        }
         
         self.history.order = 1;
         self.history.k_used = 0;
         self.history.ns = 0;
         self.lu_solver.mark_stale();
+        self.diag.accepted_steps = 0; // Force a safe BDF cold start
         
         Ok(())
     }

@@ -185,12 +185,7 @@ impl SundialsHandle {
             n, t: 0.0, _y_data: y0, _yp_data: ydot0, _id_data: id
         };
         
-        let ic_res = unsafe { IDACalcIC(handle.ida_mem, 1, 1e-3) };
-        if ic_res < 0 {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed with error code {}", ic_res)));
-        }
-        
-        handle.sync_from_sundials();
+        handle.calc_algebraic_roots()?;
         Ok(handle)
     }
     
@@ -218,6 +213,12 @@ impl SundialsHandle {
         let mut res = vec![0.0; self.n];
         unsafe { (self.user_data.res_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), res.as_mut_ptr()); }
 
+        let mut max_res = 0.0_f64;
+        for i in 0..self.n {
+            if self._id_data[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
+        }
+        if max_res < 1e-8 { return Ok(()); }
+
         let mut jac = vec![0.0; self.n * self.n];
         unsafe { (self.user_data.jac_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
 
@@ -236,8 +237,13 @@ impl SundialsHandle {
 
         let err = unsafe { IDAReInit(self.ida_mem, self.t, self.y_vec, self.yp_vec) };
         if err < 0 { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDAReInit failed."))); }
-        let ic_res = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-3) }; 
-        if ic_res < 0 { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed."))); }
+        let ic_res = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-6) }; 
+        if ic_res < 0 { 
+            let ic_res2 = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-8) };
+            if ic_res2 < 0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed."))); 
+            }
+        }
         
         self.sync_from_sundials();
         Ok(())

@@ -36,7 +36,7 @@ impl Default for SolverConfig {
             abs_tol: 1e-8,
             max_newton_iters: 4,
             min_dt: 1e-12,
-            max_dt: 10.0,
+            max_dt: std::f64::INFINITY,
             max_rho: 0.9, 
             eps_newt: 0.33,
             max_cj_ratio_change: 0.25,
