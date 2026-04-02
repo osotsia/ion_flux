@@ -100,16 +100,13 @@ class MacroMicroSPM_Equilibrated(fx.PDE):
         j_n = 1e6 * (self.phi_s_n - U_n)
         j_p = 1e6 * (self.phi_s_p - U_p)
 
-        # MANUAL EQUILIBRATION: Scale massive DAE operators down to O(1)
-        eq_scale = 1e-12
-        
         # PHYSICAL CORRECTION: Convert Volumetric current (A/m^3) to Area flux (mol/m^2 s)
         aF = 5.78e10
 
         return {
             "regions": {
-                self.x_n: [ 0 == (fx.div(i_s_n, axis=self.x_n) + j_n) * eq_scale ],
-                self.x_p: [ 0 == (fx.div(i_s_p, axis=self.x_p) + j_p) * eq_scale ],
+                self.x_n: [ 0 == (fx.div(i_s_n, axis=self.x_n) + j_n)  ],
+                self.x_p: [ 0 == (fx.div(i_s_p, axis=self.x_p) + j_p)  ],
                 self.macro_n: [ fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n) ],
                 self.macro_p: [ fx.dt(self.c_s_p) == -fx.div(N_s_p, axis=self.r_p) ]
             },

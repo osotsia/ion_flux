@@ -23,21 +23,25 @@ class EquivalentCircuit(fx.PDE):
         # Linear approximation of OCV for simplicity
         ocv = 3.0 + 1.2 * self.soc  
         
+        # ---------------------------------------------------------------------
+        # Explicit Equation Targeting
+        # ---------------------------------------------------------------------
         return {
-            "global": [
-                # ODEs
-                fx.dt(self.soc) == -self.i_app / (self.Q * 3600.0),
-                fx.dt(self.v_rc) == (self.i_app * self.R1 - self.v_rc) / self.tau,
+            "equations": {
+                # --- ODEs ---
+                self.soc: fx.dt(self.soc) == -self.i_app / (self.Q * 3600.0),
+                self.v_rc: fx.dt(self.v_rc) == (self.i_app * self.R1 - self.v_rc) / self.tau,
                 
-                # Algebraic Voltage Constraint (DAE)
-                self.V_cell == ocv - self.v_rc - self.i_app * self.R0,
-                
-                # Initial Conditions
-                self.soc.t0 == 1.0,
-                self.v_rc.t0 == 0.0,
-                self.V_cell.t0 == 4.2,
-                self.i_app.t0 == 0.0
-            ]
+                # --- Global Algebraic Constraint (DAE) ---
+                self.V_cell: self.V_cell == ocv - self.v_rc - self.i_app * self.R0
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.soc: 1.0,
+                self.v_rc: 0.0,
+                self.V_cell: 4.2,
+                self.i_app: 0.0
+            }
         }
 
 if __name__ == "__main__":

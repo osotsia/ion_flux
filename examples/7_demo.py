@@ -35,20 +35,23 @@ class FastSPM(fx.PDE):
     
     def math(self):
         flux = -self.D_s * fx.grad(self.c_s, axis=self.r)
+        
+        # ---------------------------------------------------------------------
+        # Explicit Equation Targeting
+        # ---------------------------------------------------------------------
         return {
-            "regions": {
-                self.r: [fx.dt(self.c_s) == -fx.div(flux, axis=self.r)]
+            "equations": {
+                self.c_s: fx.dt(self.c_s) == -fx.div(flux, axis=self.r),
+                self.V_cell: self.V_cell == 4.2 - 0.0001 * self.c_s.right - self.R_internal * self.i_app
             },
-            "boundaries": [
-                flux.left == 0.0,
-                flux.right == self.i_app / 96485.0
-            ],
-            "global": [
-                self.V_cell == 4.2 - 0.0001 * self.c_s.right - self.R_internal * self.i_app,
-                self.c_s.t0 == 500.0,
-                self.V_cell.t0 == 4.15,
-                self.i_app.t0 == 0.0
-            ]
+            "boundaries": {
+                flux: {"left": 0.0, "right": self.i_app / 96485.0}
+            },
+            "initial_conditions": {
+                self.c_s: 500.0,
+                self.V_cell: 4.15,
+                self.i_app: 0.0
+            }
         }
 
 # ==============================================================================

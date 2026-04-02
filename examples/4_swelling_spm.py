@@ -27,27 +27,26 @@ class SwellingSPM(fx.PDE):
         average_c = fx.integral(self.c_s_p, over=self.r_p)
 
         return {
-            "regions": {
-                self.r_p: [ fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p) ]
+            "equations": {
+                # --- Particle PDEs ---
+                self.c_s_p: fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p),
+                
+                # --- Global ODEs & DAEs ---
+                self.R_particle: fx.dt(self.R_particle) == 1e-12 * average_c,
+                self.V_cell: self.V_cell == 4.2 - 0.0001 * c_surf_p - 0.05 * self.i_app
             },
-            "boundaries": [
+            "boundaries": {
                 # Dynamic moving boundary binding (Compiler automatically applies ALE grid convection)
-                self.r_p.right == self.R_particle,
+                self.r_p: {"right": self.R_particle},
                 
-                flux_p.boundary("left", domain=self.r_p) == 0.0,
-                flux_p.boundary("right", domain=self.r_p) == j_flux
-            ],
-            "global": [
-                # Particle swelling ODE
-                fx.dt(self.R_particle) == 1e-12 * average_c,
-                
-                self.V_cell == 4.2 - 0.0001 * c_surf_p - 0.05 * self.i_app,
-                
-                self.c_s_p.t0 == 200.0,
-                self.R_particle.t0 == 10e-6,
-                self.V_cell.t0 == 4.18,
-                self.i_app.t0 == 0.0
-            ]
+                flux_p: {"left": 0.0, "right": j_flux}
+            },
+            "initial_conditions": {
+                self.c_s_p: 200.0,
+                self.R_particle: 10e-6,
+                self.V_cell: 4.18,
+                self.i_app: 0.0
+            }
         }
 
 if __name__ == "__main__":

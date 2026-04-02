@@ -41,27 +41,31 @@ class ThermoCoupledECM(fx.PDE):
         Q_cell_cool = -self.k_cell_jig * (self.T_cell - self.T_jig)
         Q_jig_cool = -self.k_jig_air * (self.T_jig - self.T_amb)
 
+        # ---------------------------------------------------------------------
+        # Explicit Equation Targeting
+        # ---------------------------------------------------------------------
         return {
-            "global": [
-                # Core electrical ODEs
-                fx.dt(self.soc) == -self.i_app / (self.Q * 3600.0),
-                fx.dt(self.v_rc) == (self.i_app * self.R1 - self.v_rc) / self.tau,
+            "equations": {
+                # --- Core electrical ODEs ---
+                self.soc: fx.dt(self.soc) == -self.i_app / (self.Q * 3600.0),
+                self.v_rc: fx.dt(self.v_rc) == (self.i_app * self.R1 - self.v_rc) / self.tau,
                 
-                # Thermal ODEs
-                fx.dt(self.T_cell) == (Q_irr + Q_rev + Q_cell_cool) / self.cth_cell,
-                fx.dt(self.T_jig) == (Q_jig_cool - Q_cell_cool) / self.cth_jig,
+                # --- Thermal ODEs ---
+                self.T_cell: fx.dt(self.T_cell) == (Q_irr + Q_rev + Q_cell_cool) / self.cth_cell,
+                self.T_jig: fx.dt(self.T_jig) == (Q_jig_cool - Q_cell_cool) / self.cth_jig,
                 
-                # Algebraic Terminal Constraint
-                self.V_cell == ocv - self.v_rc - self.i_app * self.R0,
-                
-                # Initial Conditions (matching PyBaMM simulation states)
-                self.soc.t0 == 0.5,
-                self.v_rc.t0 == 0.0,
-                self.T_cell.t0 == 25.0,
-                self.T_jig.t0 == 25.0,
-                self.V_cell.t0 == 3.65,
-                self.i_app.t0 == 0.0
-            ]
+                # --- Algebraic Terminal Constraint ---
+                self.V_cell: self.V_cell == ocv - self.v_rc - self.i_app * self.R0
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.soc: 0.5,
+                self.v_rc: 0.0,
+                self.T_cell: 25.0,
+                self.T_jig: 25.0,
+                self.V_cell: 3.65,
+                self.i_app: 0.0
+            }
         }
 
 if __name__ == "__main__":
@@ -77,7 +81,7 @@ if __name__ == "__main__":
     
     variables_to_plot = [
         "i_app",
-        ["V_cell"], # OCV can be tracked natively if added as an output state
+        ["V_cell"], 
         "soc",
         ["T_cell", "T_jig"]
     ]

@@ -124,16 +124,11 @@ class MinimalDFN(fx.PDE):
         U_n = 0.1 - 0.0001 * c_surf_n 
         j_n = 1e6 * (self.phi_s_n - U_n) 
         
-        # AST Equilibration: Scale massive spatial DAE residuals down to O(1).
-        # This ensures the underlying Rust Newton-Raphson linear solver 
-        # isn't destroyed by f64 ULP (Unit in the Last Place) floating-point noise.
-        eq_scale = 1e-12
-
         return {
             "regions": {
                 # Notice `phi_s_n` has no time derivative (fx.dt). 
                 # It is automatically processed as a spatial Algebraic constraint.
-                self.x_n: [ 0 == (fx.div(i_s_n, axis=self.x_n) + j_n) * eq_scale ],
+                self.x_n: [ 0 == (fx.div(i_s_n, axis=self.x_n) + j_n) ],
                 
                 # Hierarchical PDE. Solves diffusion inside the particle 
                 # at *every* macroscopic node in x_n simultaneously.

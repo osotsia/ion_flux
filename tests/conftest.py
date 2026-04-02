@@ -12,16 +12,15 @@ class TransientHeatPDE(fx.PDE):
         source = 1 - fx.abs(x - 1)
         
         return {
-            "regions": {
-                self.rod: [ fx.dt(self.T) == -fx.div(heat_flux) + source ]
+            "equations": {
+                self.T: fx.dt(self.T) == -fx.div(heat_flux) + source
             },
-            "boundaries": [
-                self.T.left == 0.0, 
-                self.T.right == 0.0
-            ],
-            "global": [
-                self.T.t0 == 2 * x - x**2
-            ]
+            "boundaries": {
+                self.T: {"left": 0.0, "right": 0.0}
+            },
+            "initial_conditions": {
+                self.T: 2 * x - x**2
+            }
         }
 
 class CoupledDAE(fx.PDE):
@@ -32,19 +31,17 @@ class CoupledDAE(fx.PDE):
     
     def math(self):
         return {
-            "regions": {
-                self.bulk: [ fx.dt(self.c) == fx.grad(self.c) ]
+            "equations": {
+                self.c: fx.dt(self.c) == fx.grad(self.c),
+                self.V: self.V == self.c.right / self.p_fail
             },
-            "boundaries": [
-                self.c.left == 0.0,
-                self.c.right == 0.0
-            ],
-            "global": [
-                self.c.t0 == 1.0,
-                self.V.t0 == 0.0,
-                # Pure algebraic relationship (no phi == phi - hack)
-                self.V == self.c.right / self.p_fail
-            ]
+            "boundaries": {
+                self.c: {"left": 0.0, "right": 0.0}
+            },
+            "initial_conditions": {
+                self.c: 1.0,
+                self.V: 0.0
+            }
         }
 
 @pytest.fixture

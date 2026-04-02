@@ -21,7 +21,6 @@ class CoupledDomainsPDE(fx.PDE):
     """
     x_n = fx.Domain(bounds=(0, 1), resolution=5, name="x_n")
     x_p = fx.Domain(bounds=(1, 2), resolution=5, name="x_p")
-    
     c_n = fx.State(domain=x_n, name="c_n")
     c_p = fx.State(domain=x_p, name="c_p")
     
@@ -29,18 +28,16 @@ class CoupledDomainsPDE(fx.PDE):
         flux_n = -fx.grad(self.c_n)
         flux_p = -fx.grad(self.c_p)
         return {
-            "regions": {
-                self.x_n: [fx.dt(self.c_n) == -fx.div(flux_n)],
-                self.x_p: [fx.dt(self.c_p) == -fx.div(flux_p)]
+            "equations": {
+                self.c_n: fx.dt(self.c_n) == -fx.div(flux_n),
+                self.c_p: fx.dt(self.c_p) == -fx.div(flux_p)
             },
-            "boundaries": [
-                self.c_n.left == 0.0,
-                self.c_p.right == 1.0,
-                
-                # The critical interface: a state continuity AND a flux continuity
-                self.c_n.right == self.c_p.left,
-                flux_n.right == flux_p.left
-            ]
+            "boundaries": {
+                self.c_n: {"left": 0.0, "right": self.c_p.left},
+                self.c_p: {"right": 1.0},
+                flux_n: {"right": flux_p.left}
+            },
+            "initial_conditions": {}
         }
 
 class MacroMicroMaskingPDE(fx.PDE):
@@ -50,23 +47,19 @@ class MacroMicroMaskingPDE(fx.PDE):
     x = fx.Domain(bounds=(0, 1), resolution=3, name="x")
     r = fx.Domain(bounds=(0, 1), resolution=4, name="r", coord_sys="spherical")
     macro_micro = x * r
-    
     c_s = fx.State(domain=macro_micro, name="c_s")
-    V = fx.State(domain=None, name="V") # 0D Algebraic
+    V = fx.State(domain=None, name="V") 
     
     def math(self):
         return {
-            "regions": {
-                self.macro_micro: [fx.dt(self.c_s) == fx.grad(self.c_s, axis=self.r)]
+            "equations": {
+                self.c_s: fx.dt(self.c_s) == fx.grad(self.c_s, axis=self.r),
+                self.V: self.V == 4.2 - self.c_s.boundary("right", domain=self.r)
             },
-            "boundaries": [
-                # Dirichlet condition on the surface of the micro-particles
-                self.c_s.boundary("right", domain=self.r) == 0.5
-            ],
-            "global": [
-                # Pure algebraic equation
-                self.V == 4.2 - self.c_s.boundary("right", domain=self.r)
-            ]
+            "boundaries": {
+                self.c_s: {"right": 0.5}
+            },
+            "initial_conditions": {}
         }
 
 class IntegralCouplingPDE(fx.PDE):
@@ -76,16 +69,17 @@ class IntegralCouplingPDE(fx.PDE):
     x = fx.Domain(bounds=(0, 1), resolution=4, name="x")
     r = fx.Domain(bounds=(0, 1), resolution=3, name="r")
     macro_micro = x * r
-    
     c_s = fx.State(domain=macro_micro, name="c_s")
     T = fx.State(domain=x, name="T")
     
     def math(self):
         return {
-            "regions": {
-                self.macro_micro: [fx.dt(self.c_s) == fx.grad(self.c_s, axis=self.r)],
-                self.x: [fx.dt(self.T) == fx.integral(self.c_s, over=self.r)]
-            }
+            "equations": {
+                self.c_s: fx.dt(self.c_s) == fx.grad(self.c_s, axis=self.r),
+                self.T: fx.dt(self.T) == fx.integral(self.c_s, over=self.r)
+            },
+            "boundaries": {},
+            "initial_conditions": {}
         }
 
 class TerminalMultiplexerPDE(fx.PDE):
@@ -95,15 +89,16 @@ class TerminalMultiplexerPDE(fx.PDE):
     i_app = fx.State(domain=None, name="i_app")
     V_cell = fx.State(domain=None, name="V_cell")
     soc = fx.State(domain=None, name="soc")
-    
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
         return {
-            "global": [
-                fx.dt(self.soc) == -self.i_app,
-                self.V_cell == 4.0 + self.soc - 0.1 * self.i_app
-            ]
+            "equations": {
+                self.soc: fx.dt(self.soc) == -self.i_app,
+                self.V_cell: self.V_cell == 4.0 + self.soc - 0.1 * self.i_app
+            },
+            "boundaries": {},
+            "initial_conditions": {}
         }
 
 
@@ -294,6 +289,7 @@ def test_algebraic_root_sensitivity():
 # Functional Architecture Tests (Former Undefined Sub-Graphs & Limits)
 # ==============================================================================
 
+
 class UnderDeterminedPDE(fx.PDE):
     """
     Tests Category 5: Undefined Sub-Graph Dependencies.
@@ -302,20 +298,19 @@ class UnderDeterminedPDE(fx.PDE):
     """
     x = fx.Domain(bounds=(0, 1), resolution=5, name="x")
     c = fx.State(domain=x, name="c")
-    ghost_state = fx.State(domain=x, name="ghost_state") # Declared, unconstrained
+    ghost_state = fx.State(domain=x, name="ghost_state") 
     
     def math(self):
         return {
-            "regions": {
-                self.x: [fx.dt(self.c) == fx.grad(self.c)]
+            "equations": {
+                self.c: fx.dt(self.c) == fx.grad(self.c)
             },
-            "boundaries": [
-                self.c.left == 0.0,
-                self.c.right == 1.0
-            ],
-            "global": [
-                self.c.t0 == 0.5
-            ]
+            "boundaries": {
+                self.c: {"left": 0.0, "right": 1.0}
+            },
+            "initial_conditions": {
+                self.c: 0.5
+            }
         }
 
 class ImplodingALEPDE(fx.PDE):
@@ -330,19 +325,18 @@ class ImplodingALEPDE(fx.PDE):
     
     def math(self):
         return {
-            "regions": {
-                self.x: [fx.dt(self.c) == fx.grad(self.c)]
+            "equations": {
+                self.c: fx.dt(self.c) == fx.grad(self.c),
+                self.L: fx.dt(self.L) == -100.0
             },
-            "boundaries": [
-                self.x.right == self.L,
-                self.c.left == 0.0,
-                self.c.right == 0.0
-            ],
-            "global": [
-                fx.dt(self.L) == -100.0, # Rapid implosion velocity
-                self.L.t0 == 0.01,
-                self.c.t0 == 1.0
-            ]
+            "boundaries": {
+                self.x: {"right": self.L},
+                self.c: {"left": 0.0, "right": 0.0}
+            },
+            "initial_conditions": {
+                self.L: 0.01,
+                self.c: 1.0
+            }
         }
 
 class ExtremeScaleDAE(fx.PDE):
@@ -357,12 +351,15 @@ class ExtremeScaleDAE(fx.PDE):
     
     def math(self):
         return {
-            "global": [
-                fx.dt(self.c) == -1e-15 * self.c,
-                self.V == 1e12 * self.c,
-                self.c.t0 == 1.0,
-                self.V.t0 == 1e12
-            ]
+            "equations": {
+                self.c: fx.dt(self.c) == -1e-15 * self.c,
+                self.V: self.V == 1e12 * self.c
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.c: 1.0,
+                self.V: 1e12
+            }
         }
 
 

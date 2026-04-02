@@ -16,12 +16,13 @@ class AdvancedMathModel(fx.PDE):
         reaction_rate = fx.exp(-1.0 / self.T)
         clamped_voltage = fx.max(self.V, self.limit)
         trigger = self.V >= self.limit  
-        
         return {
-            "global": [
-                fx.dt(self.T) == reaction_rate * fx.sin(self.T),
-                self.V == clamped_voltage - self.limit
-            ]
+            "equations": {
+                self.T: fx.dt(self.T) == reaction_rate * fx.sin(self.T),
+                self.V: self.V == clamped_voltage - self.limit
+            },
+            "boundaries": {},
+            "initial_conditions": {}
         }
 
 def test_pde_ast_capture(heat_model):

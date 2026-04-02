@@ -50,20 +50,12 @@ class Engine:
         
         self.layout = MemoryLayout(states, params)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
-        self.ast_payload: Dict[str, List[Dict[str, Any]]] = model.ast() if hasattr(model, "ast") else {}
+        self.ast_payload: Dict[str, Any] = model.ast() if hasattr(model, "ast") else {}
         
         if self.ast_payload:
-            targeted_states = set()
-            from ion_flux.compiler.codegen.ast_analysis import extract_state_names
-            all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
-            for eqs in self.ast_payload.get("regions", {}).values():
-                all_eqs.extend(eqs)
-                
-            for eq in all_eqs:
-                if eq["lhs"].get("type") != "InitialCondition":
-                    targeted_states.update(extract_state_names(eq["lhs"]))
-                    targeted_states.update(extract_state_names(eq["rhs"]))
-                    
+            # 1. Validate System Rank (No Unconstrained States)
+            # Explicit Equation Targeting guarantees every eq directly maps to a state key.
+            targeted_states = {eq["state"] for eq in self.ast_payload.get("equations", [])}
             for state_name in self.layout.state_offsets.keys():
                 if state_name not in targeted_states:
                     raise ValueError(f"Unconstrained state detected: '{state_name}'. Rank deficiency in system.")
@@ -95,29 +87,40 @@ class Engine:
             return -1
             
         max_bw = 0
-        all_eqs = ast_payload.get("global", []) + ast_payload.get("boundaries", [])
-        for eqs in ast_payload.get("regions", {}).values():
-            all_eqs.extend(eqs)
+        
+        def check_dependencies(target_state: str, node: Dict[str, Any]) -> int:
+            nonlocal max_bw
+            if target_state not in self.layout.state_offsets: return max_bw
+            off_t, size_t = self.layout.state_offsets[target_state]
             
-        for eq in all_eqs:
-            if eq["lhs"].get("type") == "InitialCondition": continue
-            
-            targets = extract_state_names(eq["lhs"])
-            deps = extract_state_names(eq["rhs"])
-            
-            for t in targets:
-                if t not in self.layout.state_offsets: continue
-                off_t, size_t = self.layout.state_offsets[t]
+            if size_t > 1: max_bw = max(max_bw, 2)
                 
-                if size_t > 1: max_bw = max(max_bw, 2)
+            deps = extract_state_names(node)
+            for d in deps:
+                if d not in self.layout.state_offsets: continue
+                off_d, _ = self.layout.state_offsets[d]
+                # If a state depends on a state outside its own memory block, 
+                # off-diagonal coupling occurs, requiring dense/GMRES factorization.
+                if abs(off_t - off_d) > 0:
+                    return 0 
+            return max_bw
+
+        # Trace dependencies for bulk differential/algebraic equations
+        for eq_data in ast_payload.get("equations", []):
+            target_state = eq_data["state"]
+            if eq_data["type"] == "piecewise":
+                for reg in eq_data["regions"]:
+                    if check_dependencies(target_state, reg["eq"]) == 0: return 0
+            else:
+                if check_dependencies(target_state, eq_data["eq"]) == 0: return 0
+                
+        # Trace dependencies for explicit Dirichlet overrides
+        for bc_data in ast_payload.get("boundaries", []):
+            if bc_data["type"] == "dirichlet":
+                target_state = bc_data["state"]
+                for val_node in bc_data["bcs"].values():
+                    if check_dependencies(target_state, val_node) == 0: return 0
                     
-                for d in deps:
-                    if d not in self.layout.state_offsets: continue
-                    off_d, _ = self.layout.state_offsets[d]
-                    
-                    if abs(off_t - off_d) > 0:
-                        return 0
-                        
         return max_bw if max_bw > 0 else 0
 
     @classmethod
@@ -179,68 +182,66 @@ class Engine:
         return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug)
 
     def _extract_metadata(self) -> Tuple[List[float], List[float], List[float], List[float]]:
+        """
+        Parses the compiled AST payload to construct the initial state (y0), 
+        initial derivatives (ydot0), and the Differential/Algebraic mask (id_arr).
+        """
         if hasattr(self, "_metadata_cache"):
             return self._metadata_cache
             
         y0 = [0.0] * self.layout.n_states
         ydot0 = [0.0] * self.layout.n_states
         id_arr = [0.0] * self.layout.n_states
+        
+        # We pass an array of zeros to satisfy the Rust C-ABI FFI signature.
+        # The Rust native solver handles linear algebra scaling and preconditioner 
+        # diagonal shifts natively via Mass Matrices and Row Equilibration.
         spatial_diag = [0.0] * self.layout.n_states
         
-        for state_name, (offset, size) in self.layout.state_offsets.items():
-            state_obj = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
-            if state_obj and getattr(state_obj, "domain", None):
-                if getattr(state_obj.domain, "csr_data", None):
-                    csr = state_obj.domain.csr_data
-                    rp, w = csr["row_ptr"], csr["weights"]
-                    for i in range(size):
-                        spatial_diag[offset + i] = abs(sum(w[int(rp[i]):int(rp[i+1])]))
-                else:
-                    ds = state_obj.domain.domains if hasattr(state_obj.domain, "domains") else [state_obj.domain]
-                    dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
-                    val = 2.0 / max(dx ** 2, 1e-12)
-                    for i in range(size): spatial_diag[offset + i] = val
-
-        def _mark_differentials(node: Any) -> None:
+        # ---------------------------------------------------------------------
+        # 1. Extract the Differential/Algebraic Mask (id_arr)
+        # Recursively scans explicit equations for fx.dt() nodes. 
+        # 1.0 = ODE/PDE. 0.0 = Pure Algebraic DAE.
+        # ---------------------------------------------------------------------
+        def _mark_differentials(node: Dict[str, Any], start: int, end: int) -> None:
             if isinstance(node, dict):
                 if node.get("type") == "UnaryOp" and node.get("op") == "dt":
-                    state_name = extract_state_name(node["child"], self.layout)
-                    offset, size = self.layout.state_offsets[state_name]
-                    for i in range(size): id_arr[offset + i] = 1.0
-                for v in node.values(): _mark_differentials(v)
+                    for i in range(start, end): 
+                        id_arr[i] = 1.0
+                for v in node.values(): 
+                    _mark_differentials(v, start, end)
             elif isinstance(node, list):
-                for v in node: _mark_differentials(v)
+                for item in node:
+                    _mark_differentials(item, start, end)
+
+        for eq_data in self.ast_payload.get("equations", []):
+            offset, size = self.layout.state_offsets[eq_data["state"]]
+            if eq_data["type"] == "piecewise":
+                for reg in eq_data["regions"]:
+                    _mark_differentials(reg["eq"], offset + reg["start_idx"], offset + reg["end_idx"])
+            else:
+                _mark_differentials(eq_data["eq"], offset, offset + size)
                 
-        _mark_differentials(self.ast_payload.get("global", []))
-        for eqs in self.ast_payload.get("regions", {}).values():
-            _mark_differentials(eqs)
-        
-        for eq in self.ast_payload.get("boundaries", []):
-            lhs = eq["lhs"]
-            if lhs.get("type") == "Boundary":
-                try:
-                    state_name = extract_state_name(lhs, self.layout)
-                    offset, size = self.layout.state_offsets[state_name]
-                    state_obj = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
-                    
-                    if state_obj and hasattr(state_obj.domain, "domains") and len(state_obj.domain.domains) == 2 and lhs.get("domain") == state_obj.domain.domains[1].name:
-                        d_mac, d_mic = state_obj.domain.domains[0], state_obj.domain.domains[1]
-                        for i_mac in range(d_mac.resolution):
-                            b_idx = i_mac * d_mic.resolution if lhs["side"] == "left" else i_mac * d_mic.resolution + d_mic.resolution - 1
-                            id_arr[offset + b_idx] = 0.0
-                    else:
-                        if lhs["side"] == "left": id_arr[offset] = 0.0
-                        elif lhs["side"] == "right": id_arr[offset + size - 1] = 0.0
-                except ValueError:
-                    pass
-        
-        for i in range(self.layout.n_states):
-            if id_arr[i] == 0.0 and spatial_diag[i] > 0.0:
-                spatial_diag[i] = 2.0
+        # Dirichlet boundaries mathematically override the bulk PDE at the boundary 
+        # nodes, turning them into pure algebraic constraints (0.0).
+        for bc_data in self.ast_payload.get("boundaries", []):
+            if bc_data["type"] == "dirichlet":
+                offset, size = self.layout.state_offsets[bc_data["state"]]
+                if "left" in bc_data["bcs"]: 
+                    id_arr[offset] = 0.0
+                if "right" in bc_data["bcs"]: 
+                    id_arr[offset + size - 1] = 0.0
                 
+        # ---------------------------------------------------------------------
+        # 2. Evaluate Initial Conditions (y0)
+        # Recursively evaluates the static scalar AST expressions at t=0.
+        # ---------------------------------------------------------------------
         def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
             t = node.get("type")
             if t == "Scalar": return float(node["value"])
+            if t == "Parameter":
+                p_name = node.get("name")
+                return self.parameters[p_name].value if p_name in self.parameters else 0.0
             if t == "BinaryOp":
                 l = _eval_ic(node["left"], idx, dx)
                 r = _eval_ic(node["right"], idx, dx)
@@ -257,25 +258,20 @@ class Engine:
                 if op == "coords": return idx * dx
             return 0.0
         
-        all_eqs = self.ast_payload.get("global", []) + self.ast_payload.get("boundaries", [])
-        for eqs in self.ast_payload.get("regions", {}).values():
-            all_eqs.extend(eqs)
+        for ic_data in self.ast_payload.get("initial_conditions", []):
+            state_name = ic_data["state"]
+            offset, size = self.layout.state_offsets[state_name]
             
-        for eq in all_eqs:
-            lhs = eq["lhs"]
-            if lhs.get("type") == "InitialCondition":
-                state_name = extract_state_name(lhs, self.layout)
-                offset, size = self.layout.state_offsets[state_name]
+            dx = 1.0
+            state_node = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
+            if state_node and getattr(state_node, "domain", None):
+                ds = state_node.domain.domains if hasattr(state_node.domain, "domains") else [state_node.domain]
+                dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
                 
-                dx = 1.0
-                state_node = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
-                if state_node and getattr(state_node, "domain", None):
-                    ds = state_node.domain.domains if hasattr(state_node.domain, "domains") else [state_node.domain]
-                    dx = float(ds[0].bounds[1] - ds[0].bounds[0]) / max(1, ds[0].resolution - 1)
+            for i in range(size):
+                y0[offset + i] = _eval_ic(ic_data["value"], i, dx)
                     
-                for i in range(size):
-                    y0[offset + i] = _eval_ic(eq["rhs"], i, dx)
-                    
+        self._metadata_cache = (y0, ydot0, id_arr, spatial_diag)
         return y0, ydot0, id_arr, spatial_diag
 
     def _pack_parameters(self, overrides: Dict[str, float]) -> List[float]:

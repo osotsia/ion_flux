@@ -17,20 +17,19 @@ class SubParticle(fx.PDE):
     def math(self, flux_boundary: fx.Node):
         flux = -self.D * fx.grad(self.c, axis=self.r)
         return {
-            "regions": {
-                self.r: [ fx.dt(self.c) == -fx.div(flux, axis=self.r) ]
+            "equations": {
+                self.c: fx.dt(self.c) == -fx.div(flux, axis=self.r)
             },
-            "boundaries": [
-                flux.left == 0.0,
-                flux.right == flux_boundary
-            ]
+            "boundaries": {
+                flux: {"left": 0.0, "right": flux_boundary}
+            },
+            "initial_conditions": {}
         }
 
 class ModularCell(fx.PDE):
     """Parent model instantiating two isolated submodels."""
     anode = SubParticle()
     cathode = SubParticle()
-    
     macro_v = fx.State(domain=None)
     
     def math(self):
@@ -39,14 +38,15 @@ class ModularCell(fx.PDE):
         c_cathode_surf = self.cathode.c.right
         
         macro_sys = {
-            "global": [
-                fx.dt(self.macro_v) == -0.1 * self.macro_v,
-                self.macro_v.t0 == 5.0,
-                
-                # Cross-coupled initial conditions
-                self.anode.c.t0 == 100.0,
-                self.cathode.c.t0 == 200.0
-            ]
+            "equations": {
+                self.macro_v: fx.dt(self.macro_v) == -0.1 * self.macro_v
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.macro_v: 5.0,
+                self.anode.c: 100.0,
+                self.cathode.c: 200.0
+            }
         }
         
         # Merge ASTs, passing the macro state as the boundary condition
@@ -89,7 +89,12 @@ def test_happy_path_modular_composition():
 
 class Level3(fx.PDE):
     y = fx.State()
-    def math(self): return {"global": [fx.dt(self.y) == -self.y, self.y.t0 == 1.0]}
+    def math(self): return {
+        "equations": {self.y: fx.dt(self.y) == -self.y}, 
+        "boundaries": {}, 
+        "initial_conditions": {self.y: 1.0}
+    }
+
 
 class Level2(fx.PDE):
     sub = Level3()
@@ -139,7 +144,6 @@ def test_merge_handles_empty_and_none_payloads():
 
 class SharedDomainConsumer(fx.PDE):
     c = fx.State()
-    
     def __init__(self, shared_domain: fx.Domain):
         super().__init__()
         # Anti-Pattern: Storing an external domain as an instance attribute
@@ -147,7 +151,13 @@ class SharedDomainConsumer(fx.PDE):
         self.c.domain = self.x
         
     def math(self):
-        return {"regions": {self.x: [fx.dt(self.c) == fx.grad(self.c)]}}
+        return {
+            "equations": {
+                self.c: fx.dt(self.c) == fx.grad(self.c)
+            },
+            "boundaries": {},
+            "initial_conditions": {}
+        }
 
 class BadSharedDomainParent(fx.PDE):
     macro_x = fx.Domain(bounds=(0, 1), resolution=5)

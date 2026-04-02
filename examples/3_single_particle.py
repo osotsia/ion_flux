@@ -35,25 +35,24 @@ class SingleParticleModel(fx.PDE):
         j_flux = self.i_app / 96485.0
 
         return {
-            "regions": {
-                self.r_n: [ fx.dt(self.c_s_n) == -fx.div(flux_n, axis=self.r_n) ],
-                self.r_p: [ fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p) ]
+            "equations": {
+                # --- Solid Phase PDEs ---
+                self.c_s_n: fx.dt(self.c_s_n) == -fx.div(flux_n, axis=self.r_n),
+                self.c_s_p: fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p),
+                
+                # --- Global Algebraic ---
+                self.V_cell: self.V_cell == (U_p - U_n) - 0.02 * self.i_app
             },
-            "boundaries": [
-                flux_n.boundary("left", domain=self.r_n) == 0.0,
-                flux_n.boundary("right", domain=self.r_n) == -j_flux,
-                
-                flux_p.boundary("left", domain=self.r_p) == 0.0,
-                flux_p.boundary("right", domain=self.r_p) == j_flux
-            ],
-            "global": [
-                self.V_cell == (U_p - U_n) - 0.02 * self.i_app,
-                
-                self.c_s_n.t0 == 800.0,
-                self.c_s_p.t0 == 200.0,
-                self.V_cell.t0 == 4.18,
-                self.i_app.t0 == 0.0
-            ]
+            "boundaries": {
+                flux_n: {"left": 0.0, "right": -j_flux},
+                flux_p: {"left": 0.0, "right": j_flux}
+            },
+            "initial_conditions": {
+                self.c_s_n: 800.0,
+                self.c_s_p: 200.0,
+                self.V_cell: 4.18,
+                self.i_app: 0.0
+            }
         }
 
 if __name__ == "__main__":

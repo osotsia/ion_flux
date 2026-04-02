@@ -1,4 +1,3 @@
-
 #### Step A: Define Reusable Submodels
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
@@ -14,13 +13,13 @@ class FickianParticle(fx.PDE):
         flux = -self.D_s * fx.grad(self.c_s, axis=self.r)
         
         return {
-            "regions": {
-                self.r: [ fx.dt(self.c_s) == -fx.div(flux, axis=self.r) ]
+            "equations": {
+                self.c_s: fx.dt(self.c_s) == -fx.div(flux, axis=self.r)
             },
-            "boundaries": [
-                flux.left == 0.0,
-                flux.right == j_flux
-            ]
+            "boundaries": {
+                flux: {"left": 0.0, "right": j_flux}
+            },
+            "initial_conditions": {}
         }
 
 #### Step B: Compose the Full Model
@@ -47,14 +46,17 @@ class ModularSPM(fx.PDE):
         c_surf_p = self.pos_particle.c_s.right
         
         macro_physics = {
-            "global": [
-                self.V_cell == (4.2 - 0.001 * c_surf_p) - (0.1 - 0.001 * c_surf_n),
-                self.V_cell.t0 == 4.1,
-                self.i_app.t0 == 0.0,
+            "equations": {
+                self.V_cell: self.V_cell == (4.2 - 0.001 * c_surf_p) - (0.1 - 0.001 * c_surf_n)
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.V_cell: 4.1,
+                self.i_app: 0.0,
                 # Initial conditions for submodels can be targeted explicitly
-                self.neg_particle.c_s.t0 == 800.0,
-                self.pos_particle.c_s.t0 == 200.0
-            ]
+                self.neg_particle.c_s: 800.0,
+                self.pos_particle.c_s: 200.0
+            }
         }
         
         # 5. Merge all ASTs into a single seamless dictionary

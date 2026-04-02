@@ -19,14 +19,15 @@ class SharedScopeDiffusion(fx.PDE):
     def math(self):
         flux = -self.D * fx.grad(self.c)
         return {
-            "global": [
-                fx.dt(self.c) == -fx.div(flux),
-                self.c.t0 == 0.5
-            ],
-            "boundaries": [
-                flux.left == 0.0,
-                flux.right == 2.5
-            ]
+            "equations": {
+                self.c: fx.dt(self.c) == -fx.div(flux)
+            },
+            "boundaries": {
+                flux: {"left": 0.0, "right": 2.5}
+            },
+            "initial_conditions": {
+                self.c: 0.5
+            }
         }
 
 class TerminalInjectionModel(fx.PDE):
@@ -34,15 +35,17 @@ class TerminalInjectionModel(fx.PDE):
     i_app = fx.State()
     V_cell = fx.State()
     R_internal = fx.Parameter(0.05)
-    
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
         return {
-            "global": [
-                self.V_cell == 4.2 - self.R_internal * self.i_app,
-                self.V_cell.t0 == 4.2
-            ]
+            "equations": {
+                self.V_cell: self.V_cell == 4.2 - self.R_internal * self.i_app
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.V_cell: 4.2
+            }
         }
 
 # --- Test Cases ---

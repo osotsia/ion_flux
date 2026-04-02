@@ -47,39 +47,44 @@ class MacroMicroSPM(fx.PDE):
         j_n = 1e6 * (self.phi_s_n - U_n) 
         j_p = 1e6 * (self.phi_s_p - U_p) 
 
-        # AST Equilibration: Scale massive spatial DAEs to O(1) to bypass f64 ULP noise
-        eq_scale = 1e-12
-        
         # Faraday Conversion: Volumetric current (A/m^3) to Area flux (mol/m^2 s)
         # a = 3 / R_p = 6e5. F = 96485. a*F = ~5.78e10
         aF = 5.78e10
 
         return {
-            "regions": {
-                self.x_n: [ 0 == (fx.div(i_s_n, axis=self.x_n) + j_n) * eq_scale ],
-                self.x_p: [ 0 == (fx.div(i_s_p, axis=self.x_p) + j_p) * eq_scale ],
-                self.macro_n: [ fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n) ],
-                self.macro_p: [ fx.dt(self.c_s_p) == -fx.div(N_s_p, axis=self.r_p) ]
+            "equations": {
+                # --- Spatial Algebraic Constraints (DAEs) ---
+                self.phi_s_n: fx.div(i_s_n, axis=self.x_n) == -j_n,
+                self.phi_s_p: fx.div(i_s_p, axis=self.x_p) == -j_p,
+                
+                # --- Macro-Micro PDEs ---
+                self.c_s_n: fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n),
+                self.c_s_p: fx.dt(self.c_s_p) == -fx.div(N_s_p, axis=self.r_p),
+                
+                # --- Global Algebraic ---
+                self.V_cell: self.V_cell == self.phi_s_p.right - self.phi_s_n.left
             },
-            "boundaries": [
-                i_s_n.left == -self.i_app, i_s_n.right == 0.0,
-                i_s_p.left == 0.0, i_s_p.right == -self.i_app,
+            
+            # -----------------------------------------------------------------
+            # Explicit Boundaries (Dirichlet on States, Neumann on Tensors)
+            # -----------------------------------------------------------------
+            "boundaries": {
+                # Solid Potential Boundaries
+                i_s_n: {"left": -self.i_app, "right": 0.0},
+                i_s_p: {"left": 0.0, "right": -self.i_app},
                 
-                N_s_n.boundary("left", domain=self.r_n) == 0.0,  
-                N_s_n.boundary("right", domain=self.r_n) == -j_n / aF, 
-                N_s_p.boundary("left", domain=self.r_p) == 0.0,  
-                N_s_p.boundary("right", domain=self.r_p) == -j_p / aF 
-            ],
-            "global": [
-                self.V_cell == self.phi_s_p.right - self.phi_s_n.left,
-                
-                self.phi_s_n.t0 == 0.05, 
-                self.phi_s_p.t0 == 4.15, 
-                self.c_s_n.t0 == 500.0, 
-                self.c_s_p.t0 == 500.0, 
-                self.V_cell.t0 == 4.10, 
-                self.i_app.t0 == 0.0 
-            ]
+                # Particle Boundaries
+                N_s_n: {"left": 0.0, "right": -j_n / aF},
+                N_s_p: {"left": 0.0, "right": -j_p / aF}
+            },
+            "initial_conditions": {
+                self.phi_s_n: 0.05, 
+                self.phi_s_p: 4.15, 
+                self.c_s_n: 500.0, 
+                self.c_s_p: 500.0, 
+                self.V_cell: 4.10, 
+                self.i_app: 0.0 
+            }
         }
 
 if __name__ == "__main__":
