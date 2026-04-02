@@ -1,6 +1,7 @@
 from typing import Dict, Any, Optional
 from . import ir
 from .topology import get_stride, get_local_index, get_coord_sys, get_resolution
+from .ast_analysis import extract_state_name
 
 class DIRTranslator:
     _SIMPLE_MATH = {"neg": "-", "abs": "std::abs", "exp": "std::exp", "log": "std::log", "sin": "std::sin", "cos": "std::cos"}
@@ -48,6 +49,21 @@ class DIRTranslator:
         if node_type == "UnaryOp": return self._translate_UnaryOp(node, idx, face)
         raise ValueError(f"Unknown AST node: {node_type}")
 
+    def _safe_offset(self, base_idx: ir.Expr, offset: int, domain: Any, axis: str) -> ir.Expr:
+        if offset == 0: return base_idx
+        if domain and type(domain).__name__ == "CompositeDomain" and len(domain.domains) == 2:
+            d_mac, d_mic = domain.domains
+            if axis == d_mic.name:
+                cond = ir.BinaryOp("==", ir.BinaryOp("%", base_idx, ir.Literal(d_mic.resolution)), ir.Literal(d_mic.resolution - 1 if offset > 0 else 0))
+                return ir.BinaryOp("+", base_idx, ir.Ternary(cond, ir.Literal(0), ir.Literal(offset)))
+            elif axis == d_mac.name:
+                stride = d_mic.resolution
+                macro_idx = ir.BinaryOp("/", base_idx, ir.Literal(stride))
+                cond = ir.BinaryOp("==", macro_idx, ir.Literal(d_mac.resolution - 1 if offset > 0 else 0))
+                return ir.BinaryOp("+", base_idx, ir.Ternary(cond, ir.Literal(0), ir.Literal(offset)))
+        
+        return ir.BinaryOp("+", base_idx, ir.Literal(offset))
+
     def _translate_State(self, node: Dict[str, Any], idx: ir.Expr, face: Optional[str] = None) -> ir.Expr:
         offset, size = self.layout.state_offsets[node["name"]]
         
@@ -66,15 +82,22 @@ class DIRTranslator:
                     
         # States unconditionally self-clamp to enforce internal topology integrity
         clamped_idx = ir.FuncCall("CLAMP", [eval_idx, ir.Literal(size)])
-        base_access = ir.ArrayAccess("y", ir.BinaryOp("+", ir.Literal(offset), clamped_idx))
+        array_name = "ydot" if getattr(self, "use_ydot", False) else "y"
+        base_access = ir.ArrayAccess(array_name, ir.BinaryOp("+", ir.Literal(offset), clamped_idx))
         
         if face == "right":
-            next_idx = ir.FuncCall("CLAMP", [ir.BinaryOp("+", eval_idx, ir.Literal(1)), ir.Literal(size)])
-            next_access = ir.ArrayAccess("y", ir.BinaryOp("+", ir.Literal(offset), next_idx))
+            axis = self.current_axis if self.current_axis else (self.current_domain.name if self.current_domain else "")
+            stride = int(get_stride(self.current_domain, axis)) if self.current_domain else 1
+            next_idx = self._safe_offset(eval_idx, stride, self.current_domain, axis)
+            next_idx = ir.FuncCall("CLAMP", [next_idx, ir.Literal(size)])
+            next_access = ir.ArrayAccess(array_name, ir.BinaryOp("+", ir.Literal(offset), next_idx))
             return ir.BinaryOp("*", ir.Literal(0.5), ir.BinaryOp("+", base_access, next_access))
         if face == "left":
-            prev_idx = ir.FuncCall("CLAMP", [ir.BinaryOp("-", eval_idx, ir.Literal(1)), ir.Literal(size)])
-            prev_access = ir.ArrayAccess("y", ir.BinaryOp("+", ir.Literal(offset), prev_idx))
+            axis = self.current_axis if self.current_axis else (self.current_domain.name if self.current_domain else "")
+            stride = int(get_stride(self.current_domain, axis)) if self.current_domain else 1
+            prev_idx = self._safe_offset(eval_idx, -stride, self.current_domain, axis)
+            prev_idx = ir.FuncCall("CLAMP", [prev_idx, ir.Literal(size)])
+            prev_access = ir.ArrayAccess(array_name, ir.BinaryOp("+", ir.Literal(offset), prev_idx))
             return ir.BinaryOp("*", ir.Literal(0.5), ir.BinaryOp("+", base_access, prev_access))
             
         return base_access
@@ -207,26 +230,74 @@ class DIRTranslator:
         if op == "grad":
             axis = node.get("axis")
             dx_ir = ir.Var(f"dx_{axis}" if axis else "dx_default")
-            stride = get_stride(self.current_domain, axis) if self.current_domain else "1"
-            stride_ir = ir.Literal(int(stride))
+            stride = int(get_stride(self.current_domain, axis)) if self.current_domain else 1
             
             if face == "right":
-                right = self.translate(node["child"], ir.BinaryOp("+", idx, stride_ir), face=None)
+                right_idx = self._safe_offset(idx, stride, self.current_domain, axis)
+                right = self.translate(node["child"], right_idx, face=None)
                 curr = self.translate(node["child"], idx, face=None)
                 return ir.BinaryOp("/", ir.BinaryOp("-", right, curr), dx_ir)
             elif face == "left":
                 curr = self.translate(node["child"], idx, face=None)
-                left = self.translate(node["child"], ir.BinaryOp("-", idx, stride_ir), face=None)
+                left_idx = self._safe_offset(idx, -stride, self.current_domain, axis)
+                left = self.translate(node["child"], left_idx, face=None)
                 return ir.BinaryOp("/", ir.BinaryOp("-", curr, left), dx_ir)
             else:
-                right = self.translate(node["child"], ir.BinaryOp("+", idx, stride_ir), face=None)
-                left = self.translate(node["child"], ir.BinaryOp("-", idx, stride_ir), face=None)
+                right_idx = self._safe_offset(idx, stride, self.current_domain, axis)
+                left_idx = self._safe_offset(idx, -stride, self.current_domain, axis)
+                right = self.translate(node["child"], right_idx, face=None)
+                left = self.translate(node["child"], left_idx, face=None)
                 return ir.BinaryOp("/", ir.BinaryOp("-", right, left), ir.BinaryOp("*", ir.Literal(2.0), dx_ir))
                 
         if op == "div":
             axis = node.get("axis")
             dx_ir = ir.Var(f"dx_{axis}" if axis else "dx_default")
             
+            coord_sys = get_coord_sys(self.current_domain, axis)
+            
+            if coord_sys == "unstructured":
+                mesh_name = self.current_domain.name
+                offsets = self.layout.mesh_offsets[mesh_name]
+                rp = offsets["row_ptr"]
+                ci = offsets["col_ind"]
+                w = offsets["weights"]
+                
+                state_name = extract_state_name(node["child"])
+                s_off, _ = self.layout.state_offsets[state_name]
+                
+                cpp_code = (
+                    f"[&]() {{\n"
+                    f"    double sum = 0.0;\n"
+                    f"    int start = (int)m[{rp} + (int)({idx.to_cpp()})];\n"
+                    f"    int end = (int)m[{rp} + (int)({idx.to_cpp()}) + 1];\n"
+                    f"    for(int k = start; k < end; ++k) {{\n"
+                    f"        int c_idx = (int)m[{ci} + k];\n"
+                    f"        sum += m[{w} + k] * y[{s_off} + c_idx];\n"
+                    f"    }}\n"
+                    f"    return sum;\n"
+                    f"}}()"
+                )
+                
+                bulk_div = ir.RawCpp(cpp_code)
+                
+                flux_bc_id = node["child"].get("_bc_id")
+                bc_terms = []
+                if flux_bc_id and flux_bc_id in self.neumann_bcs:
+                    bcs = self.neumann_bcs[flux_bc_id]
+                    for surf_tag, bc_node in bcs.items():
+                        if surf_tag in offsets.get("surfaces", {}):
+                            surf_off = offsets["surfaces"][surf_tag]
+                            bc_val = self.translate(bc_node, idx, face=None).to_cpp()
+                            mask_val = f"m[{surf_off} + (int)({idx.to_cpp()})]"
+                            bc_terms.append(f"({bc_val}) * {mask_val}")
+                            
+                if bc_terms:
+                    bc_expr = " + ".join(bc_terms)
+                    # Subtract boundary mass flux out to conserve integration orientation
+                    return ir.RawCpp(f"({bulk_div.to_cpp()} - ({bc_expr}))")
+                
+                return bulk_div
+
             prev_axis = self.current_axis
             self.current_axis = axis
             
@@ -237,7 +308,6 @@ class DIRTranslator:
             
             std_div = ir.BinaryOp("/", ir.BinaryOp("-", right, left), dx_ir)
             
-            coord_sys = get_coord_sys(self.current_domain, axis)
             if coord_sys == "spherical":
                 local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis)
                 r_coord = f"(std::max(1e-12, (double)({local_idx}) * {dx_ir.to_cpp()}))"

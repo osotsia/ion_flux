@@ -415,9 +415,10 @@ class Engine:
                             else: low = mid
                             session.restore()
                         
-                        session.step(high, inputs=inputs)
+                        # Use the low bracket to strictly land safely before the trigger asymptote
+                        session.step(low, inputs=inputs)
                         
-                        t_elapsed += high
+                        t_elapsed += low
                         data_hist["Time [s]"].append(session.time)
                         y = session.handle.get_state() if session.handle else session._mock_y
                         raw_y_hist.append(y)

@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 from . import ir
 from .translator import DIRTranslator
 from .templates import generate_cpp_skeleton
+from .ale import get_ale_terms
 
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
     state_map = {s.name: s for s in states}
@@ -18,6 +19,13 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
     dx_stmts.append(ir.RawCpp("double dx_default = 1.0;"))
     
     all_domains = {d.name: d for s in states if s.domain for d in (s.domain.domains if hasattr(s.domain, "domains") else [s.domain])}
+    
+    dynamic_domains = {}
+    for bc in ast_payload.get("boundaries", []):
+        if bc["type"] == "moving_domain":
+            d_name = bc["domain"]
+            for side, rhs_ast in bc["bcs"].items():
+                dynamic_domains[d_name] = {"side": side, "rhs": rhs_ast}
     
     eq_stmts = []
     # 2. Build Explicit Equation Loops
@@ -36,6 +44,10 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 lhs_ir = translator.translate(reg["eq"]["left"], ir.Var("i"))
                 rhs_ir = translator.translate(reg["eq"]["right"], ir.Var("i"))
                 
+                ale_terms = get_ale_terms(state_name, offset, size, state_map, dynamic_domains, translator, "i")
+                for term in ale_terms:
+                    rhs_ir = ir.BinaryOp("+", rhs_ir, ir.RawCpp(term))
+                
                 # Natively handles Mass Matrix formulation: Res = LHS - RHS
                 res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Var("i")))
                 assign = ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir))
@@ -50,6 +62,11 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
             else:
                 lhs_ir = translator.translate(eq_data["eq"]["left"], ir.Var("i"))
                 rhs_ir = translator.translate(eq_data["eq"]["right"], ir.Var("i"))
+                
+                ale_terms = get_ale_terms(state_name, offset, size, state_map, dynamic_domains, translator, "i")
+                for term in ale_terms:
+                    rhs_ir = ir.BinaryOp("+", rhs_ir, ir.RawCpp(term))
+                
                 res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Var("i")))
                 pragma = "#pragma omp parallel for" if ("omp" in target and size > 50) else ""
                 assign = ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir))
