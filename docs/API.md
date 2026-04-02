@@ -30,13 +30,15 @@ class FickianParticle(fx.PDE):
         flux = -self.D_s * fx.grad(self.c_s, axis=self.r)
         
         return {
-            "regions": {
-                self.r: [ fx.dt(self.c_s) == -fx.div(flux, axis=self.r) ]
+            # Explicitly bind the PDE to the State node it dictates.
+            "equations": {
+                self.c_s: fx.dt(self.c_s) == -fx.div(flux, axis=self.r)
             },
-            "boundaries": [
-                flux.left == 0.0,
-                flux.right == j_flux
-            ]
+            # Target the specific evaluated tensor for Neumann bounds.
+            "boundaries": {
+                flux: {"left": 0.0, "right": j_flux}
+            },
+            "initial_conditions": {}
         }
 
 class ModularSPM(fx.PDE):
@@ -61,14 +63,20 @@ class ModularSPM(fx.PDE):
         c_surf_p = self.pos_particle.c_s.right
         
         macro_physics = {
-            "global": [
-                self.V_cell == (4.2 - 0.001 * c_surf_p) - (0.1 - 0.001 * c_surf_n),
-                self.V_cell.t0 == 4.1, self.i_app.t0 == 0.0,
+            "equations": {
+                # Global algebraic variables natively map to V2 standard equation structures
+                self.V_cell: self.V_cell == (4.2 - 0.001 * c_surf_p) - (0.1 - 0.001 * c_surf_n)
+            },
+            "boundaries": {},
+            "initial_conditions": {
+                self.V_cell: 4.1, 
+                self.i_app: 0.0,
                 
-                # Initial conditions for submodels can be targeted explicitly
-                self.neg_particle.c_s.t0 == 800.0,
-                self.pos_particle.c_s.t0 == 200.0
-            ]
+                # Initial conditions for submodels can be targeted explicitly 
+                # from the parent level.
+                self.neg_particle.c_s: 800.0,
+                self.pos_particle.c_s: 200.0
+            }
         }
         
         # 5. Merge all ASTs into a single seamless dictionary payload.
@@ -125,26 +133,28 @@ class MinimalDFN(fx.PDE):
         j_n = 1e6 * (self.phi_s_n - U_n) 
         
         return {
-            "regions": {
+            "equations": {
                 # Notice `phi_s_n` has no time derivative (fx.dt). 
-                # It is automatically processed as a spatial Algebraic constraint.
-                self.x_n: [ 0 == (fx.div(i_s_n, axis=self.x_n) + j_n) ],
+                # It is automatically processed as a spatial Algebraic constraint (DAE)
+                # and flagged inherently by the Native Compiler as a 0.0 root dependency.
+                self.phi_s_n: fx.div(i_s_n, axis=self.x_n) == -j_n,
                 
                 # Hierarchical PDE. Solves diffusion inside the particle 
                 # at *every* macroscopic node in x_n simultaneously.
-                self.macro_n: [ fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n) ],
+                self.c_s_n: fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n)
             },
-            "boundaries": [
-                # Apply cycler current demand to the solid phase boundary
-                i_s_n.left == -self.i_app, 
-                i_s_n.right == 0.0,
+            "boundaries": {
+                # Apply cycler current demand to the solid phase boundary via Neumann tensor.
+                i_s_n: {"left": -self.i_app, "right": 0.0},
                 
                 # Map volumetric macro current (j_n) to area flux at the micro boundary.
-                # Explicit domain targets evade Node operator overload property collisions.
-                N_s_n.boundary("left", domain=self.r_n) == 0.0,  
-                N_s_n.boundary("right", domain=self.r_n) == -j_n / 5.78e10, 
-            ],
-            "global": [ ... ]
+                N_s_n: {"left": 0.0, "right": -j_n / 5.78e10}
+            },
+            "initial_conditions": {
+                # Provided for completeness
+                self.phi_s_n: 0.05,
+                self.c_s_n: 500.0
+            }
         }
 ```
 

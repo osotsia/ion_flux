@@ -113,6 +113,11 @@ class DFN(fx.PDE):
 if __name__ == "__main__":
     # Bandwidth=0 signals FAER LU/GMRES handles internal cross-domain sparsity natively
     engine = fx.Engine(model=DFN(), target="cpu:serial", jacobian_bandwidth=0)
-    protocol = Sequence([CC(rate=30.0, time=3600), Rest(time=600)])
+
+    protocol = Sequence([
+        CC(rate=30.0, time=3600), 
+        Rest(time=600)
+        ])
+    
     res = engine.solve(protocol=protocol)
     res.plot_dashboard()

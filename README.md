@@ -100,32 +100,35 @@ class SingleParticleModel(fx.PDE):
         j_flux = self.i_app / 96485.0
 
         return {
-            # --- Regional Physics (PDEs) ---
-            # Maps bulk governing equations to specific spatial meshes.
-            "regions": {
-                self.r_n: [ fx.dt(self.c_s_n) == -fx.div(flux_n, axis=self.r_n) ],
-                self.r_p: [ fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p) ]
+            # --- Explicit Equation Targeting (V2 API) ---
+            # Maps the governing equations (ODEs, PDEs, and DAEs) directly to 
+            # their target state nodes. The engine automatically classifies
+            # differential (fx.dt) vs. algebraic constraints natively.
+            "equations": {
+                self.c_s_n: fx.dt(self.c_s_n) == -fx.div(flux_n, axis=self.r_n),
+                self.c_s_p: fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p),
+                
+                # Algebraic Voltage constraint. Notice cycler logic is omitted!
+                self.V_cell: self.V_cell == (4.2 - 0.0001 * c_surf_p) - (0.1 - 0.0001 * c_surf_n) - 0.02 * self.i_app
             },
             
-            # --- Spatial Boundaries ---
+            # --- Spatial Boundaries (V2 API) ---
             # Dictates local Dirichlet overrides or Neumann flux injections.
-            "boundaries": [
-                flux_n.left == 0.0, flux_n.right == -j_flux,
-                flux_p.left == 0.0, flux_p.right == j_flux
-            ],
+            # Structured as a nested dictionary mapping target Tensors (Neumann) 
+            # or States (Dirichlet) to their respective boundary faces.
+            "boundaries": {
+                flux_n: {"left": 0.0, "right": -j_flux},
+                flux_p: {"left": 0.0, "right": j_flux}
+            },
             
-            # --- Global Mathematics (DAEs & ODEs) ---
-            # Captures 0D physics, pure Algebraic Constraints, and Initial Conditions.
-            "global": [
-                # Algebraic Voltage constraint. Notice cycler logic is omitted!
-                self.V_cell == (4.2 - 0.0001 * c_surf_p) - (0.1 - 0.0001 * c_surf_n) - 0.02 * self.i_app,
-                
-                # Initial Conditions (.t0)
-                self.c_s_n.t0 == 800.0,
-                self.c_s_p.t0 == 200.0,
-                self.V_cell.t0 == 4.18,
-                self.i_app.t0 == 0.0
-            ]
+            # --- Initial Conditions (V2 API) ---
+            # Evaluated algebraically at t=0 to populate the dense starting vector.
+            "initial_conditions": {
+                self.c_s_n: 800.0,
+                self.c_s_p: 200.0,
+                self.V_cell: 4.18,
+                self.i_app: 0.0
+            }
         }
 ```
 
