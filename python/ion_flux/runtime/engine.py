@@ -105,6 +105,12 @@ class Engine:
                     return 0 
             return max_bw
 
+        # Explicitly check for ALE moving domains. These inject spatial-wide 
+        # dependencies on the boundary state (e.g., dx(R), dilution terms).
+        for bc_data in ast_payload.get("boundaries", []):
+            if bc_data.get("type") == "moving_domain":
+                return 0
+
         # Trace dependencies for bulk differential/algebraic equations
         for eq_data in ast_payload.get("equations", []):
             target_state = eq_data["state"]
