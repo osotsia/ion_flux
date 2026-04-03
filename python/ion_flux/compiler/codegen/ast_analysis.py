@@ -12,7 +12,6 @@ def extract_state_names(node: Dict[str, Any]) -> List[str]:
 
     names = []
     
-    # Explicit mapping for predictable AST branches
     if node_type in ("UnaryOp", "Boundary", "InitialCondition"):
         if "child" in node:
             names.extend(extract_state_names(node["child"]))
@@ -22,11 +21,8 @@ def extract_state_names(node: Dict[str, Any]) -> List[str]:
         if "right" in node:
             names.extend(extract_state_names(node["right"]))
     elif node_type == "DomainBoundary":
-        # DomainBoundaries explicitly map geometric grid bounds, not underlying states.
         pass
     else:
-        # Defensive fallback to exhaustively search for state definitions
-        # across unclassified custom DSL node structures.
         for key, val in node.items():
             if isinstance(val, dict):
                 names.extend(extract_state_names(val))
@@ -34,10 +30,8 @@ def extract_state_names(node: Dict[str, Any]) -> List[str]:
                 for item in val:
                     names.extend(extract_state_names(item))
 
-    # Filter duplicates while maintaining deterministic evaluation order
     seen = set()
     return [x for x in names if not (x in seen or seen.add(x))]
-
 
 def extract_state_name(node: Dict[str, Any], layout: Any = None) -> str:
     """Extracts the primary target State name from an AST equation mapping."""
@@ -45,3 +39,16 @@ def extract_state_name(node: Dict[str, Any], layout: Any = None) -> str:
     if not names:
         raise ValueError(f"Could not resolve a primary State target from AST node: {node}")
     return names[0]
+
+def extract_div_child(node: Dict[str, Any]) -> Any:
+    """Recursively searches the AST for a 'div' operator and returns its child flux node."""
+    if not isinstance(node, dict): return None
+    if node.get("type") == "UnaryOp" and node.get("op") == "div":
+        return node.get("child")
+    if "left" in node and "right" in node:
+        res = extract_div_child(node["left"])
+        if res: return res
+        return extract_div_child(node["right"])
+    if "child" in node:
+        return extract_div_child(node["child"])
+    return None

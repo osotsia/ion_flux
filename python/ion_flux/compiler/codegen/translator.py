@@ -13,19 +13,19 @@ class DIRTranslator:
         self.neumann_bcs = neumann_bcs
         self.current_domain = None
         self.current_axis = None
-        self.preamble_stmts = []          # Stores hoisted LICM pre-computations
-        self._integral_counter = 0        # Guarantees unique hoisted variable names
+        self.preamble_stmts = []          
+        self._integral_counter = 0        
+        self.all_domains = []
+        self.piecewise_map = None
+        self.region_divs = None
+        self.current_region_data = None
 
     def translate(self, node: Dict[str, Any], idx: ir.Expr, face: Optional[str] = None) -> ir.Expr:
-        # Dynamically inject Neumann boundary evaluations natively at faces
         bc_id = node.get("_bc_id")
         if bc_id and face in ("left", "right") and bc_id in self.neumann_bcs:
             bcs = self.neumann_bcs[bc_id]
             if face in bcs:
                 bc_val_ir = self.translate(bcs[face], idx, face=None)
-                
-                # Use cached current_axis to prevent boundary injection from snapping 
-                # to the outer macroscopic edges of a flattened macro-micro array.
                 target_axis = self.current_axis if self.current_axis else (self.current_domain.name if self.current_domain else "")
                 
                 res_val = int(get_resolution(self.current_domain, target_axis))
@@ -67,7 +67,6 @@ class DIRTranslator:
     def _translate_State(self, node: Dict[str, Any], idx: ir.Expr, face: Optional[str] = None) -> ir.Expr:
         offset, size = self.layout.state_offsets[node["name"]]
         
-        # Index translation for nested hierarchies
         state_obj = self.state_map.get(node["name"])
         target_domain = getattr(state_obj, "domain", None)
         eval_idx = idx
@@ -79,8 +78,14 @@ class DIRTranslator:
                     eval_idx = ir.BinaryOp("/", idx, ir.Literal(d_mic.resolution))
                 elif target_domain.name == d_mic.name:
                     eval_idx = ir.BinaryOp("%", idx, ir.Literal(d_mic.resolution))
+            else:
+                target_parent = getattr(target_domain, "parent", None)
+                current_parent = getattr(self.current_domain, "parent", None)
+                if target_parent and target_parent.name == self.current_domain.name:
+                    eval_idx = ir.BinaryOp("-", idx, ir.Literal(target_domain.start_idx))
+                elif current_parent and current_parent.name == target_domain.name:
+                    eval_idx = ir.BinaryOp("+", idx, ir.Literal(self.current_domain.start_idx))
                     
-        # States unconditionally self-clamp to enforce internal topology integrity
         clamped_idx = ir.FuncCall("CLAMP", [eval_idx, ir.Literal(size)])
         array_name = "ydot" if getattr(self, "use_ydot", False) else "y"
         base_access = ir.ArrayAccess(array_name, ir.BinaryOp("+", ir.Literal(offset), clamped_idx))
@@ -115,7 +120,12 @@ class DIRTranslator:
                     if self.current_domain and self.current_domain.name == d_mac.name:
                         base = ir.BinaryOp("*", idx, ir.Literal(d_mic.resolution))
                     else:
-                        base = ir.BinaryOp("*", ir.BinaryOp("/", idx, ir.Literal(d_mic.resolution)), ir.Literal(d_mic.resolution))
+                        mac_parent = getattr(d_mac, "parent", None)
+                        if self.current_domain and mac_parent and mac_parent.name == self.current_domain.name:
+                            mac_idx = ir.BinaryOp("-", idx, ir.Literal(d_mac.start_idx))
+                            base = ir.BinaryOp("*", mac_idx, ir.Literal(d_mic.resolution))
+                        else:
+                            base = ir.BinaryOp("*", ir.BinaryOp("/", idx, ir.Literal(d_mic.resolution)), ir.Literal(d_mic.resolution))
                     b_idx = base if side == "left" else ir.BinaryOp("+", base, ir.Literal(d_mic.resolution - 1))
                     return self.translate(node["child"], b_idx, face=None)
 
@@ -140,7 +150,6 @@ class DIRTranslator:
     def _translate_UnaryOp(self, node: Dict[str, Any], idx: ir.Expr, face: Optional[str] = None) -> ir.Expr:
         op = node["op"]
         
-        # --- Volume Integration (Loop Invariant Code Motion) ---
         if op == "integral":
             target_domain_name = node.get("over")
             target_domain = None
@@ -161,24 +170,29 @@ class DIRTranslator:
             res = int(target_domain.resolution)
             dx_ir = ir.Var(f"dx_{target_domain_name}")
             
-            # Check if this is a nested macro-micro integral (varies per macro node)
             is_nested = self.current_domain and self.current_domain.name != target_domain_name
-            
             int_idx_name = f"idx_int_{self._integral_counter}"
             self._integral_counter += 1
             
             if is_nested:
-                # Nested Field Integration (IIFE - Optimal O(N) for macro-micro)
                 if type(self.current_domain).__name__ == "CompositeDomain":
                     macro_idx = ir.BinaryOp("/", idx, ir.Literal(res))
                     macro_offset = ir.BinaryOp("*", macro_idx, ir.Literal(res))
                 else:
-                    macro_offset = ir.BinaryOp("*", idx, ir.Literal(res))
+                    comp_dom = None
+                    for d in self.all_domains:
+                        if type(d).__name__ == "CompositeDomain" and any(sd.name == target_domain_name for sd in d.domains):
+                            comp_dom = d
+                            break
+                    if comp_dom and self.current_domain and getattr(comp_dom.domains[0], "parent", None) and comp_dom.domains[0].parent.name == self.current_domain.name:
+                        mac_idx = ir.BinaryOp("-", idx, ir.Literal(comp_dom.domains[0].start_idx))
+                        macro_offset = ir.BinaryOp("*", mac_idx, ir.Literal(res))
+                    else:
+                        macro_offset = ir.BinaryOp("*", idx, ir.Literal(res))
                     
                 eval_idx = ir.BinaryOp("+", macro_offset, ir.Var(int_idx_name))
                 child_expr = self.translate(node["child"], eval_idx, face=None)
                 
-                # Evaluates immediately within the current macro loop
                 cpp_code = (
                     f"[&]() {{\n"
                     f"    double sum = 0.0;\n"
@@ -191,16 +205,12 @@ class DIRTranslator:
                 )
                 return ir.RawCpp(cpp_code)
             else:
-                # Global Invariant Integration (LICM Hoisting to prevent O(N^2) redundancy)
                 var_name = f"hoisted_int_{self._integral_counter}"
-                
-                # Temporarily bind the target domain so the child AST nodes map correctly
                 prev_domain = self.current_domain
                 self.current_domain = target_domain
                 child_expr = self.translate(node["child"], ir.Var(int_idx_name), face=None)
                 self.current_domain = prev_domain
                 
-                # Appended to preamble to run EXACTLY ONCE at the top of the function
                 cpp_code = (
                     f"double {var_name} = 0.0;\n"
                     f"for(int {int_idx_name} = 0; {int_idx_name} < {res}; ++{int_idx_name}) {{\n"
@@ -209,8 +219,6 @@ class DIRTranslator:
                     f"}}"
                 )
                 self.preamble_stmts.append(ir.RawCpp(cpp_code))
-                
-                # Main equation simply references the O(1) static variable
                 return ir.Var(var_name)
             
         if op == "dt":
@@ -256,7 +264,6 @@ class DIRTranslator:
             if not axis and self.current_domain:
                 axis = self.current_axis if self.current_axis else getattr(self.current_domain, "name", None)
             dx_ir = ir.Var(f"dx_{axis}" if axis else "dx_default")
-            
             coord_sys = get_coord_sys(self.current_domain, axis)
             
             if coord_sys == "unstructured":
@@ -297,7 +304,6 @@ class DIRTranslator:
                             
                 if bc_terms:
                     bc_expr = " + ".join(bc_terms)
-                    # Subtract boundary mass flux out to conserve integration orientation
                     return ir.RawCpp(f"({bulk_div.to_cpp()} - ({bc_expr}))")
                 
                 return bulk_div
@@ -308,39 +314,70 @@ class DIRTranslator:
             right = self.translate(node["child"], idx, face="right")
             left = self.translate(node["child"], idx, face="left")
             
-            # Spherical terms evaluate directly at the node center to prevent 
-            # severe geometrical interpolation failures near the origin (r=0).
-            center = self.translate(node["child"], idx, face=None)
+            # --- PIECEWISE AUTO-STITCHING LOGIC ---
+            if getattr(self, "piecewise_map", None) and getattr(self, "current_region_data", None):
+                reg_data = self.current_region_data
+                end_idx = reg_data["end_idx"]
+                start_idx = reg_data["start_idx"]
+                
+                next_reg = next((r for r in self.piecewise_map if r["start_idx"] == end_idx), None)
+                prev_reg = next((r for r in self.piecewise_map if r["end_idx"] == start_idx), None)
+                
+                if next_reg and next_reg["domain"] in self.region_divs:
+                    next_flux_node = self.region_divs[next_reg["domain"]]
+                    if next_flux_node:
+                        next_flux_ir = self.translate(next_flux_node, idx, face="right")
+                        
+                        cond = ir.BinaryOp("==", idx, ir.Literal(f"{end_idx - 1}"))
+                        avg_flux = ir.BinaryOp("*", ir.Literal("0.5"), ir.BinaryOp("+", right, next_flux_ir))
+                        right = ir.Ternary(cond, avg_flux, right)
+                        
+                if prev_reg and prev_reg["domain"] in self.region_divs:
+                    prev_flux_node = self.region_divs[prev_reg["domain"]]
+                    if prev_flux_node:
+                        prev_flux_ir = self.translate(prev_flux_node, idx, face="left")
+                        
+                        cond = ir.BinaryOp("==", idx, ir.Literal(f"{start_idx}"))
+                        avg_flux = ir.BinaryOp("*", ir.Literal("0.5"), ir.BinaryOp("+", left, prev_flux_ir))
+                        left = ir.Ternary(cond, avg_flux, left)
+            # --------------------------------------
             
             self.current_axis = prev_axis
             
-            std_div = ir.BinaryOp("/", ir.BinaryOp("-", right, left), dx_ir)
+            # --- STRICT FINITE VOLUME GEOMETRY ---
+            axis_to_use = axis if axis else (self.current_domain.name if self.current_domain else "")
+            res_val = get_resolution(self.current_domain, axis_to_use)
+            local_idx_str = get_local_index(idx.to_cpp(), self.current_domain, axis_to_use)
+            local_idx = ir.RawCpp(local_idx_str)
             
-            # Apply finite volume half-cell mass conservation correction at boundaries
-            if self.current_domain:
-                axis_to_use = axis if axis else self.current_domain.name
-                res_val = get_resolution(self.current_domain, axis_to_use)
-                local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis_to_use)
-                
-                cond_left = ir.BinaryOp("==", ir.RawCpp(local_idx), ir.Literal("0"))
-                cond_right = ir.BinaryOp("==", ir.RawCpp(local_idx), ir.Literal(f"{res_val} - 1"))
-                is_boundary = ir.BinaryOp("||", cond_left, cond_right)
-                
-                std_div = ir.Ternary(is_boundary, ir.BinaryOp("*", ir.Literal(2.0), std_div), std_div)
+            cond_left_bnd = ir.BinaryOp("==", local_idx, ir.Literal("0"))
+            cond_right_bnd = ir.BinaryOp("==", local_idx, ir.Literal(f"{res_val} - 1"))
+            
+            idx_right_face = ir.Ternary(cond_right_bnd, ir.Literal(f"{res_val} - 1.0"), ir.BinaryOp("+", ir.RawCpp(f"(double){local_idx_str}"), ir.Literal(0.5)))
+            idx_left_face = ir.Ternary(cond_left_bnd, ir.Literal("0.0"), ir.BinaryOp("-", ir.RawCpp(f"(double){local_idx_str}"), ir.Literal(0.5)))
+            
+            r_right = ir.BinaryOp("*", idx_right_face, dx_ir)
+            r_left = ir.BinaryOp("*", idx_left_face, dx_ir)
             
             if coord_sys == "spherical":
-                local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis)
-                r_coord = f"(std::max(1e-12, (double)({local_idx}) * {dx_ir.to_cpp()}))"
+                A_right = ir.BinaryOp("*", r_right, r_right)
+                A_left = ir.BinaryOp("*", r_left, r_left)
+                V_cell = ir.BinaryOp("/", ir.BinaryOp("-", ir.BinaryOp("*", A_right, r_right), ir.BinaryOp("*", A_left, r_left)), ir.Literal(3.0))
+            elif coord_sys == "cylindrical":
+                A_right = r_right
+                A_left = r_left
+                V_cell = ir.BinaryOp("/", ir.BinaryOp("-", ir.BinaryOp("*", A_right, r_right), ir.BinaryOp("*", A_left, r_left)), ir.Literal(2.0))
+            else: # cartesian
+                A_right = ir.Literal(1.0)
+                A_left = ir.Literal(1.0)
+                V_cell = ir.BinaryOp("-", r_right, r_left)
                 
-                # Evaluate the cell-center flux safely by averaging the face fluxes to prevent mass leaks!
-                center = ir.BinaryOp("*", ir.Literal(0.5), ir.BinaryOp("+", right, left))
-                
-                spherical_term = ir.BinaryOp("*", ir.RawCpp(f"(2.0 / {r_coord})"), center)
-                combined = ir.BinaryOp("+", std_div, spherical_term)
-                
-                return ir.Ternary(ir.BinaryOp("==", ir.RawCpp(local_idx), ir.Literal("0")), 
-                                  ir.BinaryOp("/", ir.BinaryOp("*", ir.Literal(6.0), right), dx_ir), 
-                                  combined)
+            flux_out = ir.BinaryOp("*", A_right, right)
+            flux_in = ir.BinaryOp("*", A_left, left)
+            
+            V_safe = ir.FuncCall("std::max", [ir.Literal("1e-15"), V_cell])
+            std_div = ir.BinaryOp("/", ir.BinaryOp("-", flux_out, flux_in), V_safe)
+            
             return std_div
 
         if op in self._SIMPLE_MATH:

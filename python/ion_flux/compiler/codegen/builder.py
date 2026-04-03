@@ -3,6 +3,7 @@ from . import ir
 from .translator import DIRTranslator
 from .templates import generate_cpp_skeleton
 from .ale import get_ale_terms
+from .ast_analysis import extract_div_child
 
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
     state_map = {s.name: s for s in states}
@@ -19,10 +20,8 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 
     dx_stmts = []
     
-    # 1. Emit Constants dynamically from all utilized physical domains
     for d_name, d_info in ast_payload.get("domains", {}).items():
         res_val = max(d_info["resolution"] - 1, 1)
-        # If the domain is bound to an ALE moving boundary, emit a dynamic `dx` mapped to the RHS state evaluation
         if d_name in dynamic_domains and dynamic_domains[d_name]["side"] == "right":
             rhs_ir = translator.translate(dynamic_domains[d_name]["rhs"], ir.Literal(0))
             dx_stmts.append(ir.RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
@@ -32,21 +31,28 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
     dx_stmts.append(ir.RawCpp("double dx_default = 1.0;"))
     
     all_domains = {d.name: d for s in states if s.domain for d in (s.domain.domains if hasattr(s.domain, "domains") else [s.domain])}
+    translator.all_domains = list(all_domains.values())
     
     eq_stmts = []
-    # 2. Build Explicit Equation Loops
     for eq_data in ast_payload.get("equations", []):
         state_name = eq_data["state"]
         offset, size = layout.state_offsets[state_name]
         state_obj = state_map[state_name]
         
         if eq_data["type"] == "piecewise":
+            region_divs = {}
+            for reg in eq_data["regions"]:
+                region_divs[reg["domain"]] = extract_div_child(reg["eq"])
+                
+            translator.piecewise_map = eq_data["regions"]
+            translator.region_divs = region_divs
+            
             for reg in eq_data["regions"]:
                 start = reg["start_idx"]
                 end = reg["end_idx"]
-                translator.current_domain = next((d for d in all_domains.values() if d.name == reg["domain"]), None)
+                translator.current_domain = getattr(state_obj, "domain", None)
+                translator.current_region_data = reg
                 
-                # Equation is a BinaryOp. Extract "left" and "right" instead of legacy "lhs"/"rhs".
                 lhs_ir = translator.translate(reg["eq"]["left"], ir.Var("i"))
                 rhs_ir = translator.translate(reg["eq"]["right"], ir.Var("i"))
                 
@@ -54,10 +60,13 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 for term in ale_terms:
                     rhs_ir = ir.BinaryOp("+", rhs_ir, ir.RawCpp(term))
                 
-                # Natively handles Mass Matrix formulation: Res = LHS - RHS
                 res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Var("i")))
                 assign = ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir))
                 eq_stmts.append(ir.Loop("i", ir.Literal(start), ir.Literal(end), [assign]))
+                
+            translator.piecewise_map = None
+            translator.region_divs = None
+            translator.current_region_data = None
         else:
             translator.current_domain = getattr(state_obj, "domain", None)
             if size == 1:
@@ -78,7 +87,6 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 assign = ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir))
                 eq_stmts.append(ir.Loop("i", ir.Literal(0), ir.Literal(size), [assign], pragma=pragma))
 
-    # 3. Apply Explicit Dirichlet Boundary Overrides
     for bc_data in ast_payload.get("boundaries", []):
         if bc_data["type"] == "dirichlet":
             state_name = bc_data["state"]
@@ -91,11 +99,8 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Literal(idx)))
                 y_ir = ir.ArrayAccess("y", ir.BinaryOp("+", ir.Literal(offset), ir.Literal(idx)))
                 
-                # Natively overwrites the PDE bulk evaluation cleanly at the boundary node
                 eq_stmts.append(ir.Assign(res_ir, ir.BinaryOp("-", y_ir, val_ir)))
 
-    # 4. Assemble Final Block (Constants -> LICM Hoisted Preamble -> Equations)
     ir_stmts = dx_stmts + translator.preamble_stmts + eq_stmts
-
     body_str = "\n    ".join(stmt.to_cpp() for stmt in ir_stmts)
     return generate_cpp_skeleton(layout.n_states, layout.n_params, body_str, bandwidth)

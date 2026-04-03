@@ -11,16 +11,30 @@
 ### **Execution Pipeline (Data Flow)**
 
 ```text
-[Python DSL] ──(Operator Overloading)──> [JSON/Dict AST]
-                                              │
-[Python Codegen] ──(Dynamic Dispatch)──> [C++ Source] (Residual only)
-                                              │
-[Clang/LLVM + Enzyme] ──(Auto-Diff)────> [.so Binary] (Residual + Jacobian + VJP)
-                                              │
-[Rust Runtime] ──(Loads via FFI)───────> [Native Solver & Adjoint Loop] 
-                                              │
-                                              ▼
-                                   [Hardware: CPU/GPU Execution]
+### **Execution Pipeline (Data Flow)**
+
+```text
+[Python DSL] ──────────(Operator Overloading)──> [AST Payload]      # Mathematical intent captured as a pure JSON/Dict semantic 
+                                                                    graph. No execution occurs here.
+                                                      │
+[Middle-end Codegen] ──(Staggered FVM Lowering)─> [C++ Source]      # Translates AST to C++. Auto-stitches piecewise regions,
+                                                                    injects ALE moving mesh kinematics, and enforces 
+                                                                    mass-conserving Face/Volume mappings.
+                                                      │
+[Clang/LLVM + Enzyme] ─(Compile-Time AD)────────> [.so Binary]      # JIT-compiles the residual. Enzyme differentiates LLVM IR
+                                                                    to emit exact analytical Jacobians and Reverse-mode
+                                                                    VJPs (Vector-Jacobian Products).
+                                                      │
+[Rust Runtime] ────────(FFI Native Loading)─────> [Solver Handle]   # Maps multi-dimensional Python arrays to flat C-ABI 
+                                                                    pointers. Enforces strict memory lifecycles and 
+                                                                    bypasses the Python GIL.
+                                                      │
+[Native Math Solvers] ─(BDF VSVO & GMRES/LU)────> [Time Stepping]   # Integrates stiff non-linear DAEs natively using 
+                                                                    adaptive time steps and Newton-Raphson iterations.
+                                                      │
+                                                      ▼
+                                       [Hardware: CPU Execution]    # Orchestrates Task-Parallel batching via Rayon
+                                                                    or Data-Parallel OpenMP loops across available vCPUs.
 ```
 
 ---
