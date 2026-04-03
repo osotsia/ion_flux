@@ -71,14 +71,8 @@ class DFN(fx.PDE):
         ke = 1.0
         t_plus = 0.38
         
-        # Effective Electrolyte Transport (Bruggeman)
-        De_eff_n = De * (eps_en ** b_brug)
-        De_eff_s = De * (eps_es ** b_brug)
-        De_eff_p = De * (eps_ep ** b_brug)
-        
-        ke_eff_n = ke * (eps_en ** b_brug)
-        ke_eff_s = ke * (eps_es ** b_brug)
-        ke_eff_p = ke * (eps_ep ** b_brug)
+        # Active Electrode Area (From paper dimensions: 80 cm x 6.4 cm, double-sided)
+        A_elec = 0.1024 
         
         # Solid Diffusion Coefficients (Approx constants at 25C)
         Ds_n = 3.3e-14
@@ -157,19 +151,25 @@ class DFN(fx.PDE):
         i_s_n = -sig_eff_n * fx.grad(self.phi_s_n)
         i_s_p = -sig_eff_p * fx.grad(self.phi_s_p)
         
+        # Spatial masking for effective properties over the continuous cell domain
+        x = self.cell.coords
+        is_n = x <= 85.2e-6
+        is_p = x >= 97.2e-6
+        is_s = 1.0 - is_n - is_p
+        
+        eps_e = is_n * eps_en + is_s * eps_es + is_p * eps_ep
+        De_eff = De * (eps_e ** b_brug)
+        ke_eff = ke * (eps_e ** b_brug)
+        
         grad_ce = fx.grad(self.c_e)
         grad_phie = fx.grad(self.phi_e)
         
         # Concentration gradient term for electrolyte charge conservation
         ce_diff_term = (2.0 * R_const * T / F) * (1.0 - t_plus) * (grad_ce / ce_safe)
         
-        flux_ce_n = -De_eff_n * grad_ce
-        flux_ce_s = -De_eff_s * grad_ce
-        flux_ce_p = -De_eff_p * grad_ce
-        
-        flux_phie_n = -ke_eff_n * grad_phie + ke_eff_n * ce_diff_term
-        flux_phie_s = -ke_eff_s * grad_phie + ke_eff_s * ce_diff_term
-        flux_phie_p = -ke_eff_p * grad_phie + ke_eff_p * ce_diff_term
+        # SINGLE, globally stitched FVM fluxes to prevent mass discontinuity
+        flux_ce = -De_eff * grad_ce
+        flux_phie = -ke_eff * grad_phie + ke_eff * ce_diff_term
 
         # ---------------------------------------------------------------------
         # Explicit Equation Targeting
@@ -178,14 +178,14 @@ class DFN(fx.PDE):
             "equations": {
                 # --- Electrolyte (Continuous Piecewise Physics) ---
                 self.c_e: fx.Piecewise({
-                    self.x_n: eps_en * fx.dt(self.c_e) == -fx.div(flux_ce_n) + (1.0 - t_plus) * j_n / F,
-                    self.x_s: eps_es * fx.dt(self.c_e) == -fx.div(flux_ce_s),
-                    self.x_p: eps_ep * fx.dt(self.c_e) == -fx.div(flux_ce_p) + (1.0 - t_plus) * j_p / F
+                    self.x_n: eps_en * fx.dt(self.c_e) == -fx.div(flux_ce) + (1.0 - t_plus) * j_n / F,
+                    self.x_s: eps_es * fx.dt(self.c_e) == -fx.div(flux_ce),
+                    self.x_p: eps_ep * fx.dt(self.c_e) == -fx.div(flux_ce) + (1.0 - t_plus) * j_p / F
                 }),
                 self.phi_e: fx.Piecewise({
-                    self.x_n: fx.div(flux_phie_n) == j_n,
-                    self.x_s: fx.div(flux_phie_s) == 0.0,
-                    self.x_p: fx.div(flux_phie_p) == j_p
+                    self.x_n: fx.div(flux_phie) == j_n,
+                    self.x_s: fx.div(flux_phie) == 0.0,
+                    self.x_p: fx.div(flux_phie) == j_p
                 }),
                 
                 # --- Solid Phase ---
@@ -202,14 +202,14 @@ class DFN(fx.PDE):
             # Explicit Boundaries (Dirichlet on States, Neumann on Tensors)
             # -----------------------------------------------------------------
             "boundaries": {
-                grad_ce:      {"left": 0.0, "right": 0.0},
+                flux_ce:      {"left": 0.0, "right": 0.0},
                 
                 self.phi_s_n: {"left": fx.Dirichlet(0.0)}, # Grounded anchor node
                 i_s_n:        {"right": 0.0},
-                i_s_p:        {"left": 0.0, "right": self.i_app},
+                # Map cyclic total current [A] to geometric current density [A/m^2]
+                i_s_p:        {"left": 0.0, "right": self.i_app / A_elec}, 
                 
-                flux_phie_n:  {"left": 0.0},
-                flux_phie_p:  {"right": 0.0},
+                flux_phie:    {"left": 0.0, "right": 0.0},
                 
                 N_s_n:        {"left": 0.0, "right": j_n / (a_n * F)},
                 N_s_p:        {"left": 0.0, "right": j_p / (a_p * F)},
