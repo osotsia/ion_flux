@@ -237,6 +237,7 @@ class Engine:
         # Recursively evaluates the static scalar AST expressions at t=0.
         # ---------------------------------------------------------------------
         def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
+            import math
             t = node.get("type")
             if t == "Scalar": return float(node["value"])
             if t == "Parameter":
@@ -251,11 +252,18 @@ class Engine:
                 if op == "mul": return l * r
                 if op == "div": return l / r if r != 0 else 0.0
                 if op == "pow": return l ** r
+                if op == "max": return max(l, r)
+                if op == "min": return min(l, r)
             if t == "UnaryOp":
                 c = _eval_ic(node["child"], idx, dx)
                 op = node["op"]
                 if op == "neg": return -c
                 if op == "coords": return idx * dx
+                if op == "sin": return math.sin(c)
+                if op == "cos": return math.cos(c)
+                if op == "exp": return math.exp(c)
+                if op == "log": return math.log(c) if c > 0 else 0.0
+                if op == "abs": return abs(c)
             return 0.0
         
         for ic_data in self.ast_payload.get("initial_conditions", []):

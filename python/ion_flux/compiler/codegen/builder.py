@@ -10,22 +10,28 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
     neumann_bcs = {bc["node_id"]: bc["bcs"] for bc in ast_payload.get("boundaries", []) if bc["type"] == "neumann"}
     translator = DIRTranslator(layout, state_map, neumann_bcs)
     
-    dx_stmts = []
-    
-    # 1. Emit Constants dynamically from all utilized physical domains
-    for d_name, d_info in ast_payload.get("domains", {}).items():
-        dx_val = float(d_info["bounds"][1] - d_info["bounds"][0]) / max(d_info["resolution"] - 1, 1)
-        dx_stmts.append(ir.RawCpp(f"double dx_{d_name} = {dx_val};"))
-    dx_stmts.append(ir.RawCpp("double dx_default = 1.0;"))
-    
-    all_domains = {d.name: d for s in states if s.domain for d in (s.domain.domains if hasattr(s.domain, "domains") else [s.domain])}
-    
     dynamic_domains = {}
     for bc in ast_payload.get("boundaries", []):
         if bc["type"] == "moving_domain":
             d_name = bc["domain"]
             for side, rhs_ast in bc["bcs"].items():
                 dynamic_domains[d_name] = {"side": side, "rhs": rhs_ast}
+                
+    dx_stmts = []
+    
+    # 1. Emit Constants dynamically from all utilized physical domains
+    for d_name, d_info in ast_payload.get("domains", {}).items():
+        res_val = max(d_info["resolution"] - 1, 1)
+        # If the domain is bound to an ALE moving boundary, emit a dynamic `dx` mapped to the RHS state evaluation
+        if d_name in dynamic_domains and dynamic_domains[d_name]["side"] == "right":
+            rhs_ir = translator.translate(dynamic_domains[d_name]["rhs"], ir.Literal(0))
+            dx_stmts.append(ir.RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
+        else:
+            dx_val = float(d_info["bounds"][1] - d_info["bounds"][0]) / res_val
+            dx_stmts.append(ir.RawCpp(f"double dx_{d_name} = {dx_val};"))
+    dx_stmts.append(ir.RawCpp("double dx_default = 1.0;"))
+    
+    all_domains = {d.name: d for s in states if s.domain for d in (s.domain.domains if hasattr(s.domain, "domains") else [s.domain])}
     
     eq_stmts = []
     # 2. Build Explicit Equation Loops

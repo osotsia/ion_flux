@@ -229,6 +229,8 @@ class DIRTranslator:
             
         if op == "grad":
             axis = node.get("axis")
+            if not axis and self.current_domain:
+                axis = self.current_axis if self.current_axis else getattr(self.current_domain, "name", None)
             dx_ir = ir.Var(f"dx_{axis}" if axis else "dx_default")
             stride = int(get_stride(self.current_domain, axis)) if self.current_domain else 1
             
@@ -251,6 +253,8 @@ class DIRTranslator:
                 
         if op == "div":
             axis = node.get("axis")
+            if not axis and self.current_domain:
+                axis = self.current_axis if self.current_axis else getattr(self.current_domain, "name", None)
             dx_ir = ir.Var(f"dx_{axis}" if axis else "dx_default")
             
             coord_sys = get_coord_sys(self.current_domain, axis)
