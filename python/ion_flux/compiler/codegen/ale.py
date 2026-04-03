@@ -1,9 +1,19 @@
 from typing import Any
-from .topology import get_local_index
+from .topology import get_local_index, get_coord_sys
 from . import ir
 
 def get_ale_terms(state_name: str, offset: int, size: int, state_map: dict, dynamic_domains: dict, translator: Any, idx: str) -> list:
-    """Generates Arbitrary Lagrangian-Eulerian (ALE) grid velocity advection terms."""
+    """
+    Generates Arbitrary Lagrangian-Eulerian (ALE) mesh kinematics.
+    
+    Because battery physics utilize material-tracking meshes (the grid stretches 
+    in tandem with the physical lattice during intercalation), the diffusion 
+    flux is inherently defined relative to the moving mesh. Thus, the advective 
+    transport terms (v * grad(c)) perfectly cancel out analytically. 
+    
+    The only required ALE kinematic is the geometric Dilution term (-c * div(v)) 
+    to continuously conserve mass as the finite-volume cells expand.
+    """
     ale_terms = []
     state_obj = state_map.get(state_name)
     
@@ -16,13 +26,10 @@ def get_ale_terms(state_name: str, offset: int, size: int, state_map: dict, dyna
         if d.name in dynamic_domains:
             binding = dynamic_domains[d.name]
             if binding["side"] == "right":
-                local_idx = get_local_index(idx, state_obj.domain, d.name)
-                x_coord = f"(({local_idx}) * dx_{d.name})"
-                
                 idx_expr = ir.Var(idx) if isinstance(idx, str) else idx
                 idx_str = idx if isinstance(idx, str) else idx.to_cpp()
                 
-                # Compile the full mathematical expression for the moving boundary (L)
+                # Compile the mathematical expression mapping the moving boundary (L)
                 L_expr = translator.translate(binding["rhs"], idx_expr)
                 
                 # Temporarily flip the translator to emit time derivatives (L_dot)
@@ -30,17 +37,18 @@ def get_ale_terms(state_name: str, offset: int, size: int, state_map: dict, dyna
                 L_dot_expr = translator.translate(binding["rhs"], idx_expr)
                 translator.use_ydot = False
                 
-                v_mesh = f"(({x_coord} / std::max(1e-12, (double)({L_expr.to_cpp()}))) * ({L_dot_expr.to_cpp()}))"
-                
-                y_plus = f"y[{offset} + CLAMP(({idx_str})+1, {size})]"
-                y_minus = f"y[{offset} + CLAMP(({idx_str})-1, {size})]"
                 y_curr = f"y[{offset} + CLAMP({idx_str}, {size})]"
                 
-                # Upwind differencing for advective stability:
-                # v_mesh > 0 -> flow left to right -> backward difference
-                # v_mesh <= 0 -> flow right to left -> forward difference
-                grad_c_upwind = f"(({v_mesh}) > 0.0 ? (({y_curr}) - ({y_minus})) / dx_{d.name} : (({y_plus}) - ({y_curr})) / dx_{d.name})"
+                # Calculate geometric divergence of the mesh velocity field.
+                # E.g., for a sphere, div(v) = 3 * L_dot / L
+                coord_sys = get_coord_sys(state_obj.domain, d.name)
+                dim_mult = 3.0 if coord_sys == "spherical" else (2.0 if coord_sys == "cylindrical" else 1.0)
                 
-                ale_terms.append(f"({v_mesh} * {grad_c_upwind})")
+                div_v_mesh = f"({dim_mult} * ({L_dot_expr.to_cpp()}) / std::max(1e-12, (double)({L_expr.to_cpp()})))"
+                
+                # The volumetric dilution term
+                dilution_term = f"(-({y_curr}) * {div_v_mesh})"
+                
+                ale_terms.append(dilution_term)
                 
     return ale_terms

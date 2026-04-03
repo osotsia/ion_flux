@@ -308,14 +308,33 @@ class DIRTranslator:
             right = self.translate(node["child"], idx, face="right")
             left = self.translate(node["child"], idx, face="left")
             
+            # Spherical terms evaluate directly at the node center to prevent 
+            # severe geometrical interpolation failures near the origin (r=0).
+            center = self.translate(node["child"], idx, face=None)
+            
             self.current_axis = prev_axis
             
             std_div = ir.BinaryOp("/", ir.BinaryOp("-", right, left), dx_ir)
             
+            # Apply finite volume half-cell mass conservation correction at boundaries
+            if self.current_domain:
+                axis_to_use = axis if axis else self.current_domain.name
+                res_val = get_resolution(self.current_domain, axis_to_use)
+                local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis_to_use)
+                
+                cond_left = ir.BinaryOp("==", ir.RawCpp(local_idx), ir.Literal("0"))
+                cond_right = ir.BinaryOp("==", ir.RawCpp(local_idx), ir.Literal(f"{res_val} - 1"))
+                is_boundary = ir.BinaryOp("||", cond_left, cond_right)
+                
+                std_div = ir.Ternary(is_boundary, ir.BinaryOp("*", ir.Literal(2.0), std_div), std_div)
+            
             if coord_sys == "spherical":
                 local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis)
                 r_coord = f"(std::max(1e-12, (double)({local_idx}) * {dx_ir.to_cpp()}))"
-                center = self.translate(node["child"], idx, face=None)
+                
+                # Evaluate the cell-center flux safely by averaging the face fluxes to prevent mass leaks!
+                center = ir.BinaryOp("*", ir.Literal(0.5), ir.BinaryOp("+", right, left))
+                
                 spherical_term = ir.BinaryOp("*", ir.RawCpp(f"(2.0 / {r_coord})"), center)
                 combined = ir.BinaryOp("+", std_div, spherical_term)
                 
