@@ -44,7 +44,7 @@ class PiecewiseShadowingPDE(fx.PDE):
     """
     cell = fx.Domain(bounds=(0, 10.0), resolution=11)
     reg_A = cell.region(bounds=(0, 5.0), resolution=6, name="reg_A")
-    reg_B = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg_B")
+    reg_B = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg_B")
     
     c = fx.State(domain=cell, name="c")
     
@@ -123,7 +123,7 @@ class ExplicitSurfaceAPIPDE(fx.PDE):
     """
     cell = fx.Domain(bounds=(0, 10.0), resolution=11)
     reg_A = cell.region(bounds=(0, 5.0), resolution=6, name="reg_A")
-    reg_B = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg_B")
+    reg_B = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg_B")
     
     c = fx.State(domain=cell, name="c")
     

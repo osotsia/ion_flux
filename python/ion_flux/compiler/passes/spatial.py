@@ -52,6 +52,18 @@ class SpatialLoweringVisitor:
         self.current_axis = None
         self.use_ydot = False
 
+
+    def _get_topological_idx(self, idx: Expr) -> Expr:
+        """Returns the absolute topological index, regardless of Piecewise or Standard loop bounds."""
+        start_idx = getattr(self.current_domain, "start_idx", 0)
+        if getattr(self, "is_piecewise", False):
+            # In Piecewise, the loop variable already spans the global domain
+            return idx
+        else:
+            if start_idx > 0:
+                return BinaryOp("+", idx, Literal(start_idx))
+            return idx
+
     # ==========================================================================
     # 2. MAIN ENTRY POINT & DISPATCH
     # ==========================================================================
@@ -63,17 +75,25 @@ class SpatialLoweringVisitor:
         before dispatching to standard math evaluation.
         """
         # 1. Boundary Interception
-        bc_ast = self.ctx.get_neumann_bc(node.get("_bc_id"), face)
-        if bc_ast:
+        bc_info = self.ctx.get_neumann_bc(node.get("_bc_id"), face)
+        if bc_info:
+            bc_ast = bc_info["ast"]
             bc_ir = self.lower(bc_ast, idx, face=None)
             
             axis = self.current_axis if self.current_axis else getattr(self.current_domain, "name", "")
             res_val = int(get_resolution(self.current_domain, axis)) if self.current_domain else 1
-            local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis)
             
-            # Detect if the current loop index rests exactly on the requested boundary
-            edge_val = "0" if face == "left" else str(res_val - 1)
-            is_edge = BinaryOp("==", RawCpp(local_idx), Literal(edge_val))
+            if hasattr(self.current_domain, "domains") and len(self.current_domain.domains) == 2:
+                # Micro-particles use repeating relative modulo geometries
+                local_idx = get_local_index(idx.to_cpp(), self.current_domain, axis)
+                edge_val_str = "0" if face == "left" else str(res_val - 1)
+                is_edge = BinaryOp("==", RawCpp(local_idx), Literal(edge_val_str))
+            else:
+                # Flat macro grids and sub-regions strictly use absolute global indices
+                top_idx = self._get_topological_idx(idx).to_cpp()
+                start_idx = getattr(self.current_domain, "start_idx", 0)
+                edge_val_str = str(start_idx) if face == "left" else str(start_idx + res_val - 1)
+                is_edge = BinaryOp("==", RawCpp(top_idx), Literal(edge_val_str))
             
             base_eval = self._dispatch(node, idx, face)
             
@@ -248,7 +268,8 @@ class SpatialLoweringVisitor:
         axis_name = node.get("axis")
         axis_to_use = axis_name or self.current_axis or getattr(self.current_domain, "name", "")
         dx_ir = Var("dx_default") if not axis_to_use else Var(f"dx_{axis_to_use}")
-        return BinaryOp("*", idx, dx_ir)
+        top_idx = self._get_topological_idx(idx)
+        return BinaryOp("*", top_idx, dx_ir)
 
     def _lower_grad(self, node: Dict[str, Any], child: Dict[str, Any], idx: Expr, face: Optional[str]) -> Expr:
         """Finite difference central gradient. Adjusts stencil direction if queried on a specific face."""
@@ -319,8 +340,9 @@ class SpatialLoweringVisitor:
         bc_terms = []
         if flux_bc_id:
             for s_face in ["left", "right", "top", "bottom"]:
-                bc_ast = self.ctx.get_neumann_bc(flux_bc_id, s_face)
-                if bc_ast and s_face in offsets.get("surfaces", {}):
+                bc_info = self.ctx.get_neumann_bc(flux_bc_id, s_face)
+                if bc_info and s_face in offsets.get("surfaces", {}):
+                    bc_ast = bc_info["ast"]
                     surf_off = offsets["surfaces"][s_face]
                     bc_val = self.lower(bc_ast, idx, face=None).to_cpp()
                     mask_val = f"m[{surf_off} + (int)({idx.to_cpp()})]"
@@ -338,8 +360,6 @@ class SpatialLoweringVisitor:
         """
         dx_ir = Var("dx_default") if not axis_to_use else Var(f"dx_{axis_to_use}")
         res_val = get_resolution(self.current_domain, axis_to_use)
-        local_idx_str = get_local_index(idx.to_cpp(), self.current_domain, axis_to_use)
-        local_idx = RawCpp(local_idx_str)
         
         # 1. Evaluate specific fluxes on the cell edges
         prev_axis = getattr(self, "current_axis", None)
@@ -353,11 +373,35 @@ class SpatialLoweringVisitor:
             right_flux, left_flux = self._stitch_piecewise_fluxes(right_flux, left_flux, idx)
 
         # 3. Geometric Area and Volume evaluations based on Coordinate System
-        cond_left_bnd = BinaryOp("==", local_idx, Literal("0"))
-        cond_right_bnd = BinaryOp("==", local_idx, Literal(f"{res_val} - 1"))
+        top_idx_str = self._get_topological_idx(idx).to_cpp()
+        global_idx_str = idx.to_cpp()
         
-        idx_right_face = Ternary(cond_right_bnd, Literal(f"{res_val} - 1.0"), BinaryOp("+", RawCpp(f"(double){local_idx_str}"), Literal(0.5)))
-        idx_left_face = Ternary(cond_left_bnd, Literal("0.0"), BinaryOp("-", RawCpp(f"(double){local_idx_str}"), Literal(0.5)))
+        if hasattr(self.current_domain, "domains") and len(self.current_domain.domains) == 2:
+            local_idx_str = get_local_index(global_idx_str, self.current_domain, axis_to_use)
+            cond_left_bnd = BinaryOp("==", RawCpp(local_idx_str), Literal("0"))
+            cond_right_bnd = BinaryOp("==", RawCpp(local_idx_str), Literal(f"{res_val} - 1"))
+            phys_idx_str = local_idx_str
+        else:
+            start_idx = getattr(self.current_domain, "start_idx", 0)
+            is_abs_left = (start_idx == 0)
+            
+            parent = getattr(self.current_domain, "parent", None)
+            if parent is not None:
+                parent_res = int(get_resolution(parent, axis_to_use))
+                is_abs_right = (start_idx + int(res_val) >= parent_res)
+            else:
+                is_abs_right = True
+
+            abs_left_val = start_idx
+            abs_right_val = start_idx + int(res_val) - 1
+            
+            cond_left_bnd = BinaryOp("==", RawCpp(top_idx_str), Literal(str(abs_left_val))) if is_abs_left else Literal("0")
+            cond_right_bnd = BinaryOp("==", RawCpp(top_idx_str), Literal(str(abs_right_val))) if is_abs_right else Literal("0")
+            phys_idx_str = top_idx_str
+
+        # FVM faces sit EXACTLY on the boundary coordinate, and 0.5 step inward for bulk cells
+        idx_right_face = Ternary(cond_right_bnd, RawCpp(phys_idx_str), BinaryOp("+", RawCpp(phys_idx_str), Literal("0.5")))
+        idx_left_face = Ternary(cond_left_bnd, RawCpp(phys_idx_str), BinaryOp("-", RawCpp(phys_idx_str), Literal("0.5")))
         
         r_right = BinaryOp("*", idx_right_face, dx_ir)
         r_left = BinaryOp("*", idx_left_face, dx_ir)
@@ -439,25 +483,47 @@ class SpatialLoweringVisitor:
     def _stitch_piecewise_fluxes(self, right_flux: Expr, left_flux: Expr, idx: Expr):
         """
         If we are at the interface boundary of two adjacent Piecewise regions, 
-        averages the mathematical fluxes from both sides to guarantee global mass conservation.
+        evaluates the correct mathematical fluxes from both sides to guarantee global mass conservation.
+        Handles both node-sharing (overlap) and face-sharing meshes natively.
         """
         reg_data = self.current_region_data
         end_idx = reg_data["end_idx"]
         start_idx = reg_data["start_idx"]
         
-        next_reg = next((r for r in self.piecewise_regions if r["start_idx"] == end_idx), None)
-        prev_reg = next((r for r in self.piecewise_regions if r["end_idx"] == start_idx), None)
+        # Check for overlapping (node-sharing) meshes
+        next_reg_overlap = next((r for r in self.piecewise_regions if r["start_idx"] == end_idx - 1), None)
+        prev_reg_overlap = next((r for r in self.piecewise_regions if r["end_idx"] - 1 == start_idx), None)
         
-        if next_reg and next_reg["domain"] in self.region_divs:
-            next_flux_node = self.region_divs[next_reg["domain"]]
+        # Check for non-overlapping (face-sharing) meshes
+        next_reg_face = next((r for r in self.piecewise_regions if r["start_idx"] == end_idx), None)
+        prev_reg_face = next((r for r in self.piecewise_regions if r["end_idx"] == start_idx), None)
+        
+        if next_reg_overlap and next_reg_overlap["domain"] in self.region_divs:
+            next_flux_node = self.region_divs[next_reg_overlap["domain"]]
+            if next_flux_node:
+                next_flux_ir = self.lower(next_flux_node, idx, face="right")
+                cond = BinaryOp("==", idx, Literal(f"{end_idx - 1}"))
+                # Right face of the shared node is fully in the next region
+                right_flux = Ternary(cond, next_flux_ir, right_flux)
+                
+        elif next_reg_face and next_reg_face["domain"] in self.region_divs:
+            next_flux_node = self.region_divs[next_reg_face["domain"]]
             if next_flux_node:
                 next_flux_ir = self.lower(next_flux_node, idx, face="right")
                 cond = BinaryOp("==", idx, Literal(f"{end_idx - 1}"))
                 avg_flux = BinaryOp("*", Literal(0.5), BinaryOp("+", right_flux, next_flux_ir))
                 right_flux = Ternary(cond, avg_flux, right_flux)
+
+        if prev_reg_overlap and prev_reg_overlap["domain"] in self.region_divs:
+            prev_flux_node = self.region_divs[prev_reg_overlap["domain"]]
+            if prev_flux_node:
+                prev_flux_ir = self.lower(prev_flux_node, idx, face="left")
+                cond = BinaryOp("==", idx, Literal(f"{start_idx}"))
+                # Left face of the shared node is fully in the previous region
+                left_flux = Ternary(cond, prev_flux_ir, left_flux)
                 
-        if prev_reg and prev_reg["domain"] in self.region_divs:
-            prev_flux_node = self.region_divs[prev_reg["domain"]]
+        elif prev_reg_face and prev_reg_face["domain"] in self.region_divs:
+            prev_flux_node = self.region_divs[prev_reg_face["domain"]]
             if prev_flux_node:
                 prev_flux_ir = self.lower(prev_flux_node, idx, face="left")
                 cond = BinaryOp("==", idx, Literal(f"{start_idx}"))

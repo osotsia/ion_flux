@@ -17,7 +17,11 @@ class SemanticContext:
         """Pre-processes the boundary bucket into O(1) lookup tables."""
         for bc in self.payload.get("boundaries", []):
             if bc["type"] == "neumann":
-                self.neumann_bcs[bc["node_id"]] = bc["bcs"]
+                node_id = bc["node_id"]
+                if node_id not in self.neumann_bcs:
+                    self.neumann_bcs[node_id] = {}
+                for side, ast_node in bc["bcs"].items():
+                    self.neumann_bcs[node_id][side] = {"ast": ast_node, "domain": bc.get("domain")}
             elif bc["type"] == "moving_domain":
                 d_name = bc["domain"]
                 for side, rhs_ast in bc["bcs"].items():
@@ -25,7 +29,7 @@ class SemanticContext:
                     self.dynamic_domains[d_name] = {"side": side, "rhs": rhs_ast}
 
     def get_neumann_bc(self, node_id: Optional[str], face: str) -> Optional[Dict[str, Any]]:
-        """Returns the AST dict of the boundary condition if one applies to this face."""
+        """Returns the AST dict and domain info of the boundary condition if one applies to this face."""
         if not node_id: return None
         bcs = self.neumann_bcs.get(node_id)
         if bcs and face in bcs:

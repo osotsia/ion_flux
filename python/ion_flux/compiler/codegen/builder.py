@@ -32,6 +32,7 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
         visitor.current_domain = getattr(state_map[state_name], "domain", None)
         
         if eq_data["type"] == "piecewise":
+            visitor.is_piecewise = True
             from ion_flux.compiler.codegen.ast_analysis import extract_div_child
             region_divs = {}
             for reg in eq_data["regions"]:
@@ -61,6 +62,7 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
             visitor.current_region_data = None
 
         elif eq_data["type"] == "standard":
+            visitor.is_piecewise = False
             lhs_ir = visitor.lower(eq_data["eq"]["left"], Var("i"))
             rhs_ir = visitor.lower(eq_data["eq"]["right"], Var("i"))
             

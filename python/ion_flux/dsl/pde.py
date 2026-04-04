@@ -123,7 +123,11 @@ class PDE:
         compiled = {"equations": [], "boundaries": [], "initial_conditions": [], "domains": {}}
         
         for d in self.components(Domain):
-            compiled["domains"][d.name] = {"bounds": d.bounds, "resolution": d.resolution}
+            compiled["domains"][d.name] = {
+                "bounds": d.bounds, 
+                "resolution": d.resolution,
+                "start_idx": getattr(d, "start_idx", 0)
+            }
             
         for target, bcs in raw.get("boundaries", {}).items():
             if isinstance(target, State):
@@ -138,10 +142,13 @@ class PDE:
                 })
             elif isinstance(target, Boundary):
                 target.child._bc_id = str(id(target.child))
-                compiled["boundaries"].append({
+                bc_entry = {
                     "type": "neumann", "node_id": target.child._bc_id,
                     "bcs": {target.side: _wrap(bcs).to_dict()}
-                })
+                }
+                if target.domain is not None:
+                    bc_entry["domain"] = target.domain.name
+                compiled["boundaries"].append(bc_entry)
             else:
                 target._bc_id = str(id(target))
                 compiled["boundaries"].append({
@@ -153,7 +160,11 @@ class PDE:
             if isinstance(eq, Piecewise):
                 compiled["equations"].append({"state": state.name, "type": "piecewise", "regions": eq.to_dict()["regions"]})
                 for reg in eq.region_map.keys():
-                    compiled["domains"][reg.name] = {"bounds": reg.bounds, "resolution": reg.resolution}
+                    compiled["domains"][reg.name] = {
+                        "bounds": reg.bounds, 
+                        "resolution": reg.resolution,
+                        "start_idx": getattr(reg, "start_idx", 0)
+                    }
             else:
                 compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict()})
                 

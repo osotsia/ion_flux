@@ -1,12 +1,11 @@
+import math
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
 
 class DFN(fx.PDE):
     """
-    1D-1D Doyle-Fuller-Newman model utilizing Topological Sub-Meshing, 
-    Discrete IR formulation, and Explicit Equation Targeting.
-    
-    Updated to strictly reflect the parameterization of the LG M50 21700 cell 
+    1D-1D Doyle-Fuller-Newman model.
+    Strictly reflects the parameterization of the LG M50 21700 cell 
     (NMC811 / Graphite-SiOy) from O'Regan et al. (2022).
     """
     # -------------------------------------------------------------------------
@@ -41,8 +40,6 @@ class DFN(fx.PDE):
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
-        import math
-
         # Physical Constants
         F = 96485.0
         R_const = 8.314
@@ -62,9 +59,9 @@ class DFN(fx.PDE):
         c_max_n = 29583.0
         c_max_p = 51765.0
         
-        # Solid Conductivities (Effective via Bruggeman)
-        sig_eff_n = 215.0 * (eps_sn ** b_brug)
-        sig_eff_p = 0.847 * (eps_sp ** b_brug)
+        # Solid Conductivities (Table 8 and Table S2 show no Bruggeman scaling for the solid phase)
+        sig_eff_n = 215.0
+        sig_eff_p = 0.847
         
         # Electrolyte Parameters (Approximate baseline constants)
         De = 3e-10
@@ -106,8 +103,23 @@ class DFN(fx.PDE):
             return (e2x - 1.0) / (e2x + 1.0)
             
         def sinh_ast(x):
-            ex = fx.exp(x)
-            return 0.5 * (ex - 1.0 / ex)
+            # AST-Level Mathematical Regularization
+            # 1. Clamp the argument to a highly safe physical range (+/- 10.0 is ~250mV)
+            # This absolutely caps the exponential evaluation to exp(10) ~ 22000,
+            # completely eliminating f64 overflow and kinetic explosions.
+            x_safe = fx.min(fx.max(x, -10.0), 10.0)
+            
+            # 2. Evaluate the bounded exponential
+            exp_val = 0.5 * (fx.exp(x_safe) - fx.exp(-x_safe))
+            
+            # 3. Apply a microscopic linear bleed using the UNBOUNDED x.
+            # CRITICAL FIX: Algebraic potential fields (phi_e, phi_s_p) operate with pure 
+            # Neumann boundaries. If the clamp zeroes out their reaction derivative (dj/dphi = 0), 
+            # their Jacobian becomes a pure Laplacian, which is exactly singular. The linear solver 
+            # would invert a singular matrix and blast potentials to 10^14.
+            # This 1e-6 linear term guarantees the matrix remains strictly diagonally 
+            # dominant and safely anchored to the grounded phi_s_n phase everywhere.
+            return exp_val + 1e-6 * x
 
         # ---------------------------------------------------------------------
         # Thermodynamics & Kinetics (AST Nodes)
@@ -143,7 +155,7 @@ class DFN(fx.PDE):
         j_p = a_p * i0_p * sinh_ast((F / (2.0 * R_const * T)) * eta_p)
 
         # ---------------------------------------------------------------------
-        # Tensors (AST Nodes)
+        # Tensors (AST Nodes) - Leveraging Auto-Stitching for continuous phases
         # ---------------------------------------------------------------------
         N_s_n = -Ds_n * fx.grad(self.c_s_n, axis=self.r_n)
         N_s_p = -Ds_p * fx.grad(self.c_s_p, axis=self.r_p)
@@ -151,25 +163,21 @@ class DFN(fx.PDE):
         i_s_n = -sig_eff_n * fx.grad(self.phi_s_n)
         i_s_p = -sig_eff_p * fx.grad(self.phi_s_p)
         
-        # Spatial masking for effective properties over the continuous cell domain
-        x = self.cell.coords
-        is_n = x <= 85.2e-6
-        is_p = x >= 97.2e-6
-        is_s = 1.0 - is_n - is_p
+        # Electrolyte properties per region
+        De_eff_n, ke_eff_n = De * (eps_en ** b_brug), ke * (eps_en ** b_brug)
+        De_eff_s, ke_eff_s = De * (eps_es ** b_brug), ke * (eps_es ** b_brug)
+        De_eff_p, ke_eff_p = De * (eps_ep ** b_brug), ke * (eps_ep ** b_brug)
         
-        eps_e = is_n * eps_en + is_s * eps_es + is_p * eps_ep
-        De_eff = De * (eps_e ** b_brug)
-        ke_eff = ke * (eps_e ** b_brug)
+        ce_diff_term = (2.0 * R_const * T / F) * (1.0 - t_plus) * (fx.grad(self.c_e) / ce_safe)
         
-        grad_ce = fx.grad(self.c_e)
-        grad_phie = fx.grad(self.phi_e)
+        # Piecewise Flux Tensors (Engine automatically ensures mass conservation across region interfaces)
+        flux_ce_n = -De_eff_n * fx.grad(self.c_e)
+        flux_ce_s = -De_eff_s * fx.grad(self.c_e)
+        flux_ce_p = -De_eff_p * fx.grad(self.c_e)
         
-        # Concentration gradient term for electrolyte charge conservation
-        ce_diff_term = (2.0 * R_const * T / F) * (1.0 - t_plus) * (grad_ce / ce_safe)
-        
-        # SINGLE, globally stitched FVM fluxes to prevent mass discontinuity
-        flux_ce = -De_eff * grad_ce
-        flux_phie = -ke_eff * grad_phie + ke_eff * ce_diff_term
+        flux_phie_n = -ke_eff_n * fx.grad(self.phi_e) + ke_eff_n * ce_diff_term
+        flux_phie_s = -ke_eff_s * fx.grad(self.phi_e) + ke_eff_s * ce_diff_term
+        flux_phie_p = -ke_eff_p * fx.grad(self.phi_e) + ke_eff_p * ce_diff_term
 
         # ---------------------------------------------------------------------
         # Explicit Equation Targeting
@@ -178,14 +186,14 @@ class DFN(fx.PDE):
             "equations": {
                 # --- Electrolyte (Continuous Piecewise Physics) ---
                 self.c_e: fx.Piecewise({
-                    self.x_n: eps_en * fx.dt(self.c_e) == -fx.div(flux_ce) + (1.0 - t_plus) * j_n / F,
-                    self.x_s: eps_es * fx.dt(self.c_e) == -fx.div(flux_ce),
-                    self.x_p: eps_ep * fx.dt(self.c_e) == -fx.div(flux_ce) + (1.0 - t_plus) * j_p / F
+                    self.x_n: eps_en * fx.dt(self.c_e) == -fx.div(flux_ce_n) + (1.0 - t_plus) * j_n / F,
+                    self.x_s: eps_es * fx.dt(self.c_e) == -fx.div(flux_ce_s),
+                    self.x_p: eps_ep * fx.dt(self.c_e) == -fx.div(flux_ce_p) + (1.0 - t_plus) * j_p / F
                 }),
                 self.phi_e: fx.Piecewise({
-                    self.x_n: fx.div(flux_phie) == j_n,
-                    self.x_s: fx.div(flux_phie) == 0.0,
-                    self.x_p: fx.div(flux_phie) == j_p
+                    self.x_n: fx.div(flux_phie_n) == j_n,
+                    self.x_s: fx.div(flux_phie_s) == 0.0,
+                    self.x_p: fx.div(flux_phie_p) == j_p
                 }),
                 
                 # --- Solid Phase ---
@@ -202,14 +210,16 @@ class DFN(fx.PDE):
             # Explicit Boundaries (Dirichlet on States, Neumann on Tensors)
             # -----------------------------------------------------------------
             "boundaries": {
-                flux_ce:      {"left": 0.0, "right": 0.0},
+                flux_ce_n:    {"left": 0.0},
+                flux_ce_p:    {"right": 0.0},
                 
                 self.phi_s_n: {"left": fx.Dirichlet(0.0)}, # Grounded anchor node
                 i_s_n:        {"right": 0.0},
                 # Map cyclic total current [A] to geometric current density [A/m^2]
                 i_s_p:        {"left": 0.0, "right": self.i_app / A_elec}, 
                 
-                flux_phie:    {"left": 0.0, "right": 0.0},
+                flux_phie_n:  {"left": 0.0},
+                flux_phie_p:  {"right": 0.0},
                 
                 N_s_n:        {"left": 0.0, "right": j_n / (a_n * F)},
                 N_s_p:        {"left": 0.0, "right": j_p / (a_p * F)},
@@ -231,23 +241,54 @@ class DFN(fx.PDE):
         }
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    
     # Bandwidth=0 signals FAER LU/GMRES handles internal cross-domain sparsity natively
-    engine = fx.Engine(model=DFN(), target="cpu:serial", jacobian_bandwidth=0)
+    engine = fx.Engine(model=DFN(), target="cpu:serial", jacobian_bandwidth=0, solver_backend="SUNDIALS")
+    
+    # Nominal capacity = 5 Ah
+    rates = {
+        "0.5C": 2.5, 
+        "1C": 5.0, 
+        "2C": 10.0
+    }
+    
+    results = {}
+    
+    for name, current in rates.items():
+        print(f"Simulating {name} discharge...")
+        # Simulate Figure 15: Discharges to 2.5V cutoff
+        protocol = Sequence([
+            CC(rate=current, until=engine.model.V_cell <= 2.5, time=7200)
+        ])
+        
+        res = engine.solve(protocol=protocol)
+        results[name] = res
 
-    #import json
-    #print(engine.ast_payload)
+    # Plot Figure 15 style (Voltage vs Capacity/Time)
+    plt.figure(figsize=(10, 6))
     
-    # Simulate Figure 15: 1C Discharge (5A nominal capacity) down to 2.5V cutoff
-    protocol = Sequence([
-        CC(rate=5.0, until=engine.model.V_cell <= 2.5, time=3600), 
-        Rest(time=600)
-    ])
+    colors = {"0.5C": "tab:blue", "1C": "tab:orange", "2C": "tab:green"}
     
-    res = engine.solve(protocol=protocol)
+    for name, res in results.items():
+        t_seconds = res["Time [s]"].data
+        v_cell = res["V_cell"].data
+        
+        # Calculate Capacity discharged in Ah
+        capacity_ah = (t_seconds * rates[name]) / 3600.0
+        
+        plt.plot(capacity_ah, v_cell, label=f"{name} Discharge", color=colors[name], linewidth=2)
+
+    plt.title("LG M50 21700 Discharge Curves (Simulating O'Regan et al. Fig 15)", fontsize=14)
+    plt.xlabel("Discharge Capacity [Ah]", fontsize=12)
+    plt.ylabel("Terminal Voltage [V]", fontsize=12)
+    plt.xlim(left=0)
+    plt.ylim([2.4, 4.3])
+    plt.legend(fontsize=12)
+    plt.grid(True, linestyle="--", alpha=0.7)
+    plt.tight_layout()
+    plt.show()
     
-    res.plot_dashboard(variables=[
-        ["V_cell"],
-        ["phi_s_n", "phi_e", "phi_s_p"],
-        ["c_s_n", "c_s_p"],
-        ["c_e"]
-    ])
+    # You can also launch the interactive 2x4 full-state dashboard for a specific run!
+    # print("Launching comprehensive internal state dashboard for 1C...")
+    # results["1C"].plot_dashboard()

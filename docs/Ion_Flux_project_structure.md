@@ -14,16 +14,16 @@
 ### **Execution Pipeline (Data Flow)**
 
 ```text
-[Python DSL] ──────────(Operator Overloading)──> [AST Payload]      # Mathematical intent captured as a pure JSON/Dict semantic 
-                                                                    graph. No execution occurs here.
+[Python DSL] ──────────(Operator Overloading)──> [AST Payload]      # Mathematical intent captured as a pure JSON/Dict 
+                                                                    semantic graph. No execution occurs here.
                                                       │
-[Middle-end Codegen] ──(Staggered FVM Lowering)─> [C++ Source]      # Translates AST to C++. Auto-stitches piecewise regions,
-                                                                    injects ALE moving mesh kinematics, and enforces 
-                                                                    mass-conserving Face/Volume mappings.
+[Middle-end Codegen] ──(Staggered FVM Lowering)─> [C++ Source]      # Translates AST to C++. Auto-stitches piecewise 
+                                                                    regions, injects ALE moving mesh kinematics, and
+                                                                    enforces mass-conserving Face/Volume mappings.
                                                       │
-[Clang/LLVM + Enzyme] ─(Compile-Time AD)────────> [.so Binary]      # JIT-compiles the residual. Enzyme differentiates LLVM IR
-                                                                    to emit exact analytical Jacobians and Reverse-mode
-                                                                    VJPs (Vector-Jacobian Products).
+[Clang/LLVM + Enzyme] ─(Compile-Time AD)────────> [.so Binary]      # JIT-compiles the residual. Enzyme differentiates 
+                                                                    LLVM IR to emit exact analytical Jacobians and 
+                                                                    Reverse-mode VJPs (Vector-Jacobian Products).
                                                       │
 [Rust Runtime] ────────(FFI Native Loading)─────> [Solver Handle]   # Maps multi-dimensional Python arrays to flat C-ABI 
                                                                     pointers. Enforces strict memory lifecycles and 
