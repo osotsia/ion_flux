@@ -1,106 +1,94 @@
 from typing import List, Dict, Any
-from . import ir
-from .translator import DIRTranslator
+from ion_flux.compiler.passes.semantic import SemanticContext
+from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor
+from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
 from .templates import generate_cpp_skeleton
-from .ale import get_ale_terms
-from .ast_analysis import extract_div_child
 
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
     state_map = {s.name: s for s in states}
     
-    neumann_bcs = {bc["node_id"]: bc["bcs"] for bc in ast_payload.get("boundaries", []) if bc["type"] == "neumann"}
-    translator = DIRTranslator(layout, state_map, neumann_bcs)
+    # --- Pass 1: Semantic Resolution ---
+    ctx = SemanticContext(ast_payload)
     
-    dynamic_domains = {}
-    for bc in ast_payload.get("boundaries", []):
-        if bc["type"] == "moving_domain":
-            d_name = bc["domain"]
-            for side, rhs_ast in bc["bcs"].items():
-                dynamic_domains[d_name] = {"side": side, "rhs": rhs_ast}
-                
+    # --- Pass 2: Spatial Lowering ---
+    visitor = SpatialLoweringVisitor(layout, state_map, ctx)
+    
+    eq_stmts = []
     dx_stmts = []
     
     for d_name, d_info in ast_payload.get("domains", {}).items():
         res_val = max(d_info["resolution"] - 1, 1)
-        if d_name in dynamic_domains and dynamic_domains[d_name]["side"] == "right":
-            rhs_ir = translator.translate(dynamic_domains[d_name]["rhs"], ir.Literal(0))
-            dx_stmts.append(ir.RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
+        if d_name in ctx.dynamic_domains:
+            rhs_ir = visitor.lower(ctx.dynamic_domains[d_name]["rhs"], Literal(0))
+            dx_stmts.append(RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
         else:
             dx_val = float(d_info["bounds"][1] - d_info["bounds"][0]) / res_val
-            dx_stmts.append(ir.RawCpp(f"double dx_{d_name} = {dx_val};"))
-    dx_stmts.append(ir.RawCpp("double dx_default = 1.0;"))
+            dx_stmts.append(RawCpp(f"double dx_{d_name} = {dx_val};"))
+    dx_stmts.append(RawCpp("double dx_default = 1.0;"))
     
-    all_domains = {d.name: d for s in states if s.domain for d in (s.domain.domains if hasattr(s.domain, "domains") else [s.domain])}
-    translator.all_domains = list(all_domains.values())
-    
-    eq_stmts = []
     for eq_data in ast_payload.get("equations", []):
         state_name = eq_data["state"]
         offset, size = layout.state_offsets[state_name]
-        state_obj = state_map[state_name]
+        visitor.current_domain = getattr(state_map[state_name], "domain", None)
         
         if eq_data["type"] == "piecewise":
+            from ion_flux.compiler.codegen.ast_analysis import extract_div_child
             region_divs = {}
             for reg in eq_data["regions"]:
                 region_divs[reg["domain"]] = extract_div_child(reg["eq"])
                 
-            translator.piecewise_map = eq_data["regions"]
-            translator.region_divs = region_divs
+            visitor.piecewise_regions = eq_data["regions"]
+            visitor.region_divs = region_divs
             
             for reg in eq_data["regions"]:
                 start = reg["start_idx"]
                 end = reg["end_idx"]
-                translator.current_domain = getattr(state_obj, "domain", None)
-                translator.current_region_data = reg
+                visitor.current_region_data = reg
                 
-                lhs_ir = translator.translate(reg["eq"]["left"], ir.Var("i"))
-                rhs_ir = translator.translate(reg["eq"]["right"], ir.Var("i"))
+                lhs_ir = visitor.lower(reg["eq"]["left"], Var("i"))
+                rhs_ir = visitor.lower(reg["eq"]["right"], Var("i"))
                 
-                ale_terms = get_ale_terms(state_name, offset, size, state_map, dynamic_domains, translator, "i")
-                for term in ale_terms:
-                    rhs_ir = ir.BinaryOp("+", rhs_ir, ir.RawCpp(term))
+                for ale_ir in visitor.generate_ale_dilution(state_name, offset, size, "i"):
+                    rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
+                    
+                res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Var("i")))
+                assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
                 
-                res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Var("i")))
-                assign = ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir))
-                eq_stmts.append(ir.Loop("i", ir.Literal(start), ir.Literal(end), [assign]))
+                eq_stmts.append(Loop("i", Literal(start), Literal(end), [assign]))
                 
-            translator.piecewise_map = None
-            translator.region_divs = None
-            translator.current_region_data = None
-        else:
-            translator.current_domain = getattr(state_obj, "domain", None)
-            if size == 1:
-                lhs_ir = translator.translate(eq_data["eq"]["left"], ir.Literal(0))
-                rhs_ir = translator.translate(eq_data["eq"]["right"], ir.Literal(0))
-                res_ir = ir.ArrayAccess("res", ir.Literal(offset))
-                eq_stmts.append(ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir)))
-            else:
-                lhs_ir = translator.translate(eq_data["eq"]["left"], ir.Var("i"))
-                rhs_ir = translator.translate(eq_data["eq"]["right"], ir.Var("i"))
+            visitor.piecewise_regions = None
+            visitor.region_divs = None
+            visitor.current_region_data = None
+
+        elif eq_data["type"] == "standard":
+            lhs_ir = visitor.lower(eq_data["eq"]["left"], Var("i"))
+            rhs_ir = visitor.lower(eq_data["eq"]["right"], Var("i"))
+            
+            for ale_ir in visitor.generate_ale_dilution(state_name, offset, size, "i"):
+                rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
                 
-                ale_terms = get_ale_terms(state_name, offset, size, state_map, dynamic_domains, translator, "i")
-                for term in ale_terms:
-                    rhs_ir = ir.BinaryOp("+", rhs_ir, ir.RawCpp(term))
-                
-                res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Var("i")))
-                pragma = "#pragma omp parallel for" if ("omp" in target and size > 50) else ""
-                assign = ir.Assign(res_ir, ir.BinaryOp("-", lhs_ir, rhs_ir))
-                eq_stmts.append(ir.Loop("i", ir.Literal(0), ir.Literal(size), [assign], pragma=pragma))
+            res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Var("i")))
+            assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
+            
+            pragma = "#pragma omp parallel for" if ("omp" in target and size > 50) else ""
+            eq_stmts.append(Loop("i", Literal(0), Literal(size), [assign], pragma=pragma))
 
     for bc_data in ast_payload.get("boundaries", []):
         if bc_data["type"] == "dirichlet":
             state_name = bc_data["state"]
             offset, size = layout.state_offsets[state_name]
-            translator.current_domain = getattr(state_map[state_name], "domain", None)
+            visitor.current_domain = getattr(state_map[state_name], "domain", None)
             
             for side, val_dict in bc_data["bcs"].items():
                 idx = 0 if side == "left" else size - 1
-                val_ir = translator.translate(val_dict, ir.Literal(idx))
-                res_ir = ir.ArrayAccess("res", ir.BinaryOp("+", ir.Literal(offset), ir.Literal(idx)))
-                y_ir = ir.ArrayAccess("y", ir.BinaryOp("+", ir.Literal(offset), ir.Literal(idx)))
+                val_ir = visitor.lower(val_dict, Literal(idx))
+                res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Literal(idx)))
+                y_ir = ArrayAccess("y", BinaryOp("+", Literal(offset), Literal(idx)))
                 
-                eq_stmts.append(ir.Assign(res_ir, ir.BinaryOp("-", y_ir, val_ir)))
+                eq_stmts.append(Assign(res_ir, BinaryOp("-", y_ir, val_ir)))
 
-    ir_stmts = dx_stmts + translator.preamble_stmts + eq_stmts
+    # --- Pass 3: C++ Emission ---
+    ir_stmts = dx_stmts + eq_stmts
     body_str = "\n    ".join(stmt.to_cpp() for stmt in ir_stmts)
+    
     return generate_cpp_skeleton(layout.n_states, layout.n_params, body_str, bandwidth)

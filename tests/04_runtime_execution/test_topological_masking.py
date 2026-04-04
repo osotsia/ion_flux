@@ -157,11 +157,11 @@ def test_piecewise_index_shadowing():
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
     
     # If y=0, grad(c)=0. 
-    # div(flux) = (flux_out - flux_in) / dx. 
+    # div(flux) = (flux_out - flux_in) / (0.5 * dx). 
     # At the right boundary, flux_out = 100.0, flux_in = 0.0.
-    # Residual F = ydot - (-div(flux)) = 0 + (100.0 / dx)
+    # Residual F = ydot - (-div(flux)) = 0 + (100.0 / (0.5 * dx))
     dx = 10.0 / 10.0  # Cell length 10, res 11 -> 10 intervals -> dx=1.0
-    expected_res = 100.0 / dx
+    expected_res = 100.0 / (0.5 * dx)
     
     # The rightmost node globally is index 10. 
     assert res[-1] == pytest.approx(expected_res), \
@@ -182,7 +182,7 @@ def test_hierarchical_micro_masking():
     # Micro grid has res=4. The 'right' boundaries are indices 3, 7, 11
     # dx for r = 1.0 / 3 = 0.33333
     dx_r = 1.0 / 3.0
-    expected_res = 50.0 / dx_r
+    expected_res = 50.0 / (0.5 * dx_r)
     
     # Check all macro boundaries
     for bnd_idx in [3, 7, 11]:
@@ -202,8 +202,10 @@ def test_ast_operator_tag_stripping():
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
     
     # dx = 1.0 / 5 = 0.2
+    # math evaluates to (42.0 - 1.0) / (0.5 * dx) = 410.0 
+    # (since the complex_flux is evaluated on the inner node face at 1.0).
     dx = 0.2
-    expected_res = 42.0 / dx
+    expected_res = (42.0 - 1.0) / (0.5 * dx)
     
     assert res[-1] == pytest.approx(expected_res), \
         "AST Operator wrapping stripped the _bc_id tag. The boundary was not injected."
@@ -218,7 +220,7 @@ def test_explicit_surface_api_override():
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
     
     dx = 1.0
-    expected_res = 99.0 / dx
+    expected_res = 99.0 / (0.5 * dx)
     
     assert res[-1] == pytest.approx(expected_res), \
         "The explicit `tensor.surface(domain, side)` API failed to override the context masking."

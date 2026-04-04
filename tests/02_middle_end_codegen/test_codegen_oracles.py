@@ -169,7 +169,7 @@ def test_jacobian_rank_and_interface_continuity():
 def test_ale_advection_upwinding_stability():
     """
     Proves that Arbitrary Lagrangian-Eulerian (ALE) moving boundaries natively 
-    inject mesh advection velocities that respect upwind differencing for stability.
+    inject local geometric dilution terms that respect upwind differencing for stability.
     """
     engine = Engine(model=ALEMovingInterfacePDE(), target="cpu", mock_execution=False)
     

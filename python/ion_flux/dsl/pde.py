@@ -1,6 +1,6 @@
 import copy
 from typing import Dict, Any, List
-from .nodes import Node, State, Parameter, _wrap, SystemDict, Piecewise
+from .nodes import Node, State, Parameter, Boundary, _wrap, SystemDict, Piecewise
 from .spatial import Domain, CompositeDomain, ConcatenatedDomain
 
 def merge(*systems: SystemDict) -> SystemDict:
@@ -122,13 +122,9 @@ class PDE:
         raw = self.math()
         compiled = {"equations": [], "boundaries": [], "initial_conditions": [], "domains": {}}
         
-        # 1. Compile Global Domains Manifest
         for d in self.components(Domain):
             compiled["domains"][d.name] = {"bounds": d.bounds, "resolution": d.resolution}
             
-        # 2. Boundaries (Dirichlet vs Neumann vs Moving Domain tagging)
-        # Processed BEFORE equations so _bc_id is injected into target objects 
-        # prior to deep-tree serialization.
         for target, bcs in raw.get("boundaries", {}).items():
             if isinstance(target, State):
                 compiled["boundaries"].append({
@@ -136,10 +132,15 @@ class PDE:
                     "bcs": {k: _wrap(v).to_dict() for k, v in bcs.items()}
                 })
             elif isinstance(target, Domain):
-                # Explicit trap for ALE moving meshes
                 compiled["boundaries"].append({
                     "type": "moving_domain", "domain": target.name,
                     "bcs": {k: _wrap(v).to_dict() for k, v in bcs.items()}
+                })
+            elif isinstance(target, Boundary):
+                target.child._bc_id = str(id(target.child))
+                compiled["boundaries"].append({
+                    "type": "neumann", "node_id": target.child._bc_id,
+                    "bcs": {target.side: _wrap(bcs).to_dict()}
                 })
             else:
                 target._bc_id = str(id(target))
@@ -148,7 +149,6 @@ class PDE:
                     "bcs": {k: _wrap(v).to_dict() for k, v in bcs.items()}
                 })
                 
-        # 3. Explicit Equations
         for state, eq in raw.get("equations", {}).items():
             if isinstance(eq, Piecewise):
                 compiled["equations"].append({"state": state.name, "type": "piecewise", "regions": eq.to_dict()["regions"]})
@@ -157,11 +157,9 @@ class PDE:
             else:
                 compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict()})
                 
-        # 4. Initial Conditions
         for state, val in raw.get("initial_conditions", {}).items():
             compiled["initial_conditions"].append({"state": state.name, "value": _wrap(val).to_dict()})
             
-        # 5. Terminal Hardware Injection
         if hasattr(self, "terminal") and self.terminal:
             m = self._term_mode
             rhs = m * self._term_i_target + (1.0 - m) * (self.terminal.current - self.terminal.voltage + self._term_v_target)

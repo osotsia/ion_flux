@@ -154,6 +154,15 @@ def _get_volumes(resolution: int, bounds: tuple) -> np.ndarray:
     v[-1] = 0.5 * dx
     return v
 
+def _get_exact_volumes(resolutions_list: list, dx_list: list) -> np.ndarray:
+    v_all = []
+    for res, dx in zip(resolutions_list, dx_list):
+        v = np.ones(res) * dx
+        v[0] = 0.5 * dx
+        v[-1] = 0.5 * dx
+        v_all.append(v)
+    return np.concatenate(v_all)
+
 @REQUIRES_COMPILER
 def test_bimaterial_mass_conservation():
     """
@@ -171,7 +180,9 @@ def test_bimaterial_mass_conservation():
     ydot = np.zeros(N).tolist()
     
     res = engine.evaluate_residual(y, ydot, parameters={})
-    V_cells = _get_volumes(20, (0.0, 2.0))
+    
+    dx_bulk = 2.0 / 19.0
+    V_cells = _get_exact_volumes([20], [dx_bulk])
     
     total_mass_drift = np.sum(np.array(res) * V_cells)
     assert np.isclose(total_mass_drift, 0.0, atol=1e-10), f"Leaked mass! Drift: {total_mass_drift}"
@@ -216,7 +227,9 @@ def test_triregion_mass_conservation():
     ydot = np.zeros(N).tolist()
     
     res = engine.evaluate_residual(y, ydot, parameters={})
-    V_cells = _get_volumes(30, (0.0, 3.0))
+    
+    dx_bulk = 3.0 / 29.0
+    V_cells = _get_exact_volumes([30], [dx_bulk])
     
     total_mass_drift = np.sum(np.array(res) * V_cells)
     assert np.isclose(total_mass_drift, 0.0, atol=1e-10), f"Leaked mass! Drift: {total_mass_drift}"
@@ -241,7 +254,9 @@ def test_complex_tensor_piecewise_stitching():
     res = engine.evaluate_residual(y.tolist(), np.zeros(N).tolist(), parameters={})
     res_c = np.array(res[off_c:off_c+size_c])
     
-    V_cells = _get_volumes(20, (0.0, 2.0))
+    dx_bulk = 2.0 / 19.0
+    V_cells = _get_exact_volumes([20], [dx_bulk])
+    
     total_mass_drift = np.sum(res_c * V_cells)
     
     assert np.isclose(total_mass_drift, 0.0, atol=1e-10), f"Leaked mass! Drift: {total_mass_drift}"

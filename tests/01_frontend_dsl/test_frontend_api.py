@@ -5,13 +5,15 @@ This suite validates the strict V2 Declarative API (`equations`, `boundaries`, `
 It ensures Python operator overloading generates the correct Abstract Syntax Tree (AST), 
 that submodels maintain namespace isolation, and that complex topologies (like ALE moving meshes)
 are flagged accurately for the compiler.
+
+It aggressively pokes for common user errors, such as Rank Deficiency (unconstrained states) 
+and Namespace Bleeding across submodels.
 """
 
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine, RUST_FFI_AVAILABLE
-from ion_flux.dsl.ast import validate_ast
+from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Model 1: The Heavyweight (Piecewise, Hierarchical Domains, DAEs)
@@ -109,8 +111,8 @@ class CompositeCell(fx.PDE):
         }
         return fx.merge(macro_sys, self.anode.math(1.0), self.cathode.math(-1.0))
 
-class BadSharedDomainParent(fx.PDE):
-    """Tests isolation boundary failures (sharing external domains)."""
+class SharedDomainParent(fx.PDE):
+    """Tests isolation boundary failures when domains are passed down."""
     macro_x = fx.Domain(bounds=(0, 1), resolution=5)
     
     class SharedDomainConsumer(fx.PDE):
@@ -190,7 +192,7 @@ def test_ast_capture_and_semantic_buckets():
     # 3. Spatial DAE capture
     phi_eq = next(eq for eq in ast["equations"] if eq["state"] == "phi_e")
     assert phi_eq["type"] == "standard"
-    assert phi_eq["eq"]["left"]["op"] == "div"  # The 0 == div(...) maps the div to the left
+    assert phi_eq["eq"]["left"]["op"] == "div"  # 0 == div(...) maps div to left
     
     # 4. Dirichlet boundary overrides
     bc_phi = next(bc for bc in ast["boundaries"] if bc.get("state") == "phi_e")
@@ -225,7 +227,7 @@ def test_shared_domain_deepcopy_isolation_boundary():
     Validates that passing a parent domain to a submodel safely triggers a deepcopy.
     The submodel receives its own isolated coordinate space, preventing silent mesh conflicts.
     """
-    model = BadSharedDomainParent()
+    model = SharedDomainParent()
     
     # The parent's original domain remains untouched
     assert model.macro_x.name == "macro_x"
@@ -238,7 +240,7 @@ def test_shared_domain_deepcopy_isolation_boundary():
     assert "sub_b_macro_x" in ast["domains"]
 
 
-def test_advanced_math_and_moving_boundaries():
+def test_advanced_math_and_ale_tagging():
     """Validates relational triggers, integral generation, and ALE boundary bindings."""
     model = AdvancedMathAndALE()
     ast = model.ast()
@@ -257,23 +259,24 @@ def test_advanced_math_and_moving_boundaries():
     assert rhs["right"]["op"] == "gt"
 
 
-@pytest.mark.skipif(not RUST_FFI_AVAILABLE, reason="Requires native JIT compilation.")
-def test_dae_masking_extraction():
+def test_dae_masking_extraction_and_dirichlet():
     """
-    Validates that the compiler uses the AST output to generate the correct 
-    binary Differential-Algebraic (DAE) masking vectors for the native numerical solver.
+    FAILURE POKE: Dirichlet Boundaries vs Bulk PDEs.
+    Validates that the Engine's Semantic Pass extracts the `1.0` (ODE) and `0.0` (DAE)
+    mask correctly, specifically overwriting the edges of ODE arrays to 0.0 when a 
+    Dirichlet boundary is applied.
     """
     model = ComprehensiveBatteryModel()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = Engine(model=model, target="cpu", mock_execution=True)
     
     _, _, id_arr, _ = engine._extract_metadata()
     id_arr = np.array(id_arr)
     
-    # 1. c_e is a standard PDE (Should be masked as 1.0)
+    # 1. c_e is a standard PDE (Should be masked as 1.0 everywhere)
     off_ce, size_ce = engine.layout.state_offsets["c_e"]
     assert np.all(id_arr[off_ce : off_ce + size_ce] == 1.0)
     
-    # 2. phi_e is a spatial DAE (Lacks fx.dt(), should be masked as 0.0)
+    # 2. phi_e is a spatial DAE (Lacks fx.dt(), masked as 0.0 everywhere)
     off_phi, size_phi = engine.layout.state_offsets["phi_e"]
     assert np.all(id_arr[off_phi : off_phi + size_phi] == 0.0)
     
@@ -282,28 +285,33 @@ def test_dae_masking_extraction():
     assert id_arr[off_v] == 0.0
 
 
-def test_ast_validation_schema_rejections():
-    """Validates the compiler throws exact, actionable errors when users malform dicts."""
-    
-    # 1. Invalid root buckets
-    bad_payload = {"pdes": []}
-    with pytest.raises(ValueError, match="Invalid equation bucket"):
-        validate_ast(bad_payload)
-        
-    # 2. Missing states in equations
-    bad_eq_payload = {
-        "equations": [{"type": "standard"}], 
-        "boundaries": [],
-        "initial_conditions": []
-    }
-    with pytest.raises(ValueError, match="Equations must explicitly define 'state' and 'type'"):
-        validate_ast(bad_eq_payload)
-        
-    # 3. Malformed boundaries
-    bad_bc_payload = {
-        "equations": [],
-        "boundaries": [{"type": "dirichlet"}], # Missing "bcs" dict
-        "initial_conditions": []
-    }
-    with pytest.raises(ValueError, match="Boundaries must explicitly define 'type' and 'bcs'"):
-        validate_ast(bad_bc_payload)
+def test_failure_poke_rank_deficiency_rejection():
+    """
+    FAILURE POKE: Rank Deficiency.
+    If a user declares a State but forgets to provide an equation for it, the 
+    Jacobian will be structurally singular. The Engine must reject this immediately.
+    """
+    class MissingEqModel(fx.PDE):
+        x = fx.State()
+        y = fx.State() # Declared, but unconstrained!
+        def math(self):
+            return {"equations": {self.x: fx.dt(self.x) == 1.0}}
+            
+    with pytest.raises(ValueError, match="Unconstrained state detected"):
+        Engine(MissingEqModel(), mock_execution=True)
+
+
+def test_failure_poke_malformed_dictionary_payload():
+    """
+    FAILURE POKE: Malformed math() return dictionary.
+    If a user misspells the required buckets ("eqs" instead of "equations"),
+    the Engine shouldn't blindly evaluate it; it should trigger the unconstrained state safety.
+    """
+    class BadPayloadModel(fx.PDE):
+        x = fx.State()
+        def math(self):
+            # Typo in bucket name!
+            return {"eqs": {self.x: fx.dt(self.x) == 1.0}} 
+            
+    with pytest.raises(ValueError, match="Unconstrained state detected"):
+        Engine(BadPayloadModel(), mock_execution=True)

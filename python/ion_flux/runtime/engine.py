@@ -99,14 +99,14 @@ class Engine:
             for d in deps:
                 if d not in self.layout.state_offsets: continue
                 off_d, _ = self.layout.state_offsets[d]
-                # If a state depends on a state outside its own memory block, 
-                # off-diagonal coupling occurs, requiring dense/GMRES factorization.
+                # Off-diagonal coupling requires dense/GMRES factorization
                 if abs(off_t - off_d) > 0:
                     return 0 
             return max_bw
 
-        # Explicitly check for ALE moving domains. These inject spatial-wide 
-        # dependencies on the boundary state (e.g., dx(R), dilution terms).
+        # Moving domains dictate the spatial stride `dx` of the entire mesh.
+        # Any state evaluated over this mesh inherently depends on the boundary state,
+        # creating a dense off-diagonal dependency column.
         for bc_data in ast_payload.get("boundaries", []):
             if bc_data.get("type") == "moving_domain":
                 return 0
@@ -120,13 +120,6 @@ class Engine:
             else:
                 if check_dependencies(target_state, eq_data["eq"]) == 0: return 0
                 
-        # Trace dependencies for explicit Dirichlet overrides
-        for bc_data in ast_payload.get("boundaries", []):
-            if bc_data["type"] == "dirichlet":
-                target_state = bc_data["state"]
-                for val_node in bc_data["bcs"].values():
-                    if check_dependencies(target_state, val_node) == 0: return 0
-                    
         return max_bw if max_bw > 0 else 0
 
     @classmethod
