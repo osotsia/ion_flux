@@ -209,7 +209,7 @@ def test_dae_masking_and_cj_scaling():
     engine = Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     # 1. Validate Mask Extraction Array
-    _, _, id_arr, _ = engine._extract_metadata()
+    _, _, id_arr, _, _ = engine._extract_metadata()
     id_arr = np.array(id_arr)
     
     off_phi, size_phi = engine.layout.state_offsets["phi_e"]

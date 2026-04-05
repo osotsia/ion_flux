@@ -235,28 +235,63 @@ class SpatialLoweringVisitor:
         return ArrayAccess("ydot", BinaryOp("+", Literal(offset), clamped))
 
     def _lower_integral(self, node: Dict[str, Any], child: Dict[str, Any], idx: Expr) -> Expr:
-        """Emits an inline C++ lambda using Trapezoidal integration over a specific spatial domain."""
+        """Emits an inline C++ lambda using exact FVM volume integration."""
         target_domain_name = node.get("over")
         res = self.ctx.payload["domains"][target_domain_name]["resolution"]
+        coord_sys = self.ctx.payload["domains"][target_domain_name].get("coord_sys", "cartesian")
         dx_ir = Var(f"dx_{target_domain_name}")
         int_idx = f"idx_int_{id(node)}"
         
         # Context switch: We are summing over a DIFFERENT domain than the current loop
         prev_domain = self.current_domain
+        prev_is_piecewise = getattr(self, "is_piecewise", False)
+        
+        domain_obj = None
         for s in self.state_map.values():
             if getattr(s, "domain", None) and getattr(s.domain, "name", "") == target_domain_name:
-                self.current_domain = s.domain
+                domain_obj = s.domain
                 break
+                
+        if domain_obj is None:
+            # Fallback: create a mock domain to satisfy coordinate and spatial lookups
+            start_idx = self.ctx.payload["domains"][target_domain_name].get("start_idx", 0)
+            domain_obj = type("MockDomain", (), {"name": target_domain_name, "start_idx": start_idx, "coord_sys": coord_sys})()
+            
+        self.current_domain = domain_obj
+        self.is_piecewise = False  # The integral loop evaluates as a standard 0..res local loop
         
         child_expr = self.lower(child, Var(int_idx), face=None)
-        self.current_domain = prev_domain # Restore context
         
+        self.current_domain = prev_domain # Restore context
+        self.is_piecewise = prev_is_piecewise
+        
+        pi_val = "3.14159265358979323846"
+        if coord_sys == "spherical":
+            geom_code = (
+                f"        double dx = {dx_ir.to_cpp()};\n"
+                f"        double r_right = ({int_idx} == {res - 1}) ? ({int_idx} * dx) : ({int_idx} * dx + 0.5 * dx);\n"
+                f"        double r_left = ({int_idx} == 0) ? 0.0 : ({int_idx} * dx - 0.5 * dx);\n"
+                f"        double vol = (4.0/3.0) * {pi_val} * (std::pow(r_right, 3.0) - std::pow(r_left, 3.0));\n"
+            )
+        elif coord_sys == "cylindrical":
+            geom_code = (
+                f"        double dx = {dx_ir.to_cpp()};\n"
+                f"        double r_right = ({int_idx} == {res - 1}) ? ({int_idx} * dx) : ({int_idx} * dx + 0.5 * dx);\n"
+                f"        double r_left = ({int_idx} == 0) ? 0.0 : ({int_idx} * dx - 0.5 * dx);\n"
+                f"        double vol = {pi_val} * (std::pow(r_right, 2.0) - std::pow(r_left, 2.0));\n"
+            )
+        else: # cartesian
+            geom_code = (
+                f"        double dx = {dx_ir.to_cpp()};\n"
+                f"        double vol = ({int_idx} == 0 || {int_idx} == {res - 1}) ? 0.5 * dx : dx;\n"
+            )
+
         cpp_code = (
             f"[&]() {{\n"
             f"    double sum = 0.0;\n"
             f"    for(int {int_idx} = 0; {int_idx} < {res}; ++{int_idx}) {{\n"
-            f"        double w = ({int_idx} == 0 || {int_idx} == {res - 1}) ? 0.5 : 1.0;\n"
-            f"        sum += {child_expr.to_cpp()} * {dx_ir.to_cpp()} * w;\n"
+            f"{geom_code}"
+            f"        sum += {child_expr.to_cpp()} * vol;\n"
             f"    }}\n"
             f"    return sum;\n"
             f"}}()"
@@ -424,7 +459,7 @@ class SpatialLoweringVisitor:
         
         # 4. Final Mass Conservation Equation (Outflow - Inflow) / Volume
         # Max limit prevents 0/0 NaNs at the origin of spherical geometries
-        V_safe = FuncCall("std::max", [Literal("1e-15"), V_cell])
+        V_safe = FuncCall("std::max", [Literal("1e-30"), V_cell])
         return BinaryOp("/", BinaryOp("-", flux_out, flux_in), V_safe)
 
     # ==========================================================================

@@ -34,7 +34,7 @@ impl Default for SolverConfig {
         Self {
             rel_tol: 1e-6,
             abs_tol: 1e-8,
-            max_newton_iters: 4,
+            max_newton_iters: 20, // Increased to 20 to allow step-clamping to walk down steep cliffs
             min_dt: 1e-12,
             max_dt: std::f64::INFINITY,
             max_rho: 0.9, 

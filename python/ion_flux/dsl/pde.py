@@ -126,7 +126,8 @@ class PDE:
             compiled["domains"][d.name] = {
                 "bounds": d.bounds, 
                 "resolution": d.resolution,
-                "start_idx": getattr(d, "start_idx", 0)
+                "start_idx": getattr(d, "start_idx", 0),
+                "coord_sys": getattr(d, "coord_sys", "cartesian")
             }
             
         for target, bcs in raw.get("boundaries", {}).items():
@@ -163,7 +164,8 @@ class PDE:
                     compiled["domains"][reg.name] = {
                         "bounds": reg.bounds, 
                         "resolution": reg.resolution,
-                        "start_idx": getattr(reg, "start_idx", 0)
+                        "start_idx": getattr(reg, "start_idx", 0),
+                        "coord_sys": getattr(reg, "coord_sys", "cartesian")
                     }
             else:
                 compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict()})

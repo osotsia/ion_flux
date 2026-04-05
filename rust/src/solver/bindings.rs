@@ -5,15 +5,15 @@ use super::session::SolverHandle;
 use super::sundials::SundialsHandle;
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, record_history=false, debug=false))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, record_history=false, debug=false))]
 pub fn solve_ida_native<'py>(
     py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>,
-    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, record_history: bool, debug: bool,
+    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, record_history: bool, debug: bool,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     
     let constraints = vec![0.0; y0_py.len()];
     
-    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, constraints, p_list, m_list, spatial_diag, debug)?;
+    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, constraints, p_list, m_list, spatial_diag, max_steps, debug)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     
     let mut history = if record_history { Some(vec![(t_eval[0], y0_py.clone(), ydot0_py.clone())]) } else { None };
@@ -69,9 +69,9 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, debug, max_workers=1))]
+#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, debug, max_workers=1))]
 pub fn solve_batch_native<'py>(
-    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, debug: bool, max_workers: usize
+    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, debug: bool, max_workers: usize
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     
     let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -81,7 +81,7 @@ pub fn solve_batch_native<'py>(
             p_batch.par_iter().map(|p| {
                 let constraints = vec![0.0; y0.len()]; 
                 
-                let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), m_list.clone(), spatial_diag.clone(), debug.clone())
+                let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), m_list.clone(), spatial_diag.clone(), max_steps.clone(), debug.clone())
                     .map_err(|e| e.to_string())?;
                     
                 let mut out_traj = vec![0.0; t_eval.len() * handle.n];

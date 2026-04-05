@@ -60,11 +60,15 @@ class Scalar(Node):
     def __repr__(self) -> str: return str(self.value)
 
 class State(Node):
-    __slots__ = ["domain", "name", "_original_name"]
-    def __init__(self, domain=None, name: str = ""):
+    __slots__ = ["domain", "name", "max_newton_step", "_original_name"]
+    def __init__(self, domain=None, name: str = "", max_newton_step: Optional[float] = None):
         self.domain = domain
         self.name = name
-    def to_dict(self) -> Dict[str, Any]: return {"type": "State", "name": self.name}
+        self.max_newton_step = max_newton_step
+    def to_dict(self) -> Dict[str, Any]: 
+        d = {"type": "State", "name": self.name}
+        if self.max_newton_step is not None: d["max_newton_step"] = self.max_newton_step
+        return d
     def __repr__(self) -> str: return self.name or "<Unbound State>"
     def __set_name__(self, owner, name):
         if not self.name: self.name = name

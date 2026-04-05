@@ -269,7 +269,7 @@ def test_dae_masking_extraction_and_dirichlet():
     model = ComprehensiveBatteryModel()
     engine = Engine(model=model, target="cpu", mock_execution=True)
     
-    _, _, id_arr, _ = engine._extract_metadata()
+    _, _, id_arr, _, _ = engine._extract_metadata()
     id_arr = np.array(id_arr)
     
     # 1. c_e is a standard PDE (Should be masked as 1.0 everywhere)

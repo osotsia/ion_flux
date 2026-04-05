@@ -20,6 +20,7 @@ pub struct SolverHandle {
     pub p: Vec<f64>,
     pub m: Vec<f64>,
     pub spatial_diag: Vec<f64>,
+    pub max_steps: Vec<f64>,
     
     // Architectural State
     history: BdfHistory,
@@ -32,7 +33,7 @@ pub struct SolverHandle {
 #[pymethods]
 impl SolverHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, _debug: bool) -> PyResult<Self> {
+    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, max_steps: Vec<f64>, _debug: bool) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let res_fn: NativeResFn = unsafe { *lib.get(b"evaluate_residual\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let jac_fn: NativeJacFn = unsafe { *lib.get(b"evaluate_jacobian\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
@@ -42,7 +43,7 @@ impl SolverHandle {
 
         let mut handle = SolverHandle { 
             _lib: lib, res_fn, jac_fn, jvp_fn, n, bw, 
-            t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag,
+            t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag, max_steps,
             history, lu_solver: NativeSparseLuSolver::new(n, bw), jac_buffer: vec![0.0; n * n],
             config: SolverConfig::default(), diag: Diagnostics::default(),
         };
@@ -121,7 +122,7 @@ impl SolverHandle {
 impl SolverHandle {
     pub fn step_with_history(&mut self, dt: f64, hist: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>) -> PyResult<()> {
         step_bdf_vsvo(
-            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.m, &self.id, &self.constraints, &self.spatial_diag,
+            self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.m, &self.id, &self.constraints, &self.spatial_diag, &self.max_steps,
             dt, &mut self.history,
             self.res_fn, self.jac_fn, self.jvp_fn,
             &mut self.lu_solver, &mut self.jac_buffer, &self.config, &mut self.diag, hist, self.t

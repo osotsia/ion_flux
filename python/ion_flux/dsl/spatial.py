@@ -60,7 +60,7 @@ class Domain:
             J_mat = np.array([p[1]-p[0], p[2]-p[0], p[3]-p[0]]).T
             detJ = np.linalg.det(J_mat)
             vol = abs(detJ) / 6.0
-            if vol < 1e-15: continue
+            if vol < 1e-30: continue
             
             invJ = np.linalg.inv(J_mat)
             gradN = np.zeros((4, 3))
@@ -79,7 +79,7 @@ class Domain:
         
         for i in range(resolution):
             row_ptr[i] = len(col_ind)
-            vol_i = max(V_nodes[i], 1e-15)
+            vol_i = max(V_nodes[i], 1e-30)
             for j in range(resolution):
                 if (i, j) in K_global:
                     col_ind.append(j)
@@ -102,7 +102,7 @@ class Domain:
         return cls(bounds=(0, 1), resolution=resolution, coord_sys="unstructured", name=name, csr_data=csr_data)
         
     @property
-    def coords(self) -> Node: return UnaryOp("coords", Scalar(0.0))
+    def coords(self) -> Node: return UnaryOp("coords", Scalar(0.0), axis=self)
     @property
     def left(self) -> DomainBoundary: return DomainBoundary(self, "left")
     @property

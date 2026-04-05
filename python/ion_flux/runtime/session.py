@@ -21,7 +21,7 @@ class Session:
         self._history = {"Time [s]": [0.0]}
         self.debug = debug
         
-        y0, ydot0, id_arr, spatial_diag = engine._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag, max_steps = engine._extract_metadata()
         p_list = engine._pack_parameters(self.parameters)
         m_list = engine.layout.get_mesh_data()
         self.id_arr = np.array(id_arr)
@@ -37,7 +37,7 @@ class Session:
             else:
                 self.handle = SolverHandle(
                     engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, self.debug
+                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, max_steps, self.debug
                 )
                 try:
                     self.handle.calc_algebraic_roots()

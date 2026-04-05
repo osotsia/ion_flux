@@ -109,7 +109,7 @@ class Loss:
                 dl_dy[i] = dl_dy_macro[macro_idx]
                 macro_idx += 1
         
-        y0, ydot0, id_arr, spatial_diag = self._engine._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag, _ = self._engine._extract_metadata()
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
         
         p_grad = discrete_adjoint_native(

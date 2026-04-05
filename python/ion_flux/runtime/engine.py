@@ -141,7 +141,8 @@ class Engine:
             meta["metadata_cache"]["y0"],
             meta["metadata_cache"]["ydot0"],
             meta["metadata_cache"]["id_arr"],
-            meta["metadata_cache"].get("spatial_diag", [0.0] * engine.layout.n_states)
+            meta["metadata_cache"].get("spatial_diag", [0.0] * engine.layout.n_states),
+            meta["metadata_cache"].get("max_steps", [0.0] * engine.layout.n_states)
         )
         engine.runtime = NativeRuntime(binary_path, engine.layout.n_states)
         return engine
@@ -150,7 +151,7 @@ class Engine:
         if not getattr(self, "runtime", None) or not hasattr(self.runtime, "lib_path"):
             raise RuntimeError("Engine has not compiled a native binary. Cannot export.")
             
-        y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag, max_steps = self._extract_metadata()
         meta = {
             "layout": {
                 "state_offsets": self.layout.state_offsets,
@@ -164,7 +165,7 @@ class Engine:
             },
             "parameters": {name: p.value for name, p in self.parameters.items()},
             "jacobian_bandwidth": getattr(self, "jacobian_bandwidth", 0),
-            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr, "spatial_diag": spatial_diag}
+            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr, "spatial_diag": spatial_diag, "max_steps": max_steps}
         }
         with open(export_path + ".meta.json", "w") as f:
             json.dump(meta, f)
@@ -180,7 +181,7 @@ class Engine:
         """Initializes a stateful memory session for HIL/SIL control loops."""
         return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug)
 
-    def _extract_metadata(self) -> Tuple[List[float], List[float], List[float], List[float]]:
+    def _extract_metadata(self) -> Tuple[List[float], List[float], List[float], List[float], List[float]]:
         """
         Parses the compiled AST payload to construct the initial state (y0), 
         initial derivatives (ydot0), and the Differential/Algebraic mask (id_arr).
@@ -277,9 +278,23 @@ class Engine:
                 
             for i in range(size):
                 y0[offset + i] = _eval_ic(ic_data["value"], i, dx)
+
+        # ---------------------------------------------------------------------
+        # 3. Extract Newton Step Clamps (max_steps)
+        # ---------------------------------------------------------------------
+        max_steps = [0.0] * self.layout.n_states
+        for state_name, (offset, size) in self.layout.state_offsets.items():
+            state_node = next((s for s in self.model.components(State) if getattr(s, "name", "") == state_name), None)
+            if not state_node:
+                state_node = next((s for s in self.model.__dict__.values() if getattr(s, "name", "") == state_name), None)
+            
+            if state_node and getattr(state_node, "max_newton_step", None) is not None:
+                val = float(state_node.max_newton_step)
+                for i in range(size):
+                    max_steps[offset + i] = val
                     
-        self._metadata_cache = (y0, ydot0, id_arr, spatial_diag)
-        return y0, ydot0, id_arr, spatial_diag
+        self._metadata_cache = (y0, ydot0, id_arr, spatial_diag, max_steps)
+        return y0, ydot0, id_arr, spatial_diag, max_steps
 
     def _pack_parameters(self, overrides: Dict[str, float]) -> List[float]:
         p_list = [0.0] * self.layout.p_length
@@ -462,7 +477,7 @@ class Engine:
             
         if not RUST_FFI_AVAILABLE: raise RuntimeError(f"Native solver missing. FFI Error: {FFI_IMPORT_ERROR}")
             
-        y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag, max_steps = self._extract_metadata()
         p_list = self._pack_parameters(parameters or {})
         m_list = self.layout.get_mesh_data()
         
@@ -477,7 +492,7 @@ class Engine:
             else:
                 y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
                     self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), 
-                    self.jacobian_bandwidth, spatial_diag, record_history, self.debug
+                    self.jacobian_bandwidth, spatial_diag, max_steps, record_history, self.debug
                 )
         except RuntimeError as e:
             self._handle_native_crash(e)
@@ -510,7 +525,7 @@ class Engine:
         if self.mock_execution or not RUST_FFI_AVAILABLE:
             return [self.solve(t_span=t_span, protocol=protocol, parameters=p) for p in parameters]
 
-        y0, ydot0, id_arr, spatial_diag = self._extract_metadata()
+        y0, ydot0, id_arr, spatial_diag, max_steps = self._extract_metadata()
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
         m_list = self.layout.get_mesh_data()
@@ -518,7 +533,7 @@ class Engine:
         try:
             y_res_batch = solve_batch_native(
                 self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, 
-                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, self.debug, max_workers
+                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.debug, max_workers
             )
         except RuntimeError as e:
             self._handle_native_crash(e)

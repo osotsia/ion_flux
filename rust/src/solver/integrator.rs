@@ -183,7 +183,7 @@ impl BdfHistory {
 
 pub fn step_bdf_vsvo(
     n: usize, bw: isize,
-    y: &mut[f64], ydot: &mut[f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
+    y: &mut[f64], ydot: &mut[f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     target_dt: f64,
     history: &mut BdfHistory,
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
@@ -231,7 +231,7 @@ pub fn step_bdf_vsvo(
         for i in 0..n { weights[i] = 1.0 / (config.rel_tol * history.phi[0][i].abs() + config.abs_tol); }
 
         let newton_res = solve_nonlinear_system(
-            n, bw, y, ydot, p, m, id, constraints, spatial_diag,
+            n, bw, y, ydot, p, m, id, constraints, spatial_diag, max_steps,
             history.c_j, &mut history.c_j_old, &history.phi[0],
             &y_pred, &ydot_pred, &weights, res_fn, jac_fn, jvp_fn,
             lu_solver, jac_buffer, config, diag
@@ -290,7 +290,7 @@ pub fn step_bdf_vsvo(
                     }
                     
                     if history.h <= config.min_dt {
-                        dump_crash_report(diag, y, ydot, id, "Tolerance Starvation: Truncation error > 1.0");
+                        super::integrator::dump_crash_report(diag, y, ydot, id, "Tolerance Starvation: Truncation error > 1.0");
                         return Err(format!("Step collapsed below min_dt. t={}", abs_t + t_local));
                     }
                     continue;
@@ -329,7 +329,7 @@ pub fn step_bdf_vsvo(
                 lu_solver.mark_stale();
 
                 if history.h <= config.min_dt {
-                    dump_crash_report(diag, y, ydot, id, "Nonlinear Divergence");
+                    super::integrator::dump_crash_report(diag, y, ydot, id, "Nonlinear Divergence");
                     return Err(format!("Step collapsed below min_dt. t={}", abs_t + t_local));
                 }
             },
@@ -340,7 +340,7 @@ pub fn step_bdf_vsvo(
                 lu_solver.mark_stale();
 
                 if history.h <= config.min_dt {
-                    dump_crash_report(diag, y, ydot, id, "Constraint Violation Starvation");
+                    super::integrator::dump_crash_report(diag, y, ydot, id, "Constraint Violation Starvation");
                     return Err(format!("Step collapsed below min_dt. t={}", abs_t + t_local));
                 }
             }

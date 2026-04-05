@@ -31,7 +31,7 @@ pub enum NewtonResult {
 /// SUNDIALS Inexact Newton-Raphson implementation
 pub fn solve_nonlinear_system(
     n: usize, bw: isize,
-    y: &mut[f64], ydot: &mut [f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64],
+    y: &mut[f64], ydot: &mut [f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     c_j: f64, c_j_last_setup: &mut f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
     res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
@@ -125,7 +125,23 @@ pub fn solve_nonlinear_system(
                 for i in 0..n { dy[i] *= scale; }
             }
 
-            for i in 0..n { ee[i] += dy[i]; }
+            // --- Vector-wise Damping (Newton Step Clamping) ---
+            let mut min_eta = 1.0_f64;
+            for i in 0..n {
+                if max_steps[i] > 0.0 && dy[i].abs() > max_steps[i] {
+                    let eta = max_steps[i] / dy[i].abs();
+                    if eta < min_eta { min_eta = eta; }
+                }
+            }
+            
+            let is_clamped = min_eta < 1.0;
+            
+            for i in 0..n {
+                dy[i] *= min_eta;
+                ee[i] += dy[i];
+            }
+            // -------------------------------------------------------
+
             let dy_norm = wrms_norm_all(&dy, weights);
             diag.last_dy = dy.clone();
             diag.last_weights = weights.to_vec();
@@ -141,7 +157,8 @@ pub fn solve_nonlinear_system(
                 diag.last_rho = rate;
                 
                 // 4. Early Divergence Detection (Thrashing)
-                if rate > config.max_rho {
+                // Bypass thrashing false-positives if the step was artificially clamped
+                if rate > config.max_rho && !is_clamped {
                     let fail = NewtonFailure::ContractionThrashing(rate);
                     if is_stale_at_start && bw != -1 {
                         retry = true;
