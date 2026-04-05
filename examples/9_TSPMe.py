@@ -29,6 +29,13 @@ class ExactTSPMe(fx.PDE):
     c_s_n = fx.State(domain=r_n, name="c_s_n")
     c_s_p = fx.State(domain=r_p, name="c_s_p")
     
+    # Context Anchors: These dummy states explicitly bind the sub-regions to the AST.
+    # This guarantees fx.integral() correctly applies spatial offsets (e.g. +80 for x_p)
+    # when pulling values from the global c_e array.
+    ctx_n = fx.State(domain=x_n, name="ctx_n")
+    ctx_s = fx.State(domain=x_s, name="ctx_s")
+    ctx_p = fx.State(domain=x_p, name="ctx_p")
+    
     T_cell = fx.State(domain=None, name="T_cell") # 0D Lumped Thermal ODE
     V_cell = fx.State(domain=None, name="V_cell") # 0D Algebraic Voltage Constraint
     i_app = fx.State(domain=None, name="i_app")   # 0D Cycler terminal 
@@ -48,18 +55,17 @@ class ExactTSPMe(fx.PDE):
         eps_n, eps_s, eps_p = 0.25, 0.47, 0.335
         b_brug = 1.5
         
-        a_n = 3.0 * eps_n / 5.86e-6
-        a_p = 3.0 * eps_p / 5.22e-6
+        a_n = 3.84e5
+        a_p = 3.82e5
         c_max_n, c_max_p = 33133.0, 63104.0
         sig_n, sig_p = 215.0, 0.18
         m_n, m_p = 6.48e-7, 3.42e-6
         
         De_ref, sig_e_ref, t_plus = 3e-10, 1.0, 0.2594
         
-        # Thermal Parameters
-        theta_heat = 2.85e6  # Volumetric Heat Capacity [J/K m^3]
-        h_cool = 20.0        # Heat Transfer Coefficient [W/K m^2]
-        a_cool = 219.42      # Cooling Surface Area Density [m^-1]
+        theta_heat = 2.85e6  
+        h_cool = 20.0        
+        a_cool = 219.42      
 
         def arrh(Ea):
             return fx.exp((Ea / R_const) * (1.0 / T_amb - 1.0 / self.T_cell))
@@ -67,7 +73,6 @@ class ExactTSPMe(fx.PDE):
         Ds_n = 3.3e-14 * arrh(17393.0)
         Ds_p = 4.0e-15 * arrh(12047.0)
 
-        # Mathematical AST Identity Helpers
         def arcsinh_ast(x):
             return fx.log(x + (x**2 + 1.0)**0.5)
 
@@ -80,11 +85,9 @@ class ExactTSPMe(fx.PDE):
         # ---------------------------------------------------------------------
         i_den = self.i_app / A_elec
         
-        # Homogeneous volumetric reaction currents
         j_vol_n = i_den / L_n
         j_vol_p = -i_den / L_p
         
-        # Rigorous Physical Clamps: Prevents NaN propagation if BDF solver overshoots
         c_surf_n = fx.min(fx.max(self.c_s_n.boundary("right", domain=self.r_n), 10.0), c_max_n - 10.0)
         c_surf_p = fx.min(fx.max(self.c_s_p.boundary("right", domain=self.r_p), 10.0), c_max_p - 10.0)
         ce_safe = fx.max(self.c_e, 1.0)
@@ -92,7 +95,6 @@ class ExactTSPMe(fx.PDE):
         x_n = c_surf_n / c_max_n
         x_p = c_surf_p / c_max_p
 
-        # Equilibrium Potentials (O'Regan LG M50 fits)
         U_n = (1.9793 * fx.exp(-39.3631 * x_n) + 0.2482 
                - 0.0909 * tanh_ast(29.8538 * (x_n - 0.1234)) 
                - 0.04478 * tanh_ast(14.9159 * (x_n - 0.2769)) 
@@ -105,28 +107,24 @@ class ExactTSPMe(fx.PDE):
         
         U_eq = U_p - U_n
         
-        # Exchange current densities
         j0_n = m_n * (ce_safe * c_surf_n * (c_max_n - c_surf_n))**0.5 * arrh(40000.0)
         j0_p = m_p * (ce_safe * c_surf_p * (c_max_p - c_surf_p))**0.5 * arrh(24000.0)
 
         # ---------------------------------------------------------------------
         # Voltage Resolution (Eq. 8a-8f)
         # ---------------------------------------------------------------------
-        # Reaction Overpotentials (No spatial integration required for SPM!)
         term_n = i_den / (a_n * L_n * j0_n)
         term_p = i_den / (a_p * L_p * j0_p)
         
-        eta_r_n = - (2.0 * R_const * self.T_cell / F) * arcsinh_ast(term_n)
-        eta_r_p = - (2.0 * R_const * self.T_cell / F) * arcsinh_ast(term_p)
+        eta_r_n = - (2.0 * R_const * self.T_cell / F) * (fx.integral(arcsinh_ast(term_n), over=self.x_n) / L_n)
+        eta_r_p = - (2.0 * R_const * self.T_cell / F) * (fx.integral(arcsinh_ast(term_p), over=self.x_p) / L_p)
         eta_r = eta_r_n + eta_r_p
         
-        # Concentration Overpotential
         eta_e = (1.0 - t_plus) * (2.0 * R_const * self.T_cell / F) * (
             fx.integral(fx.log(ce_safe), over=self.x_p) / L_p - 
             fx.integral(fx.log(ce_safe), over=self.x_n) / L_n
         )
         
-        # Exact Algebraic Ohmic Drops (Eq. 16 approximation)
         R_s_ohm = (L_n / sig_n + L_p / sig_p) / 3.0
         dPhi_s = -i_den * R_s_ohm
         
@@ -141,7 +139,6 @@ class ExactTSPMe(fx.PDE):
         # ---------------------------------------------------------------------
         # Heat Generation (Eq. 5c-5f)
         # ---------------------------------------------------------------------
-        # Exact Algebraic Heat Source Constants (Eq. 17 approximation)
         Q_s = (i_den ** 2) * R_s_ohm / L_cell
         Q_e = (i_den ** 2) * R_e_ohm / L_cell - (i_den * eta_e / L_cell)
         Q_irr = i_den * fx.abs(eta_r) / L_cell 
@@ -164,24 +161,24 @@ class ExactTSPMe(fx.PDE):
         flux_ce_p = -De_eff_p * fx.grad(self.c_e)
 
         # ---------------------------------------------------------------------
-        # Equation Targeting (Decoupled & Explicit)
+        # Equation Targeting
         # ---------------------------------------------------------------------
         return {
             "equations": {
-                # Electrolyte PDE
                 self.c_e: fx.Piecewise({
                     self.x_n: eps_n * fx.dt(self.c_e) == -fx.div(flux_ce_n) + (1.0 - t_plus) * j_vol_n / F,
                     self.x_s: eps_s * fx.dt(self.c_e) == -fx.div(flux_ce_s),
                     self.x_p: eps_p * fx.dt(self.c_e) == -fx.div(flux_ce_p) + (1.0 - t_plus) * j_vol_p / F
                 }),
-                # Solid Diffusion PDEs
                 self.c_s_n: fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n),
                 self.c_s_p: fx.dt(self.c_s_p) == -fx.div(N_s_p, axis=self.r_p),
                 
-                # 0D Thermal ODE
-                self.T_cell: fx.dt(self.T_cell) == (Q_tot - Q_cool) / theta_heat,
+                # Resolving context explicitly 
+                self.ctx_n: fx.dt(self.ctx_n) == 0.0,
+                self.ctx_s: fx.dt(self.ctx_s) == 0.0,
+                self.ctx_p: fx.dt(self.ctx_p) == 0.0,
                 
-                # 0D Algebraic Terminal Constraint
+                self.T_cell: fx.dt(self.T_cell) == (Q_tot - Q_cool) / theta_heat,
                 self.V_cell: self.V_cell == V_total
             },
             
@@ -196,15 +193,15 @@ class ExactTSPMe(fx.PDE):
                 self.c_e: 1000.0,     
                 self.c_s_n: 29866.0,  
                 self.c_s_p: 17038.0,
+                self.ctx_n: 0.0, self.ctx_s: 0.0, self.ctx_p: 0.0,
                 self.T_cell: 298.15,   
-                self.V_cell: 4.10, # BDF solver snaps this exactly to U_eq at t=0
+                self.V_cell: 4.10, 
                 self.i_app: 0.0
             }
         }
 
 if __name__ == "__main__":
     
-    # Bandwidth=0 invokes the Dense LU factorizer, bypassing sparse geometry overhead
     engine = fx.Engine(model=ExactTSPMe(), target="cpu:serial", jacobian_bandwidth=0)
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
@@ -212,7 +209,6 @@ if __name__ == "__main__":
     
     for name, current in rates.items():
         print(f"Simulating {name} discharge...")
-        # Discharge cycle down to the 2.5V structural cut-off
         protocol = Sequence([
             CC(rate=current, until=engine.model.V_cell <= 2.5, time=7200)
         ])

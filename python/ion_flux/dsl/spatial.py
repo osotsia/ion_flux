@@ -35,8 +35,10 @@ class Domain:
 
     def region(self, bounds: tuple, resolution: int, name: str) -> "Domain":
         """Creates a topological sub-mesh that shares the memory array stride of the parent Domain."""
-        parent_dx = (self.bounds[1] - self.bounds[0]) / max(1, self.resolution - 1)
-        start_idx = int(round((bounds[0] - self.bounds[0]) / parent_dx))
+        # Use fractional length * parent resolution to prevent floating point orphaned nodes
+        # when users perfectly tile face-sharing sub-regions.
+        frac = (bounds[0] - self.bounds[0]) / (self.bounds[1] - self.bounds[0])
+        start_idx = int(round(frac * self.resolution))
         return Domain(bounds, resolution, coord_sys=self.coord_sys, name=name, parent=self, start_idx=start_idx)
 
     @classmethod
