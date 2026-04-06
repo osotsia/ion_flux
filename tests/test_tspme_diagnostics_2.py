@@ -40,6 +40,9 @@ class DepletionRateProbe(fx.PDE):
     c_geo = fx.State(domain=r, name="c_geo")
     c_tab = fx.State(domain=r, name="c_tab")
     
+    c_geo_avg = fx.State(domain=None, name="c_geo_avg")
+    c_tab_avg = fx.State(domain=None, name="c_tab_avg")
+    
     def math(self):
         F = 96485.0
         A_elec = 0.10269  # m^2 (Derived from 5Ah / 48.69 A/m^2)
@@ -54,10 +57,14 @@ class DepletionRateProbe(fx.PDE):
         flux_geo = -1e-14 * fx.grad(self.c_geo, axis=self.r)
         flux_tab = -1e-14 * fx.grad(self.c_tab, axis=self.r)
         
+        vol = (4.0/3.0) * np.pi * (5.86e-6)**3
+        
         return {
             "equations": {
                 self.c_geo: fx.dt(self.c_geo) == -fx.div(flux_geo, axis=self.r),
-                self.c_tab: fx.dt(self.c_tab) == -fx.div(flux_tab, axis=self.r)
+                self.c_tab: fx.dt(self.c_tab) == -fx.div(flux_tab, axis=self.r),
+                self.c_geo_avg: self.c_geo_avg == fx.integral(self.c_geo, over=self.r) / vol,
+                self.c_tab_avg: self.c_tab_avg == fx.integral(self.c_tab, over=self.r) / vol
             },
             "boundaries": {
                 flux_geo: {"left": 0.0, "right": j_vol / (a_geo * F)},
@@ -65,7 +72,9 @@ class DepletionRateProbe(fx.PDE):
             },
             "initial_conditions": {
                 self.c_geo: 29866.0,
-                self.c_tab: 29866.0
+                self.c_tab: 29866.0,
+                self.c_geo_avg: 29866.0,
+                self.c_tab_avg: 29866.0
             }
         }
 
@@ -81,8 +90,8 @@ def test_depletion_rate_scaling():
     t_eval = np.linspace(0, 0.36 * 3600, 50)
     res = engine.solve(t_eval=t_eval)
 
-    c_geo_final = np.mean(res["c_geo"].data[-1])
-    c_tab_final = np.mean(res["c_tab"].data[-1])
+    c_geo_final = res["c_geo_avg"].data[-1]
+    c_tab_final = res["c_tab_avg"].data[-1]
 
     # c_geo depletes 3x faster, hitting 0 before 1.8 Ah.
     assert c_geo_final < 0.0, "Geometric scaling failed to fully deplete the particle."

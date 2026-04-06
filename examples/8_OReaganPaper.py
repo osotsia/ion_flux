@@ -28,10 +28,10 @@ class DFN(fx.PDE):
     c_e = fx.State(domain=cell, name="c_e")
     
     # Clamps restored to prevent intermediate spatial migration (grad phi) explosions
-    phi_e = fx.State(domain=cell, name="phi_e", max_newton_step=0.05)
-    phi_s_n = fx.State(domain=x_n, name="phi_s_n", max_newton_step=0.05)
-    phi_s_p = fx.State(domain=x_p, name="phi_s_p", max_newton_step=0.05)
-    V_cell = fx.State(domain=None, name="V_cell", max_newton_step=0.05) 
+    phi_e = fx.State(domain=cell, name="phi_e")
+    phi_s_n = fx.State(domain=x_n, name="phi_s_n")
+    phi_s_p = fx.State(domain=x_p, name="phi_s_p")
+    V_cell = fx.State(domain=None, name="V_cell") 
     
     c_s_n = fx.State(domain=x_n * r_n, name="c_s_n")
     c_s_p = fx.State(domain=x_p * r_p, name="c_s_p")

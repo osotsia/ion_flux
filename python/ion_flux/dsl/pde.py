@@ -127,7 +127,8 @@ class PDE:
                 "bounds": d.bounds, 
                 "resolution": d.resolution,
                 "start_idx": getattr(d, "start_idx", 0),
-                "coord_sys": getattr(d, "coord_sys", "cartesian")
+                "coord_sys": getattr(d, "coord_sys", "cartesian"),
+                "parent": d.parent.name if getattr(d, "parent", None) else None
             }
             
         for target, bcs in raw.get("boundaries", {}).items():
@@ -165,7 +166,8 @@ class PDE:
                         "bounds": reg.bounds, 
                         "resolution": reg.resolution,
                         "start_idx": getattr(reg, "start_idx", 0),
-                        "coord_sys": getattr(reg, "coord_sys", "cartesian")
+                        "coord_sys": getattr(reg, "coord_sys", "cartesian"),
+                        "parent": reg.parent.name if getattr(reg, "parent", None) else None
                     }
             else:
                 compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict()})

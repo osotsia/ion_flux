@@ -254,8 +254,18 @@ class SpatialLoweringVisitor:
                 
         if domain_obj is None:
             # Fallback: create a mock domain to satisfy coordinate and spatial lookups
-            start_idx = self.ctx.payload["domains"][target_domain_name].get("start_idx", 0)
-            domain_obj = type("MockDomain", (), {"name": target_domain_name, "start_idx": start_idx, "coord_sys": coord_sys})()
+            domain_info = self.ctx.payload["domains"].get(target_domain_name, {})
+            start_idx = domain_info.get("start_idx", 0)
+            parent_name = domain_info.get("parent")
+            
+            parent_obj = type("MockDomain", (), {"name": parent_name})() if parent_name else None
+            
+            domain_obj = type("MockDomain", (), {
+                "name": target_domain_name, 
+                "start_idx": start_idx, 
+                "coord_sys": coord_sys,
+                "parent": parent_obj
+            })()
             
         self.current_domain = domain_obj
         self.is_piecewise = False  # The integral loop evaluates as a standard 0..res local loop
