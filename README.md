@@ -100,7 +100,7 @@ class SingleParticleModel(fx.PDE):
         j_flux = self.i_app / 96485.0
 
         return {
-            # --- Explicit Equation Targeting (V2 API) ---
+            # --- Explicit Equation Targeting ---
             # Maps the governing equations (ODEs, PDEs, and DAEs) directly to 
             # their target state nodes. The engine automatically classifies
             # differential (fx.dt) vs. algebraic constraints natively.
@@ -112,7 +112,7 @@ class SingleParticleModel(fx.PDE):
                 self.V_cell: self.V_cell == (4.2 - 0.0001 * c_surf_p) - (0.1 - 0.0001 * c_surf_n) - 0.02 * self.i_app
             },
             
-            # --- Spatial Boundaries (V2 API) ---
+            # --- Spatial Boundaries ---
             # Dictates local Dirichlet overrides or Neumann flux injections.
             # Structured as a nested dictionary mapping target Tensors (Neumann) 
             # or States (Dirichlet) to their respective boundary faces.
@@ -121,7 +121,7 @@ class SingleParticleModel(fx.PDE):
                 flux_p: {"left": 0.0, "right": j_flux}
             },
             
-            # --- Initial Conditions (V2 API) ---
+            # --- Initial Conditions ---
             # Evaluated algebraically at t=0 to populate the dense starting vector.
             "initial_conditions": {
                 self.c_s_n: 800.0,
@@ -155,7 +155,7 @@ result = engine.solve(protocol=protocol)
 result.plot_dashboard() # Launches an interactive time-scrubbing UI
 ```
 
-For **Real-Time HIL/SIL (Battery Management Systems)**, V2 uses a **Stateful Session Generator**. Only simple scalar inputs cross the Python/Rust FFI boundary, enabling microsecond-latency control loops.
+For **Real-Time HIL/SIL (Battery Management Systems)**, we use a **Stateful Session Generator**. Only simple scalar inputs cross the Python/Rust FFI boundary, enabling microsecond-latency control loops.
 
 ```python
 session = engine.start_session(parameters={"Ds_n": 2e-14})
@@ -189,6 +189,6 @@ while session.time < 60.0:
 
 **Q3: How does Enzyme Automatic Differentiation (AD) interact with stiff PDEs?**
 
-**A:** Traditional autodiff frameworks (like JAX or PyTorch) build massive computational graphs in memory, which scales poorly for stiff PDEs requiring thousands of implicit time steps. Enzyme operates at the LLVM IR level, performing AD *after* the code is optimized. `ion_flux` uses Enzyme in two passes:
+**A:** Traditional autodiff frameworks (like JAX or PyTorch) build massive computational graphs in memory, which scales poorly for stiff PDEs requiring thousands of implicit time steps. Enzyme operates at the LLVM IR level, performing AD *after* the code is optimized. `ion_flux` uses this Enzyme capability in two passes:
 1.  **Forward-mode:** To automatically generate exact, analytical Jacobians for the implicit solver's Newton iterations (guaranteeing quadratic convergence).
 2.  **Reverse-mode (Adjoint):** To trace sensitivities backward through the time-stepping trajectory, allowing you to compute the gradient of a loss function with respect to any parameter without storing the entire forward memory state.

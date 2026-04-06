@@ -13,6 +13,7 @@ pub struct NativeSparseLuSolver {
     symbolic: Option<SymbolicLu<usize>>, 
     numeric: Option<Lu<usize, f64>>,     
     pub triplets: Vec<(usize, usize, f64)>,
+    cached_pattern: Vec<(usize, usize)>,
     pub row_scales: Vec<f64>,
 }
 
@@ -27,6 +28,7 @@ impl NativeSparseLuSolver {
             symbolic: None,
             numeric: None,
             triplets: Vec::with_capacity(estimated_nnz),
+            cached_pattern: Vec::with_capacity(estimated_nnz),
             row_scales: vec![1.0; n],
         }
     }
@@ -61,6 +63,31 @@ impl NativeSparseLuSolver {
                 self.triplets.push((c, c, 1e-14)); 
             }
         }
+
+        // --- PROACTIVE SPARSITY CHECK ---
+        // Faer's SymbolicLu aggressively caches the structural sparsity pattern.
+        // If physics derivatives underflow to exactly 0.0 (e.g., saturation plateaus),
+        // the number of triplets fluctuates. Passing a mismatched structure to faer
+        // triggers a hard panic. We proactively detect structural shifts to safely 
+        // rebuild the symbolic cache without relying on expensive catch_unwind boundaries.
+        let mut pattern_changed = self.triplets.len() != self.cached_pattern.len();
+        if !pattern_changed {
+            for i in 0..self.triplets.len() {
+                if self.triplets[i].0 != self.cached_pattern[i].0 || self.triplets[i].1 != self.cached_pattern[i].1 {
+                    pattern_changed = true;
+                    break;
+                }
+            }
+        }
+
+        if pattern_changed {
+            self.symbolic = None;
+            self.cached_pattern.clear();
+            for &(r, c, _) in &self.triplets {
+                self.cached_pattern.push((r, c));
+            }
+        }
+        // --------------------------------
 
         // FAER v0.20 panic boundary trap for structurally singular networks
         let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| {
