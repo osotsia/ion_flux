@@ -68,7 +68,8 @@ class PiecewiseMicroRoutingOracle(fx.PDE):
 
 @REQUIRES_COMPILER
 def test_piecewise_micro_domain_routing():
-    engine = Engine(model=PiecewiseMicroRoutingOracle(), target="cpu", mock_execution=False)
+    model = PiecewiseMicroRoutingOracle()
+    engine = Engine(model=model, target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y0, ydot0, _, _, _ = engine._extract_metadata()
@@ -79,32 +80,28 @@ def test_piecewise_micro_domain_routing():
     y0[off_csp : off_csp + size_csp] = np.arange(size_csp)
     
     # The true physical surface values are at local indices 9, 19, 29, ..., 629
-    true_surface_vals = np.arange(9, 630, 10)
+    true_surface_vals = np.arange(9, model.x_p.resolution * 10, 10)
     
     res = engine.evaluate_residual(y0.tolist(), ydot0, parameters={})
     
     # Extract the values evaluated during the Piecewise loop
     off_ce, size_ce = engine.layout.state_offsets["c_e"]
+        
+    # We must extract using the exact start_idx calculated by the compiler
+    start = model.x_p.start_idx
+    end = start + model.x_p.resolution
     
     # The residual equation is F = ydot - rhs = 0.0 - c_surf_p -> rhs = -F
-    extracted_surfaces = -np.array(res[off_ce + 81 : off_ce + 144])
+    extracted_surfaces = -np.array(res[off_ce + start : off_ce + end])
     
-    # If the compiler is correct, the piecewise loop fetched the exact same 
-    # array of surface nodes (9, 19, ..., 629).
-    # If the bug is active, it fetched indices like 89, 89, 99, 99, ..., 149.
     is_corrupted = not np.allclose(extracted_surfaces, true_surface_vals)
     
-    assert is_corrupted, \
-        "The bug was NOT detected. The compiler successfully routed the indices."
-        
-    if is_corrupted:
-        pytest.fail(
-            f"\nBUG CONFIRMED: The AST compiler incorrectly routed the macro-to-micro "
-            f"surface extraction inside a Piecewise loop!\n"
-            f"Expected: {true_surface_vals[:5]}...\n"
-            f"Actual:   {extracted_surfaces[:5]}...\n"
-            f"This destroys the electrolyte concentration gradient inside the cathode."
-        )
+    assert not is_corrupted, \
+        f"\nBUG CONFIRMED: The AST compiler incorrectly routed the macro-to-micro " \
+        f"surface extraction inside a Piecewise loop!\n" \
+        f"Expected: {true_surface_vals[:5]}...\n" \
+        f"Actual:   {extracted_surfaces[:5]}...\n" \
+        f"This destroys the electrolyte concentration gradient inside the cathode."
 
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])

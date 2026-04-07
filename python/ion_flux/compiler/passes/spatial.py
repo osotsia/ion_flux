@@ -52,6 +52,12 @@ class SpatialLoweringVisitor:
         self.current_axis = None
         self.use_ydot = False
 
+    def _get_local_idx(self, idx: Expr) -> Expr:
+        """Returns the localized dimensional index, stripping global Piecewise offsets."""
+        start_idx = getattr(self.current_domain, "start_idx", 0)
+        if getattr(self, "is_piecewise", False) and start_idx > 0:
+            return BinaryOp("-", idx, Literal(start_idx))
+        return idx
 
     def _get_topological_idx(self, idx: Expr) -> Expr:
         """Returns the absolute topological index, regardless of Piecewise or Standard loop bounds."""
@@ -131,11 +137,13 @@ class SpatialLoweringVisitor:
         offset, size = self.layout.state_offsets[node["name"]]
         state_obj = self.state_map.get(node["name"])
         target_domain = getattr(state_obj, "domain", None)
-        eval_idx = idx
+        
+        local_idx = self._get_local_idx(idx)
+        eval_idx = local_idx
         
         # Handle hierarchical cross-mesh access (e.g. macro variable accessed by a micro equation)
         if self.current_domain and target_domain and self.current_domain != target_domain:
-            eval_idx = self._resolve_cross_domain_index(idx, target_domain)
+            eval_idx = self._resolve_cross_domain_index(local_idx, target_domain)
                     
         # Array bounds safety mechanism
         clamped_idx = FuncCall("CLAMP", [eval_idx, Literal(size)])
@@ -158,12 +166,17 @@ class SpatialLoweringVisitor:
         return base_access
 
     def _lower_boundary(self, node: Dict[str, Any], idx: Expr) -> Expr:
-        """Translates `state.right` or `state.left` into a locked index evaluation."""
+        """Translates `node.right` or `node.left` into a locked index evaluation."""
         side = node["side"]
         
-        if node["child"].get("type") == "State":
-            state_name = node["child"]["name"]
+        from ion_flux.compiler.codegen.ast_analysis import extract_state_names
+        state_names = extract_state_names(node["child"])
+        
+        if state_names:
+            state_name = state_names[0]
             _, size = self.layout.state_offsets[state_name]
+            state_obj = self.state_map.get(state_name)
+            target_domain = getattr(state_obj, "domain", None)
             
             # Default behavior: grab absolute end of the array
             b_idx = Literal(0) if side == "left" else Literal(size - 1)
@@ -171,19 +184,20 @@ class SpatialLoweringVisitor:
             # Complex behavior: If the state is a 2D composite domain (Macro * Micro),
             # grabbing the "right" boundary means grabbing the right surface of the micro
             # particle at the *current* Macro slice being iterated over.
-            state_obj = self.state_map.get(state_name)
-            if state_obj and hasattr(state_obj.domain, "domains") and len(state_obj.domain.domains) == 2:
-                macro_domain, micro_domain = state_obj.domain.domains
+            if target_domain and type(target_domain).__name__ == "CompositeDomain" and len(target_domain.domains) == 2:
+                macro_domain, micro_domain = target_domain.domains
                 
                 if node.get("domain") == micro_domain.name:
-                    if self.current_domain and getattr(self.current_domain, "name", "") == macro_domain.name:
-                        base = BinaryOp("*", idx, Literal(micro_domain.resolution))
-                    else:
-                        base = BinaryOp("*", BinaryOp("/", idx, Literal(micro_domain.resolution)), Literal(micro_domain.resolution))
-                        
+                    macro_idx = self._resolve_cross_domain_index(self._get_local_idx(idx), macro_domain)
+                    base = BinaryOp("*", macro_idx, Literal(micro_domain.resolution))
                     b_idx = base if side == "left" else BinaryOp("+", base, Literal(micro_domain.resolution - 1))
                     
-            return self.lower(node["child"], b_idx, face=None)
+            # Temporarily switch context so nested expressions don't doubly-convert the index
+            prev_domain = self.current_domain
+            self.current_domain = target_domain
+            res = self.lower(node["child"], b_idx, face=None)
+            self.current_domain = prev_domain
+            return res
             
         return self.lower(node["child"], idx, face=None)
 
@@ -505,25 +519,26 @@ class SpatialLoweringVisitor:
         # Standard 1D memory array jump
         return BinaryOp("+", base_idx, Literal(offset))
 
-    def _resolve_cross_domain_index(self, idx: Expr, target_domain: Any) -> Expr:
+    def _resolve_cross_domain_index(self, local_idx: Expr, target_domain: Any) -> Expr:
         """Translates indices when evaluating equations spanning different spatial domains."""
         if type(self.current_domain).__name__ == "CompositeDomain" and len(self.current_domain.domains) == 2:
             macro_domain, micro_domain = self.current_domain.domains
             if target_domain.name == macro_domain.name:
-                return BinaryOp("/", idx, Literal(micro_domain.resolution))
+                return BinaryOp("/", local_idx, Literal(micro_domain.resolution))
             elif target_domain.name == micro_domain.name:
-                return BinaryOp("%", idx, Literal(micro_domain.resolution))
+                return BinaryOp("%", local_idx, Literal(micro_domain.resolution))
         else:
             target_parent = getattr(target_domain, "parent", None)
             current_parent = getattr(self.current_domain, "parent", None)
+            curr_name = getattr(self.current_domain, "name", "")
             
             # Topological Sub-meshing offsets (e.g. Anode Sub-Mesh starts at index 0, Separator starts at index 40)
-            if target_parent and target_parent.name == self.current_domain.name:
-                return BinaryOp("-", idx, Literal(target_domain.start_idx))
+            if target_parent and target_parent.name == curr_name:
+                return BinaryOp("-", local_idx, Literal(target_domain.start_idx))
             elif current_parent and current_parent.name == target_domain.name:
-                return BinaryOp("+", idx, Literal(self.current_domain.start_idx))
+                return BinaryOp("+", local_idx, Literal(getattr(self.current_domain, "start_idx", 0)))
                 
-        return idx
+        return local_idx
 
     def _stitch_piecewise_fluxes(self, right_flux: Expr, left_flux: Expr, idx: Expr):
         """

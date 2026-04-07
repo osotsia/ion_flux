@@ -13,7 +13,7 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 import ion_flux as fx
-from ion_flux.protocols import Sequence, CC
+from ion_flux.protocols import Sequence, CC, Rest
 
 class ExactTSPMe(fx.PDE):
     """
@@ -43,13 +43,15 @@ class ExactTSPMe(fx.PDE):
     V_cell = fx.State(domain=None, name="V_cell") # 0D Algebraic Voltage Constraint
     i_app = fx.State(domain=None, name="i_app")   # 0D Cycler terminal 
     
+    T_amb = fx.Parameter(default=298.15, name="T_amb")
+    
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
         # =====================================================================
         # Parameters (Table 1: LG M50 & Table 4: Tuned Thermal Parameters)
         # =====================================================================
-        F, R_const, T_amb = 96485.0, 8.314, 298.15
+        F, R_const, T_ref = 96485.0, 8.314, 298.15
         
         # Macro dimensions [m] & Electrode Area [m^2]
         L_n, L_s, L_p = 85.2e-6, 12.0e-6, 75.6e-6
@@ -70,13 +72,13 @@ class ExactTSPMe(fx.PDE):
         De_ref, sig_e_ref, t_plus = 3e-10, 1.0, 0.2594
         
         # Thermal Properties (Table 4 for h_cool & Table 1 for theta_heat)
-        theta_heat = 2.85e6  # Volumetric heat capacity [J / (K m^3)]
-        h_cool = 20.0        # Heat exchange coefficient [W / (K m^2)]
+        theta_heat = 2.32e6  # Tuned volumetric heat capacity [J / (K m^3)]
+        h_cool = 16.0        # Tuned heat exchange coefficient [W / (K m^2)]
         a_cool = 219.42      # Cooling surface area density [1/m]
 
         # Arrhenius Temperature scaling for Solid Diffusion
         def arrh(Ea):
-            return fx.exp((Ea / R_const) * (1.0 / T_amb - 1.0 / self.T_cell))
+            return fx.exp((Ea / R_const) * (1.0 / T_ref - 1.0 / self.T_cell))
 
         Ds_n = 3.3e-14 * arrh(17393.0)
         Ds_p = 4.0e-15 * arrh(12047.0)
@@ -160,7 +162,7 @@ class ExactTSPMe(fx.PDE):
         Q_e = (i_den ** 2) * R_e_ohm / L_cell - (i_den * eta_e / L_cell) # Electrolyte Heating (Eq. 17)
         Q_irr = i_den * fx.abs(eta_r) / L_cell                     # Irreversible Reaction Heating (Eq. 5e)
         
-        Q_cool = h_cool * a_cool * (self.T_cell - T_amb)           # Newton Cooling to Ambient (Eq. 5a)
+        Q_cool = h_cool * a_cool * (self.T_cell - self.T_amb)      # Newton Cooling to Ambient (Eq. 5a)
         Q_tot = Q_s + Q_e + Q_irr                                  # Total Heat Source
 
         # =====================================================================
@@ -208,7 +210,7 @@ class ExactTSPMe(fx.PDE):
                 self.c_e: 1000.0,     
                 self.c_s_n: 29866.0,  
                 self.c_s_p: 17038.0,
-                self.T_cell: 298.15,   
+                self.T_cell: self.T_amb,   
                 self.V_cell: 4.10, 
                 self.i_app: 0.0
             }
@@ -216,39 +218,125 @@ class ExactTSPMe(fx.PDE):
 
 if __name__ == "__main__":
     
+    # Bandwidth=0 signals FAER LU/GMRES to handle internal cross-domain sparsity natively
     engine = fx.Engine(model=ExactTSPMe(), target="cpu:serial", jacobian_bandwidth=0)
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
     results = {}
     
     for name, current in rates.items():
-        print(f"Simulating {name} discharge...")
+        print(f"Simulating {name} discharge + 2-hour rest...")
+        # Discharge to 2.5V, followed by 7200s (2-hour) relaxation
         protocol = Sequence([
-            CC(rate=current, until=engine.model.V_cell <= 2.5, time=7200)
+            CC(rate=current, until=engine.model.V_cell <= 2.5, time=15000),
+            Rest(time=7200)
         ])
         results[name] = engine.solve(protocol=protocol)
 
-    # -------------------------------------------------------------------------
-    # Replication of Paper Figure 5 (Voltage and Temperature vs Capacity)
-    # -------------------------------------------------------------------------
-    fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+    # =========================================================================
+    # FIGURE 1: Replication of Paper Figure 5
+    # (Voltage and Temperature vs Capacity during Discharge Phase)
+    # =========================================================================
+    fig1, axs1 = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
     colors = {"0.5C": "tab:blue", "1C": "tab:orange", "2C": "tab:green"}
     
     for name, res in results.items():
-        capacity_ah = (res["Time [s]"].data * rates[name]) / 3600.0
+        # Strictly mask the active CC discharge phase (ignoring the Rest step)
+        discharge_mask = res["i_app"].data > 0.1
+        t_discharge = res["Time [s]"].data[discharge_mask]
         
-        axs[0].plot(capacity_ah, res["V_cell"].data, label=f"{name}", color=colors[name], linewidth=2)
-        # Kelvin to Celsius conversion
-        axs[1].plot(capacity_ah, res["T_cell"].data - 273.15, label=f"{name}", color=colors[name], linewidth=2)
+        # Calculate capacity mapped strictly to the discharge segment
+        capacity_ah = (t_discharge * rates[name]) / 3600.0
+        v_cell = res["V_cell"].data[discharge_mask]
+        t_celsius = res["T_cell"].data[discharge_mask] - 273.15
+        
+        axs1[0].plot(capacity_ah, v_cell, label=f"{name}", color=colors[name], linewidth=2)
+        axs1[1].plot(capacity_ah, t_celsius, label=f"{name}", color=colors[name], linewidth=2)
 
-    axs[0].set_title("TSPMe Validation: LG M50 at 25°C (Replicating Fig. 5)", fontsize=14, fontweight="bold")
-    axs[0].set_ylabel("Terminal Voltage [V]", fontsize=12)
-    axs[0].grid(True, linestyle="--", alpha=0.7)
-    axs[0].legend(fontsize=11)
+    axs1[0].set_title("TSPMe Validation: LG M50 at 25°C (Replicating Fig. 5)", fontsize=14, fontweight="bold")
+    axs1[0].set_ylabel("Terminal Voltage [V]", fontsize=12)
+    axs1[0].grid(True, linestyle="--", alpha=0.7)
+    axs1[0].legend(fontsize=11)
     
-    axs[1].set_ylabel("Cell Temperature [°C]", fontsize=12)
-    axs[1].set_xlabel("Discharge Capacity [Ah]", fontsize=12)
-    axs[1].grid(True, linestyle="--", alpha=0.7)
+    axs1[1].set_ylabel("Cell Temperature [°C]", fontsize=12)
+    axs1[1].set_xlabel("Discharge Capacity [Ah]", fontsize=12)
+    axs1[1].grid(True, linestyle="--", alpha=0.7)
     
     plt.tight_layout()
+
+
+    # =========================================================================
+    # FIGURE 2: Replication of Paper Figure 8 Layout
+    # (Voltage and Cell Temperature vs Time over Full Discharge + Rest)
+    # =========================================================================
+    fig2, axs2 = plt.subplots(3, 2, figsize=(12, 10))
+    
+    for i, (name, current) in enumerate(rates.items()):
+        res = results[name]
+        t_seconds = res["Time [s]"].data
+        v_cell = res["V_cell"].data
+        t_celsius = res["T_cell"].data - 273.15
+        
+        # --- Left Column: Voltage ---
+        axs2[i, 0].plot(t_seconds, v_cell, label="TSPMe", color="black", linewidth=2)
+        axs2[i, 0].set_ylabel("Voltage (V)", fontsize=12)
+        axs2[i, 0].grid(True, linestyle="--", alpha=0.7)
+        axs2[i, 0].text(-0.15, 0.5, name, transform=axs2[i, 0].transAxes, 
+                       fontsize=14, fontweight="bold", va="center")
+        
+        # --- Right Column: Temperature ---
+        axs2[i, 1].plot(t_seconds, t_celsius, label="TSPMe", color="black", linewidth=2)
+        axs2[i, 1].set_ylabel("Cell temperature (°C)", fontsize=12)
+        axs2[i, 1].grid(True, linestyle="--", alpha=0.7)
+        
+        if i == 2:
+            axs2[i, 0].set_xlabel("Time (s)", fontsize=12)
+            axs2[i, 1].set_xlabel("Time (s)", fontsize=12)
+
+    fig2.suptitle("TSPMe Validation: LG M50 at 25°C (Replicating Fig. 8 Layout)", fontsize=15, fontweight="bold")
+    fig2.tight_layout()
+    fig2.subplots_adjust(top=0.92, left=0.12)
+
+
+    # =========================================================================
+    # FIGURE 3: Internal PDE States
+    # (Electrolyte Concentration Profile Evolution during 2C Discharge)
+    # =========================================================================
+    print("Generating internal spatial state profiles...")
+    res_2c = results["2C"]
+    
+    discharge_mask = res_2c["i_app"].data > 0.1
+    idx_end_discharge = np.where(discharge_mask)[0][-1]
+    idx_50 = idx_end_discharge // 2
+    idx_0 = 0
+    
+    c_e_2c = res_2c["c_e"].data
+    t_2c = res_2c["Time [s]"].data
+    
+    # 172.8 um with 144 spatial nodes
+    x_coords = np.linspace(0, 172.8, 144)
+    
+    fig3, ax3 = plt.subplots(figsize=(9, 5))
+    
+    ax3.plot(x_coords, c_e_2c[idx_0], label="t = 0s (0% DoD)", linestyle="--", color="gray", linewidth=2)
+    ax3.plot(x_coords, c_e_2c[idx_50], label=f"t = {t_2c[idx_50]:.0f}s (~50% DoD)", color="tab:blue", linewidth=2)
+    ax3.plot(x_coords, c_e_2c[idx_end_discharge], label=f"t = {t_2c[idx_end_discharge]:.0f}s (100% DoD - Max Depletion)", color="tab:red", linewidth=2)
+    
+    # Annotate topological boundaries (Anode: 85.2 um, Separator: 12 um, Cathode: 75.6 um)
+    ax3.axvline(85.2, color="black", linestyle=":", alpha=0.8)
+    ax3.axvline(97.2, color="black", linestyle=":", alpha=0.8)
+    
+    ax3.text(42.6, 600, "Negative\nElectrode", ha="center", va="center", alpha=0.6, fontsize=11, fontweight="bold")
+    ax3.text(91.2, 600, "Sep", ha="center", va="center", alpha=0.6, fontsize=11, fontweight="bold")
+    ax3.text(135.0, 600, "Positive\nElectrode", ha="center", va="center", alpha=0.6, fontsize=11, fontweight="bold")
+
+    ax3.set_title("Electrolyte Concentration ($c_e$) Depletion at 2C", fontsize=14, fontweight="bold")
+    ax3.set_xlabel("Cell Thickness [$\mu m$]", fontsize=12)
+    ax3.set_ylabel("Concentration [$mol/m^3$]", fontsize=12)
+    ax3.legend(loc="upper right")
+    ax3.grid(True, linestyle="--", alpha=0.7)
+    
+    fig3.tight_layout()
+    
     plt.show()

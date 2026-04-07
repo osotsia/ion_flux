@@ -25,8 +25,8 @@ pip install maturin pytest pytest-asyncio numpy scipy pandas matplotlib
 # Compile the Rust backend and Python bindings natively for your hardware
 pip install .
 
-# Run the showcase DFN example
-python examples/6_DFN.py
+# Run the showcase example
+python examples/6_demo.py
 ```
 
 ## Key Paradigm Shifts
@@ -41,138 +41,207 @@ python examples/6_DFN.py
 
 ## Core Concepts
 
-### 1. The Researcher View: Declarative Physics
+### 1. The Researcher View: Declarative Physics & Infinite Modularity
 
-Physics are defined by inheriting from `fx.PDE`. The `math()` method acts as a tracer: it maps your equations to specific spatial regions, boundaries, or 0D global states to build a computational graph.
+In legacy frameworks, translating a mathematical theory into code requires severe "math gymnastics"—flattening arrays, tracking indices, manually deriving Jacobian sparsities, or fighting numerical instability. 
 
-Here is how `ion_flux` handles the foundational Single Particle Model (SPM). Notice how the code reads exactly like a math textbook, devoid of numerical for-loops or array slicing.
+`ion_flux` eradicates numerical boilerplate. You write equations exactly as they appear in a textbook. The Python AST compiler dynamically maps your physical intent to the correct finite-volume stencils, coordinate geometries, and root-finding solvers. 
+
+#### Highlight A: Hierarchical Model Composition (The "Lego" Approach)
+Researchers can build highly reusable libraries of isolated physical mechanisms (e.g., solid diffusion, SEI growth, thermal lumped masses). When instantiated inside a parent cell, the compiler automatically deep-copies the AST, isolates namespaces (preventing variable collisions), and merges the computational graphs.
 
 ```python
 import ion_flux as fx
 
-class SingleParticleModel(fx.PDE):
-    # -------------------------------------------------------------------------
-    # 1. Topology Declaration
-    # Defines the spatial discretization. The Python AST operates independently 
-    # of the underlying mesh, making the math highly reusable.
-    # -------------------------------------------------------------------------
-    r_n = fx.Domain(bounds=(0, 10e-6), resolution=15, coord_sys="spherical")
-    r_p = fx.Domain(bounds=(0, 10e-6), resolution=15, coord_sys="spherical")
-
-    # -------------------------------------------------------------------------
-    # 2. State Variable Registration
-    # These are the unknowns targeted by the implicit solver. 
-    # States bound to a `Domain` compile into spatial C-arrays; 
-    # unbound states (None) compile as 0D scalars.
-    # -------------------------------------------------------------------------
-    c_s_n = fx.State(domain=r_n)
-    c_s_p = fx.State(domain=r_p)
-    V_cell = fx.State(domain=None) 
-    i_app = fx.State(domain=None)  
-
-    # -------------------------------------------------------------------------
-    # 3. Hardware Abstraction (The Cycler Terminal)
-    # Explicitly decouples internal physics from the cycler testing logic. 
-    # This prevents the user from having to manually cancel out algebraic terms 
-    # to switch between Current Control and Voltage Control.
-    # -------------------------------------------------------------------------
-    terminal = fx.Terminal(current=i_app, voltage=V_cell)
-
-    # -------------------------------------------------------------------------
-    # 4. Parameters
-    # Constants dynamically mapped into the C-ABI memory buffer.
-    # They can be overridden at runtime without triggering LLVM recompilation.
-    # -------------------------------------------------------------------------
-    Ds_n = fx.Parameter(default=1e-14)
-    Ds_p = fx.Parameter(default=1e-14)
-
-    def math(self):
-        # Topology-agnostic operators. The AST compiler automatically applies
-        # the correct spherical finite-volume Jacobian transformations here.
-        flux_n = -self.Ds_n * fx.grad(self.c_s_n, axis=self.r_n)
-        flux_p = -self.Ds_p * fx.grad(self.c_s_p, axis=self.r_p)
-
-        # Extract specific boundaries cleanly using the `.boundary()` method
-        c_surf_n = self.c_s_n.boundary("right", domain=self.r_n)
-        c_surf_p = self.c_s_p.boundary("right", domain=self.r_p)
-
-        # Faraday's flux conversion (assuming specific area was parameterized)
-        j_flux = self.i_app / 96485.0
-
+class FickianParticle(fx.PDE):
+    """A strictly isolated, highly reusable submodel for solid transport."""
+    # Topology-agnostic. The math works identically for 1D slabs or 3D spheres.
+    r = fx.Domain(bounds=(0, 5e-6), resolution=15, coord_sys="spherical")
+    c_s = fx.State(domain=r)
+    D_s = fx.Parameter(default=1e-14)
+    
+    def math(self, j_flux: fx.Node):
+        # fx.grad dynamically adapts to the 'spherical' geometric scaling natively
+        flux = -self.D_s * fx.grad(self.c_s, axis=self.r)
+        
         return {
-            # --- Explicit Equation Targeting ---
-            # Maps the governing equations (ODEs, PDEs, and DAEs) directly to 
-            # their target state nodes. The engine automatically classifies
-            # differential (fx.dt) vs. algebraic constraints natively.
             "equations": {
-                self.c_s_n: fx.dt(self.c_s_n) == -fx.div(flux_n, axis=self.r_n),
-                self.c_s_p: fx.dt(self.c_s_p) == -fx.div(flux_p, axis=self.r_p),
-                
-                # Algebraic Voltage constraint. Notice cycler logic is omitted!
-                self.V_cell: self.V_cell == (4.2 - 0.0001 * c_surf_p) - (0.1 - 0.0001 * c_surf_n) - 0.02 * self.i_app
+                self.c_s: fx.dt(self.c_s) == -fx.div(flux, axis=self.r)
             },
-            
-            # --- Spatial Boundaries ---
-            # Dictates local Dirichlet overrides or Neumann flux injections.
-            # Structured as a nested dictionary mapping target Tensors (Neumann) 
-            # or States (Dirichlet) to their respective boundary faces.
             "boundaries": {
-                flux_n: {"left": 0.0, "right": -j_flux},
-                flux_p: {"left": 0.0, "right": j_flux}
+                # Neumann tensor boundary injection
+                flux: {"left": 0.0, "right": j_flux}
             },
-            
-            # --- Initial Conditions ---
-            # Evaluated algebraically at t=0 to populate the dense starting vector.
+            "initial_conditions": {}
+        }
+
+class ModularCell(fx.PDE):
+    """Composes the full cell using instantiated submodels."""
+    
+    # 1. Instantiate submodels. 
+    # The framework automatically prefixes states (e.g., 'anode_c_s') in memory.
+    anode = FickianParticle()
+    cathode = FickianParticle()
+    
+    V_cell = fx.State(domain=None)
+    i_app = fx.State(domain=None)
+    terminal = fx.Terminal(current=i_app, voltage=V_cell)
+    
+    def math(self):
+        j_n = self.i_app / 96485.0
+        j_p = -self.i_app / 96485.0
+        
+        # Extract specific boundaries cleanly from submodels using `.right`
+        macro_physics = {
+            "equations": {
+                self.V_cell: self.V_cell == (4.2 - 0.001 * self.cathode.c_s.right) \
+                                          - (0.1 - 0.001 * self.anode.c_s.right)
+            },
+            "boundaries": {},
             "initial_conditions": {
-                self.c_s_n: 800.0,
-                self.c_s_p: 200.0,
-                self.V_cell: 4.18,
-                self.i_app: 0.0
+                self.V_cell: 4.1, 
+                self.i_app: 0.0,
+                self.anode.c_s: 800.0,
+                self.cathode.c_s: 200.0
             }
+        }
+        
+        # 2. Seamlessly merge all sub-graphs into one unified implicit solve
+        return fx.merge(
+            macro_physics,
+            self.anode.math(j_flux=j_n),
+            self.cathode.math(j_flux=j_p)
+        )
+```
+
+#### Highlight B: Multi-Scale Topologies & Native Spatial DAEs
+Modeling macro-micro scale coupling (like the Doyle-Fuller-Newman model) or solving instantaneous algebraic constraints across a spatial mesh usually breaks standard ODE solvers. `ion_flux` treats complex topologies and Differential-Algebraic Equations (DAEs) as native syntax.
+
+*   **Pseudo-Dimensions:** Multiply domains together (`x * r`). The compiler logically places a full 1D spherical mesh at *every* node in the macroscopic `x` mesh, flattening them into highly efficient C-arrays automatically.
+*   **Zero-Boilerplate DAEs:** If you omit a `fx.dt()` operator, the compiler inherently flags the equation as a pure Algebraic constraint. The Rust implicit solver seamlessly co-solves it at every spatial node alongside the PDEs.
+
+```python
+class MinimalDFN(fx.PDE):
+    x_n = fx.Domain(bounds=(0, 40e-6), resolution=10, name="x_n")
+    r_n = fx.Domain(bounds=(0, 5e-6), resolution=10, coord_sys="spherical", name="r_n") 
+    
+    # Multiply domains to create a hierarchical cross-product mesh
+    macro_micro_n = x_n * r_n 
+    
+    c_s_n = fx.State(domain=macro_micro_n) # 2D Multi-Scale PDE State
+    phi_s_n = fx.State(domain=x_n)         # 1D Spatial DAE State
+    
+    # ... additional state declarations omitted ...
+    
+    def math(self):
+        # The `axis` argument forces operators to differentiate against a 
+        # specific spatial dimension within the composite domain.
+        i_s_n = -100.0 * fx.grad(self.phi_s_n, axis=self.x_n) 
+        N_s_n = -1e-14 * fx.grad(self.c_s_n, axis=self.r_n) 
+        
+        j_n = 1e6 * (self.phi_s_n - (0.1 - 0.0001 * self.c_s_n.boundary("right", domain=self.r_n))) 
+        
+        return {
+            "equations": {
+                # --- Spatial Algebraic Constraints (DAEs) ---
+                # Notice `phi_s_n` has no time derivative (fx.dt). The native 
+                # compiler automatically routes this to the 0.0 root-finding Jacobian mask.
+                self.phi_s_n: fx.div(i_s_n, axis=self.x_n) == -j_n,
+                
+                # --- Multi-Scale PDEs ---
+                # Solves diffusion inside the particle at *every* macroscopic node in x_n simultaneously.
+                self.c_s_n: fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n)
+            },
+            # ... boundaries and ICs omitted ...
         }
 ```
 
-### 2. The Engineer View: Co-Simulation & Multi-Mode Protocols
+---
 
-The compiled `Engine` handles execution. For lab testing (e.g., CCCV cycling), engineers supply a compiled state-machine (`fx.protocols.Sequence`). The native solver dynamically hot-swaps the active constraints utilizing safe root-finding to land perfectly on voltage trigger asymptotes.
+### 2. The Engineer View: Cloud Scale, Sensitivities, & Co-Simulation
+
+Legacy symbolic graph frameworks (like CasADi) often break down in production software environments due to massive Python memory footprints, Just-In-Time (JIT) compilation cold-starts, and the Python Global Interpreter Lock (GIL). 
+
+Because `ion_flux` generates Ahead-of-Time (AOT) C++ binaries and strictly scopes execution lifecycles in Rust, it treats cloud-scale SaaS architectures, continuous gradient optimization, and real-time execution as native capabilities.
+
+#### Scenario A: Stateless Fleet-Scale SaaS (Zero Cold-Start)
+To deploy models into serverless environments (e.g., AWS Lambda, fast web APIs), you can export the compiled model into a standalone shared object (`.so`) library. Python AST parsing and LLVM compilation are entirely bypassed at runtime.
 
 ```python
-from ion_flux.protocols import Sequence, CC, CV, Rest
+# --- 1. Compile exactly once on your CI/CD Pipeline ---
+compiler_engine = fx.Engine(model=FastSPM(), target="cpu:serial")
+compiler_engine.export_binary("models/spm_prod.so")
 
-model = SingleParticleModel()
-engine = fx.Engine(model=model, target="cpu:serial")
+# --- 2. Instant Serverless Load (0ms Cold Start) ---
+# Instantiates instantly without invoking Clang or building memory graphs.
+stateless_engine = fx.Engine.load("models/spm_prod.so", target="cpu:serial")
 
-# Declarative, compiled state machine.
-# Notice how we use Python operator overloading (`model.V_cell <= 3.0`) 
-# to build strictly-typed AST trigger conditions safely, rather than using strings.
-protocol = Sequence([
-    CC(rate=10.0, until=model.V_cell <= 3.0, time=3600),
-    CV(voltage=3.0, until=model.i_app >= -0.05, time=1800),
-    Rest(time=600)
-])
+# Create a massive payload of concurrent parameter permutations
+fleet_size = 10_000
+param_payloads = [
+    {"D_s": np.random.uniform(1e-14, 5e-14), "R_internal": np.random.uniform(0.01, 0.05)} 
+    for _ in range(fleet_size)
+]
 
-result = engine.solve(protocol=protocol)
-result.plot_dashboard() # Launches an interactive time-scrubbing UI
+# --- 3. Rayon Task-Parallel Execution ---
+# Drops into Rust, utilizing the Rayon thread-pool to distribute 10,000 independent 
+# implicit integration handles across all vCPUs. 
+# It completely bypasses the Python GIL with zero multiprocessing serialization bloat.
+results = stateless_engine.solve_batch(
+    parameters=param_payloads, 
+    t_span=(0, 3600), 
+    max_workers=64
+)
 ```
 
-For **Real-Time HIL/SIL (Battery Management Systems)**, we use a **Stateful Session Generator**. Only simple scalar inputs cross the Python/Rust FFI boundary, enabling microsecond-latency control loops.
+#### Scenario B: Exact Adjoint Sensitivities (Parameter Optimization)
+Because the Python compiler applies Enzyme Automatic Differentiation (AD) at the LLVM level, the entire execution loop is a mathematically exact differentiable graph. You can backpropagate gradients through thousands of stiff implicit time-steps in $\mathcal{O}(1)$ memory.
 
 ```python
-session = engine.start_session(parameters={"Ds_n": 2e-14})
+# The `requires_grad` flag instructs the native solver to record the highly non-linear 
+# integration trajectory in C++ RAM.
+res = engine.solve(protocol=fast_charge_cycle, requires_grad=["D_s", "R_internal"])
 
-# Real-time control loop (e.g., 10ms BMS cycle over 60 seconds)
+# Compute a differentiable loss metric against experimental CSV lab data
+loss = fx.metrics.rmse(predicted=res["V_cell"], target=experimental_voltage)
+
+# --- The Magic Happens Here ---
+# Triggers the Reverse-Mode Vector-Jacobian Product (VJP) loop through the native Rust solver.
+# Exact continuous gradients route perfectly through discrete state-machine bounds 
+# (e.g., CCCV phase changes) without diverging like numerical Finite Differences (FD).
+grads = loss.backward()
+
+# Hand the exact analytical gradients to L-BFGS-B or Adam optimizers
+print(f"Exact dLoss/dDs: {grads['D_s']}") 
+print(f"Exact dLoss/dR:  {grads['R_internal']}")
+```
+
+#### Scenario C: Microsecond-Latency BMS Hardware-in-the-Loop (HIL)
+For Real-Time Software-in-the-Loop (SIL) or HIL, we use a **Stateful Session Generator**. The compiled sparse matrices, Exact Enzyme Jacobians, and BDF integration history vectors stay "hot" in Rust hardware memory. Only 64-bit float inputs cross the Python/Rust FFI boundary.
+
+```python
+# Pin the execution session natively.
+session = engine.start_session(parameters={"D_s": 1e-14})
+
+# E.g., Executing a 10ms BMS cycle over a 60-second simulated pulse
 while session.time < 60.0:
-    # 1. Read state directly from the underlying C-array with zero overhead
+    # 1. Read state directly from the underlying flat C-array with zero overhead
     current_v = session.get("V_cell")
     
-    # 2. Custom external control logic (Software-in-the-Loop)
-    i_req = -5.0 if current_v < 4.15 else 0.0 
+    # 2. Evaluate external BMS logic
+    # Charge aggressively, but taper current dynamically to prevent 
+    # the voltage from exceeding a hard 4.2V safety ceiling.
+    i_req = -5.0 if current_v < 4.15 else -max(0.0, 50.0 * (4.2 - current_v))
     
-    # 3. Step the native implicit solver forward. 
-    # High-order BDF integration history vectors are seamlessly preserved in Rust.
-    # The `_term_mode` parameter safely toggles the `Terminal` abstraction
-    # (1.0 = Current Control, 0.0 = Voltage Control).
+    # 3. Inject dynamic parameters and advance the native solver seamlessly.
+    # The `_term_mode` flag dynamically hot-swaps the underlying multiplexer constraint 
+    # in the Jacobian matrix natively without re-initializing the solver.
     session.step(dt=0.01, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
+    
+    # 4. Built-in trigger checks for arbitrary safety aborts
+    if session.triggered(model.T_cell > 323.15):
+        print("BMS Safety Halt Triggered: Thermal Limit Reached.")
+        break
 ```
 
 ---

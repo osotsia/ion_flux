@@ -94,7 +94,9 @@ class ALEStefanProblem(fx.PDE):
                 self.c: {"left": fx.Dirichlet(5.0), "right": fx.Dirichlet(0.0)}
             },
             "initial_conditions": {
-                self.c: 0.1, self.L: 1.0
+                # Initialize with a steady-state linear gradient so the flux is 
+                # maximum at t=0 and strictly decreases as the domain expands.
+                self.c: 5.0 - 5.0 * self.x.coords, self.L: 1.0
             }
         }
 

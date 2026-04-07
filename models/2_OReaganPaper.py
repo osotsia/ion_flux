@@ -1,4 +1,4 @@
-"""
+r"""
 Thermal-Electrochemical Doyle-Fuller-Newman (DFN) Model
 
 Reference:
@@ -14,6 +14,8 @@ Arrhenius transport kinetics, entropic heating, and Joule losses to a lumped 0D 
 The electrolyte transport properties ($D_e, \kappa_e$) use a simplified Arrhenius 
 scaling rather than the incredibly dense, 9-term empirical Gasteiger polynomials (Eq 18-21) 
 to keep the AST compilation efficient.
+
+This model currently runs, but the output figure diverges from the figure in the paper. Still some bugs left.
 """
 
 import math
