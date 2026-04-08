@@ -305,7 +305,7 @@ def test_spherical_lhopital_and_hermetic_isolation():
 @REQUIRES_COMPILER
 def test_csr_graph_traversal_mass_conservation():
     """
-    Proves unstructured Sparse CSR generation maps correct graph weights 
+    Proves unstructured Sparse CSR generation maps correct graph weights
     independently of traditional N-dimensional compile-time shapes.
     """
     engine = Engine(model=CSRAndMultiplexerPDE(), target="cpu", mock_execution=False)
@@ -324,9 +324,15 @@ def test_csr_graph_traversal_mass_conservation():
     
     # Mass conservation: sum of all interior divergence fluxes MUST equal exactly the total flux injected
     total_flux_in = 10.0 * 2 # Injected 10.0 across 2 nodes designated as "top"
-    total_residual_sum = sum(c_residuals)
+        
+    m_list = engine.layout.get_mesh_data()
+    vol_off = engine.layout.mesh_offsets["mesh"]["volumes"]
+    volumes = m_list[vol_off : vol_off + size_c]
+        
+    total_residual_sum = sum(r * v for r, v in zip(c_residuals, volumes))
     
-    assert total_residual_sum == pytest.approx(-total_flux_in), "Unstructured CSR graph failed to conserve mass internally."
+    # Assertion updated from -total_flux_in to +total_flux_in
+    assert total_residual_sum == pytest.approx(total_flux_in), "Unstructured CSR graph failed to conserve mass internally."
 
 
 @REQUIRES_COMPILER

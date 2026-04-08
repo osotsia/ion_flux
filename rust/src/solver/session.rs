@@ -100,14 +100,16 @@ impl SolverHandle {
         self.step(1000.0)
     }
 
-    pub fn clone_state(&self) -> PyResult<(f64, Vec<f64>)> {
-        Ok((self.t, self.y.clone()))
+    pub fn clone_state(&self) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
+        Ok((self.t, self.y.clone(), self.ydot.clone()))
     }
 
-    pub fn restore_state(&mut self, t: f64, y: Vec<f64>) -> PyResult<()> {
+    pub fn restore_state(&mut self, t: f64, y: Vec<f64>, ydot: Vec<f64>) -> PyResult<()> {
         self.t = t;
         self.y = y;
+        self.ydot = ydot;
         self.lu_solver.mark_stale();
+        self.diag.accepted_steps = 0; // Force a safe BDF cold start to rebuild history phi polynomials!
         Ok(())
     }
 

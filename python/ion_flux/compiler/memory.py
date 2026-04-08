@@ -33,11 +33,12 @@ class MemoryLayout:
                     csr = d.csr_data
                     offsets = {}
                     
-                    for key in ["weights", "row_ptr", "col_ind"]:
-                        offsets[key] = self.m_length
-                        for v in csr[key]:
-                            self.mesh_cache[self.m_length] = float(v)
-                            self.m_length += 1
+                    for key in ["weights", "row_ptr", "col_ind", "volumes"]:
+                        if key in csr:
+                            offsets[key] = self.m_length
+                            for v in csr[key]:
+                                self.mesh_cache[self.m_length] = float(v)
+                                self.m_length += 1
                             
                     offsets["surfaces"] = {}
                     for tag, mask in csr.get("surface_masks", {}).items():

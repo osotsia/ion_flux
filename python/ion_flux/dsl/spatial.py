@@ -99,6 +99,7 @@ class Domain:
             "row_ptr": [float(x) for x in row_ptr],
             "col_ind": [float(x) for x in col_ind],
             "weights": weights,
+            "volumes": [float(x) for x in V_nodes], # Passed to compilation layer
             "surface_masks": surface_masks
         }
         return cls(bounds=(0, 1), resolution=resolution, coord_sys="unstructured", name=name, csr_data=csr_data)

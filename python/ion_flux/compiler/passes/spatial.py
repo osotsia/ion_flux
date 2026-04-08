@@ -304,6 +304,16 @@ class SpatialLoweringVisitor:
                 f"        double r_left = ({int_idx} == 0) ? 0.0 : ({int_idx} * dx - 0.5 * dx);\n"
                 f"        double vol = {pi_val} * (std::pow(r_right, 2.0) - std::pow(r_left, 2.0));\n"
             )
+        elif coord_sys == "unstructured":
+            vol_off = None
+            if target_domain_name in self.layout.mesh_offsets:
+                vol_off = self.layout.mesh_offsets[target_domain_name].get("volumes")
+            if vol_off is not None:
+                geom_code = (
+                    f"        double vol = m[{vol_off} + {int_idx}];\n"
+                )
+            else:
+                geom_code = "        double vol = 1.0;\n"
         else: # cartesian
             geom_code = (
                 f"        double dx = {dx_ir.to_cpp()};\n"
@@ -379,6 +389,37 @@ class SpatialLoweringVisitor:
         state_name = extract_state_name(child)
         s_off, _ = self.layout.state_offsets[state_name]
         
+        def _has_grad(n):
+            if not isinstance(n, dict): return False
+            if n.get("type") == "UnaryOp" and n.get("op") == "grad": return True
+            for v in n.values():
+                if isinstance(v, dict) and _has_grad(v): return True
+                if isinstance(v, list):
+                    if any(isinstance(item, dict) and _has_grad(item) for item in v): return True
+            return False
+
+        def _extract_multiplier(n):
+            if not isinstance(n, dict): return "1.0"
+            t = n.get("type")
+            if t == "UnaryOp":
+                if n["op"] == "neg": return f"(-({_extract_multiplier(n['child'])}))"
+                if n["op"] == "grad": return "1.0"
+            elif t == "BinaryOp" and n["op"] == "mul":
+                l_has = _has_grad(n["left"])
+                r_has = _has_grad(n["right"])
+                if l_has and not r_has:
+                    return f"({self.lower(n['right'], idx, face=None).to_cpp()} * {_extract_multiplier(n['left'])})"
+                elif r_has and not l_has:
+                    return f"({self.lower(n['left'], idx, face=None).to_cpp()} * {_extract_multiplier(n['right'])})"
+            elif t == "BinaryOp" and n["op"] == "div":
+                l_has = _has_grad(n["left"])
+                r_has = _has_grad(n["right"])
+                if l_has and not r_has:
+                    return f"({_extract_multiplier(n['left'])} / {self.lower(n['right'], idx, face=None).to_cpp()})"
+            return "1.0"
+
+        multiplier_cpp = _extract_multiplier(child)
+        
         # Emit an inline C++ lambda to traverse the compressed sparse row (CSR) arrays
         cpp_code = (
             f"[&]() {{\n"
@@ -387,9 +428,9 @@ class SpatialLoweringVisitor:
             f"    int end = (int)m[{rp} + (int)({idx.to_cpp()}) + 1];\n"
             f"    for(int k = start; k < end; ++k) {{\n"
             f"        int c_idx = (int)m[{ci} + k];\n"
-            f"        sum += m[{w} + k] * y[{s_off} + c_idx];\n"
+            f"        sum += m[{w} + k] * (y[{s_off} + c_idx] - y[{s_off} + (int)({idx.to_cpp()})]);\n"
             f"    }}\n"
-            f"    return sum;\n"
+            f"    return sum * ({multiplier_cpp});\n"
             f"}}()"
         )
         bulk_div = RawCpp(cpp_code)
@@ -405,10 +446,18 @@ class SpatialLoweringVisitor:
                     surf_off = offsets["surfaces"][s_face]
                     bc_val = self.lower(bc_ast, idx, face=None).to_cpp()
                     mask_val = f"m[{surf_off} + (int)({idx.to_cpp()})]"
-                    bc_terms.append(f"({bc_val}) * {mask_val}")
+                    
+                    # Apply Exact Unstructured Volumes to the Volumetric Current Conversion
+                    if "volumes" in offsets:
+                        vol_off = offsets["volumes"]
+                        vol_val = f"m[{vol_off} + (int)({idx.to_cpp()})]"
+                        bc_terms.append(f"(({bc_val}) * {mask_val} / std::max(1e-30, {vol_val}))")
+                    else:
+                        bc_terms.append(f"({bc_val}) * {mask_val}")
                     
         if bc_terms:
-            return RawCpp(f"({bulk_div.to_cpp()} - ({' + '.join(bc_terms)}))")
+            # Replaced subtraction with addition for physical FVM mass bounds
+            return RawCpp(f"({bulk_div.to_cpp()} + ({' + '.join(bc_terms)}))")
         return bulk_div
 
     def _lower_div_structured(self, child: Dict[str, Any], idx: Expr, axis_to_use: str, coord_sys: str) -> Expr:
