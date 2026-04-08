@@ -56,7 +56,7 @@ class ExactTSPMe(fx.PDE):
         # Macro dimensions [m] & Electrode Area [m^2]
         L_n, L_s, L_p = 85.2e-6, 12.0e-6, 75.6e-6
         L_cell = L_n + L_s + L_p
-        A_elec = 0.1024 
+        A_elec = 0.10269  # Corrected to exactly match 5Ah / 48.69 A/m^2 (Table 1)
         
         # Microstructure (Porosity & Bruggeman factor, Eq. 4)
         eps_n, eps_s, eps_p = 0.25, 0.47, 0.335
@@ -76,12 +76,11 @@ class ExactTSPMe(fx.PDE):
         h_cool = 16.0        # Tuned heat exchange coefficient [W / (K m^2)]
         a_cool = 219.42      # Cooling surface area density [1/m]
 
-        # Arrhenius Temperature scaling for Solid Diffusion
-        def arrh(Ea):
-            return fx.exp((Ea / R_const) * (1.0 / T_ref - 1.0 / self.T_cell))
-
-        Ds_n = 3.3e-14 * arrh(17393.0)
-        Ds_p = 4.0e-15 * arrh(12047.0)
+        # Solid Diffusion (Paper uses 'effective' constants per C-rate/Temp rather than Arrhenius)
+        # Note: To replicate the paper's plots exactly at a specific temperature,
+        # you would manually tune these constants per run. Here we use the base reference values.
+        Ds_n = 3.3e-14 
+        Ds_p = 4.0e-15
 
         # Helper AST macros
         def arcsinh_ast(x): return fx.log(x + (x**2 + 1.0)**0.5)
@@ -118,6 +117,9 @@ class ExactTSPMe(fx.PDE):
                + 17.5842 * tanh_ast(15.9308 * (x_p - 0.3120)))
         
         # Exchange current densities (Eq. 7)
+        def arrh(Ea):
+            return fx.exp((Ea / R_const) * (1.0 / T_ref - 1.0 / self.T_cell))
+        
         j0_n = m_n * (ce_safe * c_surf_n * (c_max_n - c_surf_n))**0.5 * arrh(40000.0)
         j0_p = m_p * (ce_safe * c_surf_p * (c_max_p - c_surf_p))**0.5 * arrh(24000.0)
 
@@ -160,7 +162,8 @@ class ExactTSPMe(fx.PDE):
         
         Q_s = (i_den ** 2) * R_s_ohm / L_cell                      # Solid Joule Heating (Eq. 5c)
         Q_e = (i_den ** 2) * R_e_ohm / L_cell - (i_den * eta_e / L_cell) # Electrolyte Heating (Eq. 17)
-        Q_irr = i_den * fx.abs(eta_r) / L_cell                     # Irreversible Reaction Heating (Eq. 5e)
+        # FIXED: Absolute value wraps the entire product to correctly act as a heat source during both charge and discharge
+        Q_irr = fx.abs(i_den * eta_r) / L_cell                     # Irreversible Reaction Heating (Eq. 5e)
         
         Q_cool = h_cool * a_cool * (self.T_cell - self.T_amb)      # Newton Cooling to Ambient (Eq. 5a)
         Q_tot = Q_s + Q_e + Q_irr                                  # Total Heat Source

@@ -32,8 +32,8 @@ python examples/6_demo.py
 ## Key Paradigm Shifts
 
 *   **Topology-Agnostic Math:** Spatial operators (`fx.grad`, `fx.div`) dynamically adapt. The exact same equation syntax compiles to a tridiagonal banded matrix on a 1D line, or a Matrix-Free CSR graph traversal on a 3D pouch cell mesh.
-*   **The Hardware Abstraction (`fx.Terminal`):** Completely decouples battery physics from cycler testing logic. The native engine automatically handles the zero-sum structural DAEs required to toggle between Constant Current (CC) and Constant Voltage (CV) mid-solve without re-initializing the Jacobian.
-*   **Compile-Time Automatic Differentiation:** `ion_flux` does not build massive Python memory graphs (like JAX/CasADi). The AST generates C++ which is differentiated *Ahead-of-Time* by Enzyme via LLVM. The Rust native solver pushes exact continuous gradients backward (`loss.backward()`) using compiled Vector-Jacobian Products (VJPs) in $O(1)$ memory.
+*   **The Hardware Abstraction (`fx.Terminal`):** Completely decouples battery physics from cycler testing logic. The native engine automatically handles the zero-sum structural DAEs required to toggle between Constant Current (CC) and Constant Voltage (CV) mid-solve without requiring AST recompilation or structural matrix reallocation.
+*   **Compile-Time Automatic Differentiation:** `ion_flux` does not build massive Python memory graphs (like JAX/CasADi). The AST generates C++ which is differentiated *Ahead-of-Time* by Enzyme via LLVM. The Rust native solver pushes exact continuous gradients backward (`loss.backward()`) using compiled Vector-Jacobian Products (VJPs) in a single, mathematically exact reverse pass.
 *   **Stateful Co-Simulation:** Microsecond-latency `session.step(dt)` allows for real-time Hardware-in-the-Loop (HIL) and Battery Management System (BMS) testing. The Rust backend keeps the BDF history vectors and factored LU matrices "hot" in RAM.
 *   **Cloud-Native SaaS Scale:** Export compiled physics to portable `.so` binaries for 0ms serverless cold-starts. Bypass the Python GIL entirely using Rust's Rayon thread-pool for massive `solve_batch` parameter sweeps.
 
@@ -195,7 +195,7 @@ results = stateless_engine.solve_batch(
 ```
 
 #### Scenario B: Exact Adjoint Sensitivities (Parameter Optimization)
-Because the Python compiler applies Enzyme Automatic Differentiation (AD) at the LLVM level, the entire execution loop is a mathematically exact differentiable graph. You can backpropagate gradients through thousands of stiff implicit time-steps in $\mathcal{O}(1)$ memory.
+Because the Python compiler applies Enzyme Automatic Differentiation (AD) at the LLVM level, the entire execution loop is a mathematically exact differentiable graph. You can backpropagate gradients continuously through thousands of stiff implicit time-steps without relying on noisy finite-difference approximations.
 
 ```python
 # The `requires_grad` flag instructs the native solver to record the highly non-linear 
@@ -239,7 +239,7 @@ while session.time < 60.0:
     session.step(dt=0.01, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
     
     # 4. Built-in trigger checks for arbitrary safety aborts
-    if session.triggered(model.T_cell > 323.15):
+    if session.triggered(fx.Condition(model.T_cell > 323.15)):
         print("BMS Safety Halt Triggered: Thermal Limit Reached.")
         break
 ```
@@ -254,10 +254,10 @@ while session.time < 60.0:
 
 **Q2: How does the compiler handle Moving Boundaries (ALE) without severe performance penalties?**
 
-**A:** In a Stefan problem (like particle swelling or lithium plating), you bind a state to a domain boundary (`self.x.right == self.L`). The AST compiler detects this and dynamically flags the domain as deformable. It automatically injects an Arbitrary Lagrangian-Eulerian (ALE) grid velocity advection term into any transport equations evaluating over that mesh. It also implements directional upwinding to guarantee advective stability. Because the native solver and the AST are tightly coupled, the Jacobian sparsity pattern remains constant; only the spatial derivatives shift smoothly as the mesh stretches.
+**A:** In a Stefan problem (like particle swelling or lithium plating), you bind a state to a domain boundary (`self.x.right == self.L`). The AST compiler detects this and dynamically flags the domain as deformable. It automatically injects an Arbitrary Lagrangian-Eulerian (ALE) grid velocity advection term into any transport equations evaluating over that mesh. It also implements directional upwinding to guarantee advective stability. Because the native solver and the AST are tightly coupled, the engine automatically routes the highly cross-coupled structural Jacobian to the appropriate dense or matrix-free linear algebra backend to maintain implicit stability as the mesh stretches.
 
 **Q3: How does Enzyme Automatic Differentiation (AD) interact with stiff PDEs?**
 
 **A:** Traditional autodiff frameworks (like JAX or PyTorch) build massive computational graphs in memory, which scales poorly for stiff PDEs requiring thousands of implicit time steps. Enzyme operates at the LLVM IR level, performing AD *after* the code is optimized. `ion_flux` uses this Enzyme capability in two passes:
 1.  **Forward-mode:** To automatically generate exact, analytical Jacobians for the implicit solver's Newton iterations (guaranteeing quadratic convergence).
-2.  **Reverse-mode (Adjoint):** To trace sensitivities backward through the time-stepping trajectory, allowing you to compute the gradient of a loss function with respect to any parameter without storing the entire forward memory state.
+2.  **Reverse-mode (Adjoint):** To trace sensitivities backward through the time-stepping trajectory, allowing you to compute the exact continuous gradient of a loss function with respect to any parameter via highly optimized Vector-Jacobian Products (VJPs) cached during the forward pass.

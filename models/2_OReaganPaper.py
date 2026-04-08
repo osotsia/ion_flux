@@ -34,8 +34,8 @@ class ThermalDFN(fx.PDE):
     x_p = cell.region(bounds=(97.2e-6, 172.8e-6), resolution=63, name="x_p")
     
     # Particle radii: Negative = 5.86 um, Positive = 5.22 um
-    r_n = fx.Domain(bounds=(0, 5.86e-6), resolution=10, coord_sys="spherical", name="r_n") 
-    r_p = fx.Domain(bounds=(0, 5.22e-6), resolution=10, coord_sys="spherical", name="r_p") 
+    r_n = fx.Domain(bounds=(0, 5.86e-6), resolution=50, coord_sys="spherical", name="r_n") 
+    r_p = fx.Domain(bounds=(0, 5.22e-6), resolution=50, coord_sys="spherical", name="r_p") 
     
     # =========================================================================
     # 2. States (Table S2: Doyle-Fuller-Newman model unknowns)
@@ -80,8 +80,6 @@ class ThermalDFN(fx.PDE):
         
         # Transport Parameters (Table 8)
         sig_eff_n = 215.0       
-        sig_eff_p = 0.847       
-        t_plus = 0.38           
 
         # =====================================================================
         # 4. Helper Functions (AST Tracers)
@@ -123,20 +121,26 @@ class ThermalDFN(fx.PDE):
                + 17.5842 * tanh_ast(15.9308 * (x_p - 0.3120)))
 
         # Entropic Heating Term (dU/dT) [mV/K -> V/K] (Eq 16 & 17, Table S7)
-        # Captures the endothermic phase of Graphite during early discharge.
-        dUdT_n = 1e-3 * (-0.111 * x_n + 0.02901 + 0.3562 * fx.exp(-((x_n - 0.08308)**2) / 0.004621))
+        dUdT_n = 1e-3 * (-0.1112 * x_n + 0.02914 + 0.3561 * fx.exp(-((x_n - 0.08309)**2) / 0.004616))
         dUdT_p = 1e-3 * (0.04006 * fx.exp(-((x_p - 0.2828)**2) / 0.0009855) - 0.06656 * fx.exp(-((x_p - 0.8032)**2) / 0.02179))
 
         # Exchange Current Density w/ Arrhenius (Eq. 13 & 14)
-        i0_n = 10000.0 * 0.0002668 * (1.0 - x_n)**0.208 * x_n**0.792 * (ce_safe / 1000.0)**0.208 * arrh(40000.0)
-        i0_p = 10000.0 * 0.0005028 * (1.0 - x_p)**0.570 * x_p**0.430 * (ce_safe / 1000.0)**0.570 * arrh(24010.0)
+        i0_n = 2.668 * (1.0 - x_n)**0.208 * x_n**0.792 * (ce_safe / 1000.0)**0.208 * arrh(40000.0)
+        i0_p = 5.028 * (1.0 - x_p)**0.570 * x_p**0.430 * (ce_safe / 1000.0)**0.570 * arrh(24010.0)
         
         eta_n = self.phi_s_n - self.phi_e - U_n
         eta_p = self.phi_s_p - self.phi_e - U_p
         
-        # Faradaic Currents (Thermally Coupled BV)
-        j_n = a_n * i0_n * sinh_ast((F / (2.0 * R_const * self.T_cell)) * eta_n)
-        j_p = a_p * i0_p * sinh_ast((F / (2.0 * R_const * self.T_cell)) * eta_p)
+        # Faradaic Currents (Exact Asymmetric Butler-Volmer kinetics)
+        alpha_n, alpha_p = 0.792, 0.43
+        F_RT = F / (R_const * self.T_cell)
+        
+        # Bound overpotentials to prevent exponential overflow during early Newton iterations
+        eta_n_safe = fx.min(fx.max(eta_n, -1.0), 1.0)
+        eta_p_safe = fx.min(fx.max(eta_p, -1.0), 1.0)
+        
+        j_n = a_n * i0_n * (fx.exp(alpha_n * F_RT * eta_n_safe) - fx.exp(-(1.0 - alpha_n) * F_RT * eta_n_safe))
+        j_p = a_p * i0_p * (fx.exp(alpha_p * F_RT * eta_p_safe) - fx.exp(-(1.0 - alpha_p) * F_RT * eta_p_safe))
 
         j_dl_n = a_n * self.C_dl * (fx.dt(self.phi_s_n) - fx.dt(self.phi_e))
         j_dl_p = a_p * self.C_dl * (fx.dt(self.phi_s_p) - fx.dt(self.phi_e))
@@ -145,28 +149,67 @@ class ThermalDFN(fx.PDE):
         j_tot_p = j_p + j_dl_p
 
         # =====================================================================
-        # 6. Transport PDEs (Thermally Coupled)
+        # 6. Transport PDEs (Thermally Coupled & Stoichiometry Dependent)
         # =====================================================================
-        # Solid phase transport with experimental tuning factors (3.03 and 2.70) 
-        # and Arrhenius scaling mapped from Table S5.
-        Ds_n = 3.3e-14 * 3.03 * arrh(17393.0)
-        Ds_p = 4.0e-15 * 2.70 * arrh(12047.0)
+        # Solid phase transport (O'Regan 2022 Stoichiometry fits)
+        x_bulk_n = fx.min(fx.max(self.c_s_n / c_max_n, 1e-4), 0.9999)
+        x_bulk_p = fx.min(fx.max(self.c_s_p / c_max_p, 1e-4), 0.9999)
+        
+        # Bypassing LLVM llvm.exp10.f64 intrinsic error using 10^x = exp(x * ln(10))
+        ln10 = math.log(10.0)
+        
+        D_ref_n = fx.exp((
+            11.17 * x_bulk_n - 15.11
+            - 1.553 * fx.exp(-((x_bulk_n - 0.2031)**2) / 0.0006091)
+            - 6.136 * fx.exp(-((x_bulk_n - 0.5375)**2) / 0.06438)
+            - 9.725 * fx.exp(-((x_bulk_n - 0.9144)**2) / 0.0578)
+            + 1.85 * fx.exp(-((x_bulk_n - 0.5953)**2) / 0.001356)
+        ) * ln10) * 3.0321
+        
+        D_ref_p = fx.exp((
+            -13.96
+            - 0.9231 * fx.exp(-((x_bulk_p - 0.3216)**2) / 0.002534)
+            - 0.4066 * fx.exp(-((x_bulk_p - 0.4532)**2) / 0.003926)
+            - 0.993 * fx.exp(-((x_bulk_p - 0.8098)**2) / 0.09924)
+        ) * ln10) * 2.7
+        
+        Ds_n = D_ref_n * fx.exp(2092.0 * (1.0 / 298.15 - 1.0 / self.T_cell))
+        Ds_p = D_ref_p * fx.exp(1449.0 * (1.0 / 298.15 - 1.0 / self.T_cell))
         
         N_s_n = -Ds_n * fx.grad(self.c_s_n, axis=self.r_n)
         N_s_p = -Ds_p * fx.grad(self.c_s_p, axis=self.r_p)
         
+        # Electronic conductivity (Thermally coupled for positive electrode)
+        sig_eff_p = 0.8473 * fx.exp(3500.0 / R_const * (1.0 / 298.15 - 1.0 / self.T_cell))
+        
         i_s_n = -sig_eff_n * fx.grad(self.phi_s_n)
         i_s_p = -sig_eff_p * fx.grad(self.phi_s_p)
         
-        # Electrolyte transport (Weak Arrhenius approximation used here)
-        De = 3e-10 * arrh(17100.0)
-        ke = 1.0 * arrh(15500.0)
+        # Electrolyte transport (Landesfeind 2019 Empirical Polynomials)
+        c_L = ce_safe / 1000.0
+        T_L = self.T_cell
+        
+        # Transference Number
+        t_plus = -12.8 - 6.12*c_L + 0.0821*T_L + 0.904*c_L**2 + 0.0318*c_L*T_L - 1.27e-4*T_L**2 + 0.0175*c_L**3 - 0.00312*c_L**2*T_L - 3.96e-5*c_L*T_L**2
+        
+        # Thermodynamic Factor
+        TDF = 25.7 - 45.1*c_L - 0.177*T_L + 1.94*c_L**2 + 0.295*c_L*T_L + 3.08e-4*T_L**2 + 0.259*c_L**3 - 0.00946*c_L**2*T_L - 4.54e-4*c_L*T_L**2
+        
+        # Diffusivity (m2/s)
+        De = 1010.0 * fx.exp(1.01 * c_L) * fx.exp(-1560.0 / T_L) * fx.exp(-487.0 * c_L / T_L) * 1e-10
+        
+        # Conductivity (S/m) (Converted from mS/cm by / 10.0)
+        ke_A = 0.521 * (1.0 + (T_L - 228.0))
+        ke_B = 1.0 - 1.06 * c_L**0.5 + 0.353 * (1.0 - 0.00359 * fx.exp(1000.0 / T_L)) * c_L
+        ke_C = 1.0 + c_L**4 * (0.00148 * fx.exp(1000.0 / T_L))
+        ke = (ke_A * c_L * ke_B / ke_C) / 10.0
         
         De_eff_n, ke_eff_n = De * (eps_en ** b_brug), ke * (eps_en ** b_brug)
         De_eff_s, ke_eff_s = De * (eps_es ** b_brug), ke * (eps_es ** b_brug)
         De_eff_p, ke_eff_p = De * (eps_ep ** b_brug), ke * (eps_ep ** b_brug)
         
-        ce_diff_term = (2.0 * R_const * self.T_cell / F) * (1.0 - t_plus) * (fx.grad(self.c_e) / ce_safe)
+        # TDF properly included in the diffusion migration term
+        ce_diff_term = (2.0 * R_const * self.T_cell / F) * (1.0 - t_plus) * TDF * (fx.grad(self.c_e) / ce_safe)
         
         flux_ce_n = -De_eff_n * fx.grad(self.c_e)
         flux_ce_s = -De_eff_s * fx.grad(self.c_e)
@@ -183,10 +226,10 @@ class ThermalDFN(fx.PDE):
         Q_rxn_n = j_n * eta_n + j_n * self.T_cell * dUdT_n
         Q_rxn_p = j_p * eta_p + j_p * self.T_cell * dUdT_p
         
-        # Ohmic Joule Heating [W/m^3]
-        Q_ohm_n = sig_eff_n * (fx.grad(self.phi_s_n)**2) + ke_eff_n * (fx.grad(self.phi_e)**2) + ke_eff_n * ce_diff_term * fx.grad(self.phi_e)
-        Q_ohm_s = ke_eff_s * (fx.grad(self.phi_e)**2) + ke_eff_s * ce_diff_term * fx.grad(self.phi_e)
-        Q_ohm_p = sig_eff_p * (fx.grad(self.phi_s_p)**2) + ke_eff_p * (fx.grad(self.phi_e)**2) + ke_eff_p * ce_diff_term * fx.grad(self.phi_e)
+        # Ohmic Joule Heating [W/m^3] (Corrected negative sign for the ce_diff_term cross-multiplication)
+        Q_ohm_n = sig_eff_n * (fx.grad(self.phi_s_n)**2) + ke_eff_n * (fx.grad(self.phi_e)**2) - ke_eff_n * ce_diff_term * fx.grad(self.phi_e)
+        Q_ohm_s = ke_eff_s * (fx.grad(self.phi_e)**2) - ke_eff_s * ce_diff_term * fx.grad(self.phi_e)
+        Q_ohm_p = sig_eff_p * (fx.grad(self.phi_s_p)**2) + ke_eff_p * (fx.grad(self.phi_e)**2) - ke_eff_p * ce_diff_term * fx.grad(self.phi_e)
 
         # Integrate spatially and average over the total cell volume
         Q_total_area = (fx.integral(Q_rxn_n + Q_ohm_n, over=self.x_n) + 
@@ -196,14 +239,14 @@ class ThermalDFN(fx.PDE):
         
         # Convective Newton Cooling
         # Effective Cell Area (5.31e-3) / Volume (2.42e-5) = ~219.42 m^-1 (Table 8)
-        h_cool = 15.0 
+        h_cool = 10.0 
         Q_cool_vol = h_cool * 219.42 * (self.T_cell - T_ref)
         
-        # Lumped Volumetric Heat Capacity (rho * Cp = 2682 * 887 = 2.38e6 J / m^3 K)
-        rho_cp = 2.38e6 
+        # Lumped Volumetric Heat Capacity (rho * Cp = 2682 * 866 = 2.3226e6 J / m^3 K)
+        rho_cp = 2.3226e6 
 
         # =====================================================================
-        # 8. Explicit Equation Targeting 
+        # 8. Explicit Equation Targeting
         # =====================================================================
         return {
             "equations": {

@@ -52,8 +52,29 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 for ale_ir in visitor.generate_ale_dilution(state_name, offset, size, "i"):
                     rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
                     
-                res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Var("i")))
-                assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
+                # Check if this region shares a node with a previous region
+                has_prev_overlap = False
+                if start > 0:
+                    for r in visitor.piecewise_regions:
+                        if r["end_idx"] - 1 == start:
+                            has_prev_overlap = True
+                            break
+                            
+                if has_prev_overlap:
+                    # Conditionally average the equations at the shared interface node
+                    res_access = f"res[{offset} + i]"
+                    body_cpp = (
+                        f"if (i == {start}) {{ "
+                        f"{res_access} = 0.5 * {res_access} + 0.5 * ({lhs_ir.to_cpp()} - ({rhs_ir.to_cpp()})); "
+                        f"}} else {{ "
+                        f"{res_access} = {lhs_ir.to_cpp()} - ({rhs_ir.to_cpp()}); "
+                        f"}}"
+                    )
+                    assign = RawCpp(body_cpp)
+                else:
+                    # Standard isolated assignment
+                    res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Var("i")))
+                    assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
                 
                 eq_stmts.append(Loop("i", Literal(start), Literal(end), [assign]))
                 
