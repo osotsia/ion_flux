@@ -249,11 +249,15 @@ class SpatialLoweringVisitor:
         return ArrayAccess("ydot", BinaryOp("+", Literal(offset), clamped))
 
     def _lower_integral(self, node: Dict[str, Any], child: Dict[str, Any], idx: Expr) -> Expr:
-        """Emits an inline C++ lambda using exact FVM volume integration."""
+        """Emits an inline C++ lambda using exact FVM volume integration dynamically adapting to domains."""
         target_domain_name = node.get("over")
-        res = self.ctx.payload["domains"][target_domain_name]["resolution"]
-        coord_sys = self.ctx.payload["domains"][target_domain_name].get("coord_sys", "cartesian")
-        dx_ir = Var(f"dx_{target_domain_name}")
+        domain_info = self.ctx.payload["domains"].get(target_domain_name)
+        if not domain_info:
+            raise KeyError(f"Domain '{target_domain_name}' not found in AST payload.")
+        
+        res = domain_info.get("resolution", 1)
+        is_composite = domain_info.get("type") == "composite"
+        
         int_idx = f"idx_int_{id(node)}"
         
         # Context switch: We are summing over a DIFFERENT domain than the current loop
@@ -268,18 +272,33 @@ class SpatialLoweringVisitor:
                 
         if domain_obj is None:
             # Fallback: create a mock domain to satisfy coordinate and spatial lookups
-            domain_info = self.ctx.payload["domains"].get(target_domain_name, {})
-            start_idx = domain_info.get("start_idx", 0)
-            parent_name = domain_info.get("parent")
-            
-            parent_obj = type("MockDomain", (), {"name": parent_name})() if parent_name else None
-            
-            domain_obj = type("MockDomain", (), {
-                "name": target_domain_name, 
-                "start_idx": start_idx, 
-                "coord_sys": coord_sys,
-                "parent": parent_obj
-            })()
+            if is_composite:
+                sub_domains = []
+                for sub_name in domain_info.get("domains", []):
+                    sub_info = self.ctx.payload["domains"].get(sub_name, {})
+                    sub_obj = type("MockDomain", (), {
+                        "name": sub_name,
+                        "resolution": sub_info.get("resolution", 1),
+                        "coord_sys": sub_info.get("coord_sys", "cartesian"),
+                        "start_idx": sub_info.get("start_idx", 0)
+                    })()
+                    sub_domains.append(sub_obj)
+                domain_obj = type("MockCompositeDomain", (), {
+                    "name": target_domain_name,
+                    "domains": sub_domains,
+                    "resolution": res
+                })()
+            else:
+                coord_sys = domain_info.get("coord_sys", "cartesian")
+                start_idx = domain_info.get("start_idx", 0)
+                parent_name = domain_info.get("parent")
+                parent_obj = type("MockDomain", (), {"name": parent_name})() if parent_name else None
+                domain_obj = type("MockDomain", (), {
+                    "name": target_domain_name, 
+                    "start_idx": start_idx, 
+                    "coord_sys": coord_sys,
+                    "parent": parent_obj
+                })()
             
         self.current_domain = domain_obj
         self.is_piecewise = False  # The integral loop evaluates as a standard 0..res local loop
@@ -289,36 +308,53 @@ class SpatialLoweringVisitor:
         self.current_domain = prev_domain # Restore context
         self.is_piecewise = prev_is_piecewise
         
-        pi_val = "3.14159265358979323846"
-        if coord_sys == "spherical":
-            geom_code = (
-                f"        double dx = {dx_ir.to_cpp()};\n"
-                f"        double r_right = ({int_idx} == {res - 1}) ? ({int_idx} * dx) : ({int_idx} * dx + 0.5 * dx);\n"
-                f"        double r_left = ({int_idx} == 0) ? 0.0 : ({int_idx} * dx - 0.5 * dx);\n"
-                f"        double vol = (4.0/3.0) * {pi_val} * (std::pow(r_right, 3.0) - std::pow(r_left, 3.0));\n"
-            )
-        elif coord_sys == "cylindrical":
-            geom_code = (
-                f"        double dx = {dx_ir.to_cpp()};\n"
-                f"        double r_right = ({int_idx} == {res - 1}) ? ({int_idx} * dx) : ({int_idx} * dx + 0.5 * dx);\n"
-                f"        double r_left = ({int_idx} == 0) ? 0.0 : ({int_idx} * dx - 0.5 * dx);\n"
-                f"        double vol = {pi_val} * (std::pow(r_right, 2.0) - std::pow(r_left, 2.0));\n"
-            )
-        elif coord_sys == "unstructured":
-            vol_off = None
-            if target_domain_name in self.layout.mesh_offsets:
-                vol_off = self.layout.mesh_offsets[target_domain_name].get("volumes")
-            if vol_off is not None:
-                geom_code = (
-                    f"        double vol = m[{vol_off} + {int_idx}];\n"
+        def build_vol_code(d_name, d_res, d_coord_sys, idx_var):
+            dx_ir = Var(f"dx_{d_name}")
+            pi_val = "3.14159265358979323846"
+            if d_coord_sys == "spherical":
+                return (
+                    f"        double dx_{d_name}_val = {dx_ir.to_cpp()};\n"
+                    f"        double r_right_{d_name} = ({idx_var} == {d_res} - 1) ? ({idx_var} * dx_{d_name}_val) : ({idx_var} * dx_{d_name}_val + 0.5 * dx_{d_name}_val);\n"
+                    f"        double r_left_{d_name} = ({idx_var} == 0) ? 0.0 : ({idx_var} * dx_{d_name}_val - 0.5 * dx_{d_name}_val);\n"
+                    f"        double vol_{d_name} = (4.0/3.0) * {pi_val} * (std::pow(r_right_{d_name}, 3.0) - std::pow(r_left_{d_name}, 3.0));\n"
                 )
-            else:
-                geom_code = "        double vol = 1.0;\n"
-        else: # cartesian
-            geom_code = (
-                f"        double dx = {dx_ir.to_cpp()};\n"
-                f"        double vol = ({int_idx} == 0 || {int_idx} == {res - 1}) ? 0.5 * dx : dx;\n"
-            )
+            elif d_coord_sys == "cylindrical":
+                return (
+                    f"        double dx_{d_name}_val = {dx_ir.to_cpp()};\n"
+                    f"        double r_right_{d_name} = ({idx_var} == {d_res} - 1) ? ({idx_var} * dx_{d_name}_val) : ({idx_var} * dx_{d_name}_val + 0.5 * dx_{d_name}_val);\n"
+                    f"        double r_left_{d_name} = ({idx_var} == 0) ? 0.0 : ({idx_var} * dx_{d_name}_val - 0.5 * dx_{d_name}_val);\n"
+                    f"        double vol_{d_name} = {pi_val} * (std::pow(r_right_{d_name}, 2.0) - std::pow(r_left_{d_name}, 2.0));\n"
+                )
+            elif d_coord_sys == "unstructured":
+                vol_off = None
+                if d_name in self.layout.mesh_offsets:
+                    vol_off = self.layout.mesh_offsets[d_name].get("volumes")
+                if vol_off is not None:
+                    return f"        double vol_{d_name} = m[{vol_off} + {idx_var}];\n"
+                else:
+                    return f"        double vol_{d_name} = 1.0;\n"
+            else: # cartesian
+                return (
+                    f"        double dx_{d_name}_val = {dx_ir.to_cpp()};\n"
+                    f"        double vol_{d_name} = ({idx_var} == 0 || {idx_var} == {d_res} - 1) ? 0.5 * dx_{d_name}_val : dx_{d_name}_val;\n"
+                )
+
+        if is_composite:
+            macro_name = domain_info["domains"][0]
+            micro_name = domain_info["domains"][1]
+            macro_info = self.ctx.payload["domains"][macro_name]
+            micro_info = self.ctx.payload["domains"][micro_name]
+            
+            geom_code = ""
+            geom_code += f"        int macro_idx_{int_idx} = {int_idx} / {micro_info['resolution']};\n"
+            geom_code += f"        int micro_idx_{int_idx} = {int_idx} % {micro_info['resolution']};\n"
+            geom_code += build_vol_code(macro_name, macro_info['resolution'], macro_info.get("coord_sys", "cartesian"), f"macro_idx_{int_idx}")
+            geom_code += build_vol_code(micro_name, micro_info['resolution'], micro_info.get("coord_sys", "cartesian"), f"micro_idx_{int_idx}")
+            geom_code += f"        double vol = vol_{macro_name} * vol_{micro_name};\n"
+        else:
+            coord_sys = domain_info.get("coord_sys", "cartesian")
+            geom_code = build_vol_code(target_domain_name, res, coord_sys, int_idx)
+            geom_code += f"        double vol = vol_{target_domain_name};\n"
 
         cpp_code = (
             f"[&]() {{\n"
@@ -570,12 +606,18 @@ class SpatialLoweringVisitor:
 
     def _resolve_cross_domain_index(self, local_idx: Expr, target_domain: Any) -> Expr:
         """Translates indices when evaluating equations spanning different spatial domains."""
-        if type(self.current_domain).__name__ == "CompositeDomain" and len(self.current_domain.domains) == 2:
+        if hasattr(self.current_domain, "domains") and len(self.current_domain.domains) == 2:
             macro_domain, micro_domain = self.current_domain.domains
             if target_domain.name == macro_domain.name:
                 return BinaryOp("/", local_idx, Literal(micro_domain.resolution))
             elif target_domain.name == micro_domain.name:
                 return BinaryOp("%", local_idx, Literal(micro_domain.resolution))
+            elif getattr(macro_domain, "parent", None) and getattr(macro_domain.parent, "name", "") == target_domain.name:
+                macro_idx = BinaryOp("/", local_idx, Literal(micro_domain.resolution))
+                return BinaryOp("+", macro_idx, Literal(getattr(macro_domain, "start_idx", 0)))
+            elif getattr(micro_domain, "parent", None) and getattr(micro_domain.parent, "name", "") == target_domain.name:
+                micro_idx = BinaryOp("%", local_idx, Literal(micro_domain.resolution))
+                return BinaryOp("+", micro_idx, Literal(getattr(micro_domain, "start_idx", 0)))
         else:
             target_parent = getattr(target_domain, "parent", None)
             current_parent = getattr(self.current_domain, "parent", None)

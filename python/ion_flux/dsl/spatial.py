@@ -23,7 +23,7 @@ class ConcatenatedDomain:
         raise TypeError("Can only concatenate Domains.")
 
 class Domain:
-    __slots__ = ["bounds", "resolution", "coord_sys", "name", "csr_data", "parent", "start_idx", "_original_name"]
+    __slots__ = ["bounds", "resolution", "coord_sys", "name", "csr_data", "parent", "start_idx", "_original_name", "_sub_regions"]
     def __init__(self, bounds: tuple, resolution: int, coord_sys: str = "cartesian", name: str = "", csr_data: Optional[Dict] = None, parent=None, start_idx=0):
         self.bounds = bounds
         self.resolution = resolution
@@ -32,14 +32,55 @@ class Domain:
         self.csr_data = csr_data
         self.parent = parent
         self.start_idx = start_idx
+        self._sub_regions = []
 
     def region(self, bounds: tuple, resolution: int, name: str) -> "Domain":
         """Creates a topological sub-mesh that shares the memory array stride of the parent Domain."""
-        # Use fractional length * parent resolution to prevent floating point orphaned nodes
-        # when users perfectly tile face-sharing sub-regions.
+        start_idx = None
         frac = (bounds[0] - self.bounds[0]) / (self.bounds[1] - self.bounds[0])
-        start_idx = int(round(frac * self.resolution))
-        return Domain(bounds, resolution, coord_sys=self.coord_sys, name=name, parent=self, start_idx=start_idx)
+        ideal_start = frac * self.resolution
+        
+        # Helper to dynamically resolve Node-Sharing vs Face-Sharing based on parent array bounds
+        def pick_best(c_face, c_node):
+            valid_face = (c_face >= 0) and (c_face + resolution <= self.resolution)
+            valid_node = (c_node >= 0) and (c_node + resolution <= self.resolution)
+            
+            # If this region touches the parent's right edge, it MUST terminate exactly at self.resolution
+            is_right_edge = abs(bounds[1] - self.bounds[1]) < 1e-12
+            if is_right_edge:
+                if valid_face and c_face + resolution == self.resolution: return c_face
+                if valid_node and c_node + resolution == self.resolution: return c_node
+                
+            # If it touches the parent's left edge, it MUST originate at 0
+            is_left_edge = abs(bounds[0] - self.bounds[0]) < 1e-12
+            if is_left_edge:
+                if valid_face and c_face == 0: return c_face
+                if valid_node and c_node == 0: return c_node
+
+            # FVM Standard: Strongly prefer contiguous Face-Sharing to avoid overlapping nodes
+            if valid_face: return c_face
+            
+            # Fallback to Node-Sharing (FEM / Overlapping meshes) if Face-Sharing overflows memory bounds
+            if valid_node: return c_node
+            
+            return None
+
+        # Scan previously emitted sub-regions to snap to existing contiguous bounds
+        for r in self._sub_regions:
+            if abs(bounds[0] - r.bounds[1]) < 1e-12: # Touches right side of existing
+                start_idx = pick_best(r.start_idx + r.resolution, r.start_idx + r.resolution - 1)
+                if start_idx is not None: break
+            elif abs(bounds[1] - r.bounds[0]) < 1e-12: # Touches left side of existing
+                start_idx = pick_best(r.start_idx - resolution, r.start_idx - resolution + 1)
+                if start_idx is not None: break
+                
+        if start_idx is None:
+            # Fallback for completely disjoint floating islands
+            start_idx = int(round(ideal_start + 1e-9))
+            
+        new_region = Domain(bounds, resolution, coord_sys=self.coord_sys, name=name, parent=self, start_idx=start_idx)
+        self._sub_regions.append(new_region)
+        return new_region
 
     @classmethod
     def from_mesh(cls, mesh_data: Union[str, dict], name: str = "unstructured_mesh", surfaces: Optional[Dict[str, List[int]]] = None) -> "Domain":

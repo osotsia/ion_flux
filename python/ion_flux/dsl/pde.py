@@ -122,15 +122,33 @@ class PDE:
         raw = self.math()
         compiled = {"equations": [], "boundaries": [], "initial_conditions": [], "domains": {}}
         
-        for d in self.components(Domain):
-            compiled["domains"][d.name] = {
-                "bounds": d.bounds, 
-                "resolution": d.resolution,
-                "start_idx": getattr(d, "start_idx", 0),
-                "coord_sys": getattr(d, "coord_sys", "cartesian"),
-                "parent": d.parent.name if getattr(d, "parent", None) else None
-            }
-            
+        # Helper to recursively extract all Domain topologies (Standard and Composite)
+        def add_domain(d):
+            if d is None: return
+            if type(d).__name__ == "CompositeDomain":
+                if d.name not in compiled["domains"]:
+                    compiled["domains"][d.name] = {
+                        "type": "composite",
+                        "resolution": d.resolution,
+                        "domains": [sub.name for sub in d.domains]
+                    }
+                for sub in d.domains: add_domain(sub)
+            elif type(d).__name__ in ("Domain", "ConcatenatedDomain"):
+                if d.name not in compiled["domains"]:
+                    compiled["domains"][d.name] = {
+                        "bounds": getattr(d, "bounds", (0, 1)), 
+                        "resolution": d.resolution,
+                        "start_idx": getattr(d, "start_idx", 0),
+                        "coord_sys": getattr(d, "coord_sys", "cartesian"),
+                        "parent": d.parent.name if getattr(d, "parent", None) else None,
+                        "type": "standard"
+                    }
+        
+        # Scrape all instantiations to catch unbound, composite, or dynamically generated meshes
+        for d in self.components(Domain): add_domain(d)
+        for d in self.components(CompositeDomain): add_domain(d)
+        for s in self.components(State): add_domain(getattr(s, "domain", None))
+
         for target, bcs in raw.get("boundaries", {}).items():
             if isinstance(target, State):
                 compiled["boundaries"].append({
@@ -162,13 +180,7 @@ class PDE:
             if isinstance(eq, Piecewise):
                 compiled["equations"].append({"state": state.name, "type": "piecewise", "regions": eq.to_dict()["regions"]})
                 for reg in eq.region_map.keys():
-                    compiled["domains"][reg.name] = {
-                        "bounds": reg.bounds, 
-                        "resolution": reg.resolution,
-                        "start_idx": getattr(reg, "start_idx", 0),
-                        "coord_sys": getattr(reg, "coord_sys", "cartesian"),
-                        "parent": reg.parent.name if getattr(reg, "parent", None) else None
-                    }
+                    add_domain(reg)
             else:
                 compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict()})
                 

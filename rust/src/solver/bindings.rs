@@ -1,6 +1,8 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use rayon::prelude::*;
+use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use super::session::SolverHandle;
 use super::sundials::SundialsHandle;
 
@@ -19,11 +21,23 @@ pub fn solve_ida_native<'py>(
     let mut history = if record_history { Some(vec![(t_eval[0], y0_py.clone(), ydot0_py.clone())]) } else { None };
 
     for i in 0..handle.n { out_traj[i] = handle.y[i]; }
+    
+    let total_steps = t_eval.len().saturating_sub(1);
+    
     for step in 1..t_eval.len() {
         let dt = t_eval[step] - t_eval[step - 1];
         handle.step_with_history(dt, history.as_mut())?;
         for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
+        
+        if total_steps > 0 {
+            let pct = (step as f64 / total_steps as f64) * 100.0;
+            let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
+            let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+            print!("\r▶ Native [{}] {:.1}% | t: {:.1}s   ", bar, pct, t_eval[step]);
+            std::io::stdout().flush().unwrap();
+        }
     }
+    if total_steps > 0 { println!(); }
     
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
     
@@ -57,11 +71,24 @@ pub fn solve_ida_sundials<'py>(
     let mut handle = SundialsHandle::new(lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     for i in 0..handle.n { out_traj[i] = handle._y_data[i]; }
+    
+    let total_steps = t_eval.len().saturating_sub(1);
+    
     for step in 1..t_eval.len() {
         let dt = t_eval[step] - t_eval[step - 1];
         handle.step(dt)?;
         for i in 0..handle.n { out_traj[step * handle.n + i] = handle._y_data[i]; }
+        
+        if total_steps > 0 {
+            let pct = (step as f64 / total_steps as f64) * 100.0;
+            let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
+            let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+            print!("\r▶ Sundials [{}] {:.1}% | t: {:.1}s   ", bar, pct, t_eval[step]);
+            std::io::stdout().flush().unwrap();
+        }
     }
+    if total_steps > 0 { println!(); }
+    
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
     let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
     let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
@@ -75,6 +102,9 @@ pub fn solve_batch_native<'py>(
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     
     let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    
+    let completed = AtomicUsize::new(0);
+    let total = p_batch.len();
 
     let results: Result<Vec<Vec<f64>>, String> = py.allow_threads(|| {
         pool.install(|| {
@@ -92,10 +122,20 @@ pub fn solve_batch_native<'py>(
                     handle.step(dt).map_err(|e| e.to_string())?;
                     for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
                 }
+                
+                let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                let pct = (c as f64 / total as f64) * 100.0;
+                let filled = ((c as f64 / total as f64) * 30.0) as usize;
+                let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
+                std::io::stdout().flush().unwrap();
+                
                 Ok(out_traj)
             }).collect()
         })
     });
+    
+    println!();
 
     let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();

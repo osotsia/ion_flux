@@ -3,6 +3,7 @@ import logging
 import shutil
 import json
 import os
+import sys
 import tempfile
 from typing import Dict, Any, List, Optional, Tuple, Sequence as TypingSequence
 import numpy as np
@@ -459,6 +460,29 @@ class Engine:
                     for k, (offset, size) in self.layout.state_offsets.items():
                         data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
 
+                    # --- PROGRESS BAR RENDERER ---
+                    try:
+                        v_str = f" | V: {session.get('V_cell'):.3f}V"
+                    except KeyError:
+                        v_str = ""
+                        
+                    if t_max == float('inf'):
+                        sys.stdout.write(f"\r▶ {step_name:<4} ⏳ t: {session.time:.1f}s{v_str}   ")
+                    else:
+                        pct = min(t_elapsed / t_max, 1.0)
+                        filled = int(pct * 30)
+                        bar = "█" * filled + "-" * (30 - filled)
+                        sys.stdout.write(f"\r▶ {step_name:<4} [{bar}] {pct*100:.1f}% | t: {session.time:.1f}s{v_str}   ")
+                    sys.stdout.flush()
+
+                # Cap off the step with a finalized 100% bar and a clean newline
+                try:
+                    v_str = f" | V: {session.get('V_cell'):.3f}V"
+                except KeyError:
+                    v_str = ""
+                sys.stdout.write(f"\r▶ {step_name:<4} [██████████████████████████████] 100.0% | t: {session.time:.1f}s{v_str}   \n")
+                sys.stdout.flush()
+
             for k in data_hist: data_hist[k] = np.array(data_hist[k])
             
             trajectory = None
@@ -474,6 +498,46 @@ class Engine:
                 }
             
             return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
+            
+        if not RUST_FFI_AVAILABLE: raise RuntimeError(f"Native solver missing. FFI Error: {FFI_IMPORT_ERROR}")
+            
+        y0, ydot0, id_arr, spatial_diag, max_steps = self._extract_metadata()
+        p_list = self._pack_parameters(parameters or {})
+        m_list = self.layout.get_mesh_data()
+        
+        t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
+        record_history = requires_grad is not None
+        
+        try:
+            if self.solver_backend == "sundials":
+                y_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist()
+                )
+            else:
+                y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), 
+                    self.jacobian_bandwidth, spatial_diag, max_steps, record_history, self.debug
+                )
+        except RuntimeError as e:
+            self._handle_native_crash(e)
+        
+        data = {"Time [s]": t_eval_arr}
+        for state_name, (offset, size) in self.layout.state_offsets.items():
+            if size == 1: data[state_name] = y_res[:, offset]
+            else: data[state_name] = y_res[:, offset:offset+size]
+            
+        trajectory = None
+        if requires_grad: 
+            trajectory = {
+                "Time [s]": t_eval_arr, 
+                "_y_raw": y_res, 
+                "_micro_t": micro_t,
+                "_micro_y": micro_y,
+                "_micro_ydot": micro_ydot,
+                "_p_traj": [p_list]*len(micro_t), 
+                "requires_grad": requires_grad
+            }
+        return SimulationResult(data, parameters or {}, status="completed", engine=self, trajectory=trajectory)
             
         if not RUST_FFI_AVAILABLE: raise RuntimeError(f"Native solver missing. FFI Error: {FFI_IMPORT_ERROR}")
             

@@ -17,13 +17,19 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
     dx_stmts = []
     
     for d_name, d_info in ast_payload.get("domains", {}).items():
-        res_val = max(d_info["resolution"] - 1, 1)
+        # Composite domains do not have a flat `dx`. Their spatial steps are defined by their 1D sub-domains.
+        if d_info.get("type") == "composite":
+            continue
+            
+        res_val = max(d_info.get("resolution", 2) - 1, 1)
         if d_name in ctx.dynamic_domains:
             rhs_ir = visitor.lower(ctx.dynamic_domains[d_name]["rhs"], Literal(0))
             dx_stmts.append(RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
         else:
-            dx_val = float(d_info["bounds"][1] - d_info["bounds"][0]) / res_val
+            bounds = d_info.get("bounds", (0.0, 1.0))
+            dx_val = float(bounds[1] - bounds[0]) / res_val
             dx_stmts.append(RawCpp(f"double dx_{d_name} = {dx_val};"))
+            
     dx_stmts.append(RawCpp("double dx_default = 1.0;"))
     
     for eq_data in ast_payload.get("equations", []):
