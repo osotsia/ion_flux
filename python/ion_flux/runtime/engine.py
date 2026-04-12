@@ -12,6 +12,7 @@ from ion_flux.dsl.core import PDE, State, Parameter
 from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp, extract_state_name
 from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
+from ion_flux.compiler.passes.verification import verify_manifold, TopologicalError
 from ion_flux.runtime.session import Session
 
 try:
@@ -54,6 +55,9 @@ class Engine:
         self.ast_payload: Dict[str, Any] = model.ast() if hasattr(model, "ast") else {}
         
         if self.ast_payload:
+            # 0. Static Manifold Verification (Halt immediately on bad topology)
+            verify_manifold(self.ast_payload)
+            
             # 1. Validate System Rank (No Unconstrained States)
             # Explicit Equation Targeting guarantees every eq directly maps to a state key.
             targeted_states = {eq["state"] for eq in self.ast_payload.get("equations", [])}
