@@ -51,9 +51,9 @@ class PiecewisePorosityOracle(fx.PDE):
     If a shared interface node is overwritten by the Piecewise region iterator instead 
     of averaging the volumetric capacity, mass will leak.
     """
-    cell = fx.Domain(bounds=(0, 2.0), resolution=21) # dx = 0.1
-    reg_A = cell.region(bounds=(0, 1.0), resolution=11, name="reg_A") # Indices 0-10
-    reg_B = cell.region(bounds=(1.0, 2.0), resolution=11, name="reg_B") # Indices 10-20
+    cell = fx.Domain(bounds=(0, 2.0), resolution=20) 
+    reg_A = cell.region(bounds=(0, 1.0), resolution=10, name="reg_A") # Indices 0-9
+    reg_B = cell.region(bounds=(1.0, 2.0), resolution=10, name="reg_B") # Indices 10-19
     
     c = fx.State(domain=cell, name="c")
     
@@ -79,7 +79,7 @@ class PiecewisePorosityOracle(fx.PDE):
 def test_oracle_piecewise_porosity_conservation():
     """
     PROBE: Ensures the AST compiler correctly handles discontinuous LHS multipliers 
-    at overlapping FVM boundaries. A failure here explains capacity drift in full-cell models.
+    at FVM faces. A failure here explains capacity drift in full-cell models.
     """
     engine = Engine(model=PiecewisePorosityOracle(), target="cpu", mock_execution=False)
     
@@ -87,31 +87,29 @@ def test_oracle_piecewise_porosity_conservation():
     res = engine.solve(t_span=(0, 2.0), t_eval=np.array([0.0, 2.0]))
     c_final = res["c"].data[-1]
     
-    dx = 0.1
-    # Integrate mass = sum(eps_i * c_i * V_i)
-    # Node 0: V = 0.5*dx. eps = 1.0.
-    # Nodes 1-9: V = dx. eps = 1.0.
-    # Node 10 (Interface): V = dx. Half belongs to A, Half to B. Effective eps = (1.0 + 5.0)/2 = 3.0.
-    # Nodes 11-19: V = dx. eps = 5.0.
-    # Node 20: V = 0.5*dx. eps = 5.0.
+    dx = 2.0 / 19.0
     
     mass_integrated = 0.0
-    for i in range(21):
+    for i in range(20):
         if i == 0:
             mass_integrated += 1.0 * c_final[i] * (0.5 * dx)
-        elif 1 <= i <= 9:
+        elif 1 <= i <= 8:
+            mass_integrated += 1.0 * c_final[i] * dx
+        elif i == 9:
+            # Node 9 is fully in reg_A. Its right face is the boundary.
             mass_integrated += 1.0 * c_final[i] * dx
         elif i == 10:
-            mass_integrated += 3.0 * c_final[i] * dx
-        elif 11 <= i <= 19:
+            # Node 10 is fully in reg_B. Its left face is the boundary.
             mass_integrated += 5.0 * c_final[i] * dx
-        elif i == 20:
+        elif 11 <= i <= 18:
+            mass_integrated += 5.0 * c_final[i] * dx
+        elif i == 19:
             mass_integrated += 5.0 * c_final[i] * (0.5 * dx)
             
     # Allow 1e-4 tolerance for inherent implicit time-stepping errors
     np.testing.assert_allclose(mass_integrated, 2.0, rtol=1e-4, 
         err_msg="Mass leaked at the discontinuous capacity interface! "
-                "The Piecewise AST logic is overwriting LHS capacities at shared nodes.")
+                "The Piecewise AST logic is overwriting LHS capacities at shared faces.")
 
 
 # ==============================================================================

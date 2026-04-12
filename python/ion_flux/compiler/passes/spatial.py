@@ -326,10 +326,10 @@ class SpatialLoweringVisitor:
                     f"        double vol_{d_name} = {pi_val} * (std::pow(r_right_{d_name}, 2.0) - std::pow(r_left_{d_name}, 2.0));\n"
                 )
             elif d_coord_sys == "unstructured":
-                vol_off = None
-                if d_name in self.layout.mesh_offsets:
-                    vol_off = self.layout.mesh_offsets[d_name].get("volumes")
-                if vol_off is not None:
+                # Ensure we aggressively check mesh offsets or default to a safe 1.0 multiplier 
+                # (which should never happen if passed properly from the frontend).
+                if d_name in self.layout.mesh_offsets and "volumes" in self.layout.mesh_offsets[d_name]:
+                    vol_off = self.layout.mesh_offsets[d_name]["volumes"]
                     return f"        double vol_{d_name} = m[{vol_off} + {idx_var}];\n"
                 else:
                     return f"        double vol_{d_name} = 1.0;\n"
@@ -619,14 +619,18 @@ class SpatialLoweringVisitor:
                 micro_idx = BinaryOp("%", local_idx, Literal(micro_domain.resolution))
                 return BinaryOp("+", micro_idx, Literal(getattr(micro_domain, "start_idx", 0)))
         else:
+            # Absolute topological translation
             target_parent = getattr(target_domain, "parent", None)
             current_parent = getattr(self.current_domain, "parent", None)
             curr_name = getattr(self.current_domain, "name", "")
+            target_name = getattr(target_domain, "name", "")
             
-            # Topological Sub-meshing offsets (e.g. Anode Sub-Mesh starts at index 0, Separator starts at index 40)
+            # If current is parent (cell) and target is region (x_p)
             if target_parent and target_parent.name == curr_name:
                 return BinaryOp("-", local_idx, Literal(target_domain.start_idx))
-            elif current_parent and current_parent.name == target_domain.name:
+                
+            # If current is region (x_p) and target is parent (cell)
+            elif current_parent and current_parent.name == target_name:
                 return BinaryOp("+", local_idx, Literal(getattr(self.current_domain, "start_idx", 0)))
                 
         return local_idx
@@ -635,49 +639,33 @@ class SpatialLoweringVisitor:
         """
         If we are at the interface boundary of two adjacent Piecewise regions, 
         evaluates the correct mathematical fluxes from both sides to guarantee global mass conservation.
-        Handles both node-sharing (overlap) and face-sharing meshes natively.
+        Handles strictly face-sharing (FVM) meshes natively.
         """
         reg_data = self.current_region_data
         end_idx = reg_data["end_idx"]
         start_idx = reg_data["start_idx"]
         
-        # Check for overlapping (node-sharing) meshes
-        next_reg_overlap = next((r for r in self.piecewise_regions if r["start_idx"] == end_idx - 1), None)
-        prev_reg_overlap = next((r for r in self.piecewise_regions if r["end_idx"] - 1 == start_idx), None)
-        
-        # Check for non-overlapping (face-sharing) meshes
+        # Check for non-overlapping (face-sharing) contiguous mesh boundaries
         next_reg_face = next((r for r in self.piecewise_regions if r["start_idx"] == end_idx), None)
         prev_reg_face = next((r for r in self.piecewise_regions if r["end_idx"] == start_idx), None)
         
-        if next_reg_overlap and next_reg_overlap["domain"] in self.region_divs:
-            next_flux_node = self.region_divs[next_reg_overlap["domain"]]
-            if next_flux_node:
-                next_flux_ir = self.lower(next_flux_node, idx, face="right")
-                cond = BinaryOp("==", idx, Literal(f"{end_idx - 1}"))
-                # Right face of the shared node is fully in the next region
-                right_flux = Ternary(cond, next_flux_ir, right_flux)
-                
-        elif next_reg_face and next_reg_face["domain"] in self.region_divs:
+        if next_reg_face and next_reg_face["domain"] in self.region_divs:
             next_flux_node = self.region_divs[next_reg_face["domain"]]
             if next_flux_node:
+                # Evaluate the flux from the adjacent region exactly at the shared geometric face
                 next_flux_ir = self.lower(next_flux_node, idx, face="right")
                 cond = BinaryOp("==", idx, Literal(f"{end_idx - 1}"))
+                
+                # Mass-Conservative Arithmetic Interface Averaging (Industry FVM Standard)
                 avg_flux = BinaryOp("*", Literal(0.5), BinaryOp("+", right_flux, next_flux_ir))
                 right_flux = Ternary(cond, avg_flux, right_flux)
 
-        if prev_reg_overlap and prev_reg_overlap["domain"] in self.region_divs:
-            prev_flux_node = self.region_divs[prev_reg_overlap["domain"]]
-            if prev_flux_node:
-                prev_flux_ir = self.lower(prev_flux_node, idx, face="left")
-                cond = BinaryOp("==", idx, Literal(f"{start_idx}"))
-                # Left face of the shared node is fully in the previous region
-                left_flux = Ternary(cond, prev_flux_ir, left_flux)
-                
-        elif prev_reg_face and prev_reg_face["domain"] in self.region_divs:
+        if prev_reg_face and prev_reg_face["domain"] in self.region_divs:
             prev_flux_node = self.region_divs[prev_reg_face["domain"]]
             if prev_flux_node:
                 prev_flux_ir = self.lower(prev_flux_node, idx, face="left")
                 cond = BinaryOp("==", idx, Literal(f"{start_idx}"))
+                
                 avg_flux = BinaryOp("*", Literal(0.5), BinaryOp("+", left_flux, prev_flux_ir))
                 left_flux = Ternary(cond, avg_flux, left_flux)
                 

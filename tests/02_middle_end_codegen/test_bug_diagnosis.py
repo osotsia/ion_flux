@@ -7,9 +7,9 @@ from ion_flux.runtime.engine import Engine
 # Model 1: Piecewise Equation (Works correctly)
 # ==============================================================================
 class PiecewiseBoundaryModel(fx.PDE):
-    cell = fx.Domain(bounds=(0, 10.0), resolution=11)
-    reg_A = cell.region(bounds=(0, 5.0), resolution=6, name="reg_A")
-    reg_B = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg_B")
+    cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg_A = cell.region(bounds=(0, 5.0), resolution=5, name="reg_A")
+    reg_B = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg_B")
     
     c = fx.State(domain=cell, name="c") # Bound to PARENT
     
@@ -32,8 +32,8 @@ class PiecewiseBoundaryModel(fx.PDE):
 # Model 2: Standard Equation on Region (The Bug Suspect)
 # ==============================================================================
 class StandardRegionBoundaryModel(fx.PDE):
-    cell = fx.Domain(bounds=(0, 10.0), resolution=11)
-    reg = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg")
+    cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg")
     
     c_reg = fx.State(domain=reg, name="c_reg") # Bound to REGION
     
@@ -54,17 +54,17 @@ class StandardRegionBoundaryModel(fx.PDE):
 # Model 3: The Mask Workaround (Proving the fix)
 # ==============================================================================
 class WorkaroundRegionBoundaryModel(fx.PDE):
-    cell = fx.Domain(bounds=(0, 10.0), resolution=11)
-    reg = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg")
+    cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg")
     
     c_reg = fx.State(domain=reg, name="c_reg")
     
     def math(self):
         # 1. Create a spatial mask that is 1.0 ONLY at the rightmost node
-        # Cell dx = 1.0. Region bounds are 5.0 to 10.0. Rightmost node is > 9.0.
+        # Cell dx = 10.0/9.0. Rightmost node is 10.0.
         mask = (self.reg.coords > 9.0)
         
-        dx = 1.0
+        dx = 10.0 / 9.0
         V_node = 0.5 * dx
         
         # 2. Inject the boundary flux manually into the divergence equation
@@ -89,9 +89,9 @@ def test_piecewise_boundary_evaluates_correctly():
     
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
     
-    # Expected residual at the right boundary: F = ydot - (-div(flux))
-    # div(flux) = (flux_out - flux_in) / V_node = (100.0 - 0.0) / 0.5 = 200.0
-    assert res[-1] == pytest.approx(200.0), "Piecewise boundary failed!"
+    dx = 10.0 / 9.0
+    expected_res = 100.0 / (0.5 * dx)
+    assert res[-1] == pytest.approx(expected_res), "Piecewise boundary failed!"
 
 
 def test_standard_region_boundary_is_ignored():
@@ -120,8 +120,9 @@ def test_spatial_mask_workaround_succeeds():
     
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
     
-    # The mask should inject exactly 200.0 into the final node.
-    assert res[-1] == pytest.approx(200.0), "The manual mask workaround failed!"
+    dx = 10.0 / 9.0
+    expected = 100.0 / (0.5 * dx)
+    assert res[-1] == pytest.approx(expected), "The manual mask workaround failed!"
 
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])

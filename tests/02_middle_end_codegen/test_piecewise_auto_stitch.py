@@ -76,10 +76,10 @@ class TriRegionElectrolyte(fx.PDE):
     3-Region model mirroring the exact bug structure from the O'Regan paper.
     If not auto-stitched, the interfaces at x=1 and x=2 will leak.
     """
-    cell = fx.Domain(bounds=(0, 3.0), resolution=31)
-    x_n = cell.region(bounds=(0, 1.0), resolution=11, name="x_n")
-    x_s = cell.region(bounds=(1.0, 2.0), resolution=11, name="x_s")
-    x_p = cell.region(bounds=(2.0, 3.0), resolution=11, name="x_p")
+    cell = fx.Domain(bounds=(0, 3.0), resolution=30)
+    x_n = cell.region(bounds=(0, 1.0), resolution=10, name="x_n")
+    x_s = cell.region(bounds=(1.0, 2.0), resolution=10, name="x_s")
+    x_p = cell.region(bounds=(2.0, 3.0), resolution=10, name="x_p")
     
     c_e = fx.State(domain=cell, name="c_e")
     
@@ -228,8 +228,8 @@ def test_triregion_mass_conservation():
     
     res = engine.evaluate_residual(y, ydot, parameters={})
     
-    dx_bulk = 3.0 / 30.0
-    V_cells = _get_exact_volumes([31], [dx_bulk])
+    dx_bulk = 3.0 / 29.0
+    V_cells = _get_exact_volumes([30], [dx_bulk])
     
     total_mass_drift = np.sum(np.array(res) * V_cells)
     assert np.isclose(total_mass_drift, 0.0, atol=1e-10), f"Leaked mass! Drift: {total_mass_drift}"

@@ -42,9 +42,9 @@ class PiecewiseShadowingPDE(fx.PDE):
     (idx == N-1), but the loop iterates in global space (idx = 5 to 9), the 
     boundary will be silently bypassed.
     """
-    cell = fx.Domain(bounds=(0, 10.0), resolution=11)
-    reg_A = cell.region(bounds=(0, 5.0), resolution=6, name="reg_A")
-    reg_B = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg_B")
+    cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg_A = cell.region(bounds=(0, 5.0), resolution=5, name="reg_A")
+    reg_B = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg_B")
     
     c = fx.State(domain=cell, name="c")
     
@@ -121,9 +121,9 @@ class ExplicitSurfaceAPIPDE(fx.PDE):
     Validates that explicitly calling `tensor.surface(domain, side)` forcibly 
     overrides contextual domain inference and evaluates the boundary correctly.
     """
-    cell = fx.Domain(bounds=(0, 10.0), resolution=11)
-    reg_A = cell.region(bounds=(0, 5.0), resolution=6, name="reg_A")
-    reg_B = cell.region(bounds=(5.0, 10.0), resolution=6, name="reg_B")
+    cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg_A = cell.region(bounds=(0, 5.0), resolution=5, name="reg_A")
+    reg_B = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg_B")
     
     c = fx.State(domain=cell, name="c")
     
@@ -160,15 +160,15 @@ def test_piecewise_index_shadowing():
     # div(flux) = (flux_out - flux_in) / (0.5 * dx). 
     # At the right boundary, flux_out = 100.0, flux_in = 0.0.
     # Residual F = ydot - (-div(flux)) = 0 + (100.0 / (0.5 * dx))
-    dx = 10.0 / 10.0  # Cell length 10, res 11 -> 10 intervals -> dx=1.0
+    dx = 10.0 / 9.0  # Strict Face-Sharing staggered boundary centers
     expected_res = 100.0 / (0.5 * dx)
     
-    # The rightmost node globally is index 10. 
+    # The rightmost node globally is index 9. 
     assert res[-1] == pytest.approx(expected_res), \
         "Piecewise boundary was silently bypassed due to global/local index shadowing!"
     
-    # Ensure it wasn't accidentally applied to the end of reg_A (index 5)
-    assert res[5] == pytest.approx(0.0)
+    # Ensure it wasn't accidentally applied to the end of reg_A (index 4)
+    assert res[4] == pytest.approx(0.0)
 
 
 @REQUIRES_COMPILER
@@ -219,8 +219,11 @@ def test_explicit_surface_api_override():
     
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
     
-    dx = 1.0
+    dx = 10.0 / 9.0
     expected_res = 99.0 / (0.5 * dx)
     
     assert res[-1] == pytest.approx(expected_res), \
         "The explicit `tensor.surface(domain, side)` API failed to override the context masking."
+
+if __name__ == "__main__":
+    pytest.main(["-v", "-s", __file__])

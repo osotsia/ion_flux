@@ -105,9 +105,9 @@ class CoupledPiecewiseMMSOracle(fx.PDE):
     DAE: 0 = div(grad(phi)) + 2.0 + {Coupling Term -> 0}
     PDE: dt(c) = div(grad(c)) - 1.0 + {Coupling Term -> 0}
     """
-    cell = fx.Domain(bounds=(0, 2.0), resolution=21, name="cell")
-    reg_A = cell.region(bounds=(0, 1.0), resolution=11, name="reg_A")
-    reg_B = cell.region(bounds=(1.0, 2.0), resolution=11, name="reg_B")
+    cell = fx.Domain(bounds=(0, 2.0), resolution=20, name="cell")
+    reg_A = cell.region(bounds=(0, 1.0), resolution=10, name="reg_A")
+    reg_B = cell.region(bounds=(1.0, 2.0), resolution=10, name="reg_B")
 
     c = fx.State(domain=cell, name="c")
     phi = fx.State(domain=cell, name="phi")
@@ -148,7 +148,7 @@ def test_oracle_piecewise_stitching_and_dae_coupling():
     
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
     
-    x_coords = np.linspace(0, 2.0, 21)
+    x_coords = np.linspace(0, 2.0, 20)
     c_exact = 1.0 + x_coords**2
     phi_exact = 1.0 - x_coords**2
     

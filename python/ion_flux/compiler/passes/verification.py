@@ -58,10 +58,8 @@ def verify_manifold(ast_payload: Dict[str, Any]) -> None:
                 next_name, next_info = children[i+1]
                 next_start = next_info["start_idx"]
                 
-                # FVM (Face-Sharing): c_end == next_start
-                # FEM (Node-Sharing): c_end == next_start + 1
-                # Anything greater implies mathematical overlap and memory corruption.
-                if c_end > next_start + 1:
+                # Strict Face-Sharing FVM topology: end index must not exceed the next start index
+                if c_end > next_start:
                     raise TopologicalError(
                         f"Topological Overlap Detected! Region '{c_name}' ends at index {c_end}, "
                         f"but contiguous Region '{next_name}' starts at {next_start}. "

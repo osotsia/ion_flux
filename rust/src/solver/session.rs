@@ -110,6 +110,9 @@ impl SolverHandle {
         self.ydot = ydot;
         self.lu_solver.mark_stale();
         self.diag.accepted_steps = 0; // Force a safe BDF cold start to rebuild history phi polynomials!
+        self.history.order = 1;       // Flush corrupted VSVO polynomial predictions
+        self.history.k_used = 0;
+        self.history.ns = 0;
         Ok(())
     }
 
