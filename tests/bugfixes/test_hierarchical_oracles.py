@@ -424,5 +424,191 @@ def test_oracle_chen2020_topological_overlap_off_by_one():
     assert c_residuals[-1] == pytest.approx(-5.0), \
         "The rightmost node of the cell was orphaned (never evaluated) because the cathode region shifted left!"
 
+
+# ==============================================================================
+# ORACLE 7: EIS Mass Matrix Extraction (Engine Bug)
+# ==============================================================================
+
+class CapacitiveImpedanceOracle(fx.PDE):
+    """
+    Proves the Engine's Analytical EIS solver incorrectly extracts the Mass Matrix.
+    By allowing non-unit multipliers on the time derivative (C * dt(V)), the 
+    true mass matrix M = C. The engine currently hardcodes M = id_arr (1.0).
+    """
+    V = fx.State(domain=None, name="V")
+    C_cap = fx.Parameter(default=5.0, name="C_cap")
+    R = fx.Parameter(default=2.0, name="R")
+    i_app = fx.Parameter(default=1.0, name="i_app")
+    
+    def math(self):
+        return {
+            "equations": {
+                # Implicit capacity: M = 5.0
+                self.V: self.C_cap * fx.dt(self.V) == self.i_app - self.V / self.R
+            },
+            "boundaries": {},
+            "initial_conditions": {self.V: 0.0}
+        }
+
+@REQUIRES_COMPILER
+def test_oracle_eis_mass_matrix_extraction():
+    """
+    PROBE: Compares the simulated EIS against the exact analytical Transfer Function.
+    This will fail until `eis.py` is updated to evaluate `M = J(c_j=1) - J(c_j=0)`.
+    """
+    engine = Engine(model=CapacitiveImpedanceOracle(), target="cpu", mock_execution=False)
+    session = engine.start_session(parameters={"C_cap": 5.0, "R": 2.0, "i_app": 1.0})
+    session.reach_steady_state()
+    
+    w_arr = np.array([0.1, 1.0, 10.0])
+    eis_res = session.solve_eis(w_arr, input_var="i_app", output_var="V")
+    
+    Z_sim = eis_res["Z_real"].data + 1j * eis_res["Z_imag"].data
+    
+    # Exact Analytical Transfer Function: Z(w) = R / (1 + j * w * R * C)
+    Z_exact = 2.0 / (1.0 + 1j * w_arr * 2.0 * 5.0)
+    
+    np.testing.assert_allclose(
+        np.real(Z_sim), np.real(Z_exact), rtol=1e-4,
+        err_msg="EIS Mass Matrix Bug! The engine is hardcoding M=1.0 instead of extracting M=5.0."
+    )
+
+
+# ==============================================================================
+# ORACLE 8: Continuous Adjoint VJP Sensitivities (Engine Bug)
+# ==============================================================================
+
+class AdjointCapacityOracle(fx.PDE):
+    """
+    Proves the Continuous Adjoint solver (adjoint.rs) also suffers from the 
+    hardcoded Mass Matrix bug.
+    """
+    y = fx.State(domain=None, name="y")
+    C_cap = fx.Parameter(default=2.0, name="C_cap")
+    k = fx.Parameter(default=1.0, name="k")
+    
+    def math(self):
+        return {
+            "equations": {
+                self.y: self.C_cap * fx.dt(self.y) == -self.k * self.y
+            },
+            "boundaries": {},
+            "initial_conditions": {self.y: 1.0}
+        }
+
+@REQUIRES_COMPILER
+def test_oracle_adjoint_mass_matrix_vjp():
+    """
+    PROBE: Compares the Enzyme-derived continuous Adjoint gradient to an exact 
+    Scipy-derived analytical ground truth.
+    """
+    engine = Engine(model=AdjointCapacityOracle(), target="cpu", mock_execution=False)
+    t_eval = np.linspace(0, 5.0, 50)
+    
+    # Forward Pass
+    res = engine.solve(t_eval=t_eval, parameters={"C_cap": 2.0, "k": 1.0}, requires_grad=["C_cap"])
+    
+    # Loss = Sum( y^2 )
+    y_sim = res["y"].data
+    loss_val = float(np.sum(y_sim ** 2))
+    
+    # Manual backprop to inject into the engine
+    dl_dy = 2.0 * y_sim
+    res.trajectory["requires_grad"] = ["C_cap"]
+    
+    # Trigger native Adjoint pass
+    loss_obj = fx.metrics.Loss(loss_val, engine=engine, trajectory=res.trajectory, dl_dy_mapped=np.expand_dims(dl_dy, axis=1))
+    grads = loss_obj.backward()
+    
+    simulated_grad = grads["C_cap"]
+    
+    # Exact Analytical Oracle
+    # y(t) = exp(-k * t / C)
+    # dLoss/dC = sum( d/dC [exp(-2 * k * t / C)] )
+    # dLoss/dC = sum( exp(-2 * k * t / C) * (2 * k * t / C^2) )
+    exact_grad = np.sum( np.exp(-2.0 * 1.0 * t_eval / 2.0) * (2.0 * 1.0 * t_eval / (2.0**2)) )
+    
+    np.testing.assert_allclose(
+        simulated_grad, exact_grad, rtol=1e-3,
+        err_msg="Adjoint Mass Matrix Bug! The VJP loop in Rust is likely ignoring the capacity multiplier."
+    )
+
+# ==============================================================================
+# ORACLE 9: Variable Transference Mass Leak (Literature Inconsistency)
+# ==============================================================================
+
+class VariableTransferenceLeakProbe(fx.PDE):
+    """
+    Proves that `(1 - t_+) * j` leaks mass when t_plus is a spatial field.
+    The strictly conservative form is: -div(-D*grad(c) + t_+*i_e / F) + j/F
+    """
+    x = fx.Domain(bounds=(0, 1.0), resolution=10, name="x")
+    
+    c_leaky = fx.State(domain=x, name="c_leaky")
+    c_strict = fx.State(domain=x, name="c_strict")
+    
+    def math(self):
+        F = 96485.0
+        j_val = 1000.0
+        
+        # Create a variable t_plus field
+        t_plus = 0.2 + 0.1 * self.x.coords 
+        
+        # Manufactured i_e gradient to trigger the leak
+        i_e = 10.0 * self.x.coords 
+        
+        # 1. The published formulation from Table S2 of O'Regan 2022
+        flux_leaky = -1e-10 * fx.grad(self.c_leaky)
+        eq_leaky = -fx.div(flux_leaky) + (1.0 - t_plus) * j_val / F
+        
+        # 2. The mathematically strict, physically conservative formulation
+        flux_strict = -1e-10 * fx.grad(self.c_strict) + (t_plus * i_e) / F
+        eq_strict = -fx.div(flux_strict) + j_val / F
+        
+        return {
+            "equations": {
+                self.c_leaky: fx.dt(self.c_leaky) == eq_leaky,
+                self.c_strict: fx.dt(self.c_strict) == eq_strict
+            },
+            "boundaries": {
+                flux_leaky: {"left": 0.0, "right": 0.0},
+                flux_strict: {"left": 0.0, "right": 0.0}
+            },
+            "initial_conditions": {
+                self.c_leaky: 1000.0,
+                self.c_strict: 1000.0
+            }
+        }
+
+@pytest.mark.skip(reason="The O'Regan 2022 paper publishes a non-conservative electrolyte mass equation.")
+@REQUIRES_COMPILER
+def test_oracle_literature_transference_mass_leak():
+    """
+    PROBE: Integrates total electrolyte mass. If it drifts from the exact analytical 
+    influx of `j / F`, mass has leaked. 
+    
+    This test is skipped. The user script faithfully reproduces the DFN equations
+    published in the O'Regan 2022 paper, but the paper itself contains an error.
+    """
+    engine = Engine(model=VariableTransferenceLeakProbe(), target="cpu", mock_execution=False)
+    
+    res = engine.solve(t_span=(0, 10.0), t_eval=np.array([0.0, 10.0]))
+    
+    # Exact analytical mass added = j_val / F * time * length
+    exact_mass_added = (1000.0 / 96485.0) * 10.0 * 1.0
+    
+    mass_leaky = np.mean(res["c_leaky"].data[-1]) - 1000.0
+    mass_strict = np.mean(res["c_strict"].data[-1]) - 1000.0
+    
+    np.testing.assert_allclose(mass_strict, exact_mass_added, rtol=1e-4)
+    
+    np.testing.assert_allclose(
+        mass_leaky, exact_mass_added, rtol=1e-4,
+        err_msg="Literature Inconsistency! The user faithfully implemented Table S2 of O'Regan 2022, "
+                "which uses the simplified source term `(1 - t_plus) * j / F`. However, because Eq 21 "
+                "defines t_plus as a spatial variable, factoring it outside the divergence operator "
+                "mathematically omits the `i_e * grad(t_plus)` term, causing a global mass leak."
+    )
+
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])

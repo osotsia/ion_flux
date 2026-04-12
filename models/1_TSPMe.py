@@ -44,6 +44,7 @@ class ExactTSPMe(fx.PDE):
     i_app = fx.State(domain=None, name="i_app")   # 0D Cycler terminal 
     
     T_amb = fx.Parameter(default=298.15, name="T_amb")
+    Ds_n = fx.Parameter(default=3.3e-14, name="Ds_n")  # <-- ADDED
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
@@ -71,15 +72,15 @@ class ExactTSPMe(fx.PDE):
         # Electrolyte Properties
         De_ref, sig_e_ref, t_plus = 3e-10, 1.0, 0.2594
         
-        # Thermal Properties (Table 4 for h_cool & Table 1 for theta_heat)
-        theta_heat = 2.32e6  # Tuned volumetric heat capacity [J / (K m^3)]
-        h_cool = 16.0        # Tuned heat exchange coefficient [W / (K m^2)]
+        # Thermal Properties (Table 1 of Brosa Planella 2021)
+        theta_heat = 2.85e6  # Baseline volumetric heat capacity [J / (K m^3)]
+        h_cool = 20.0        # Baseline heat exchange coefficient [W / (K m^2)]
         a_cool = 219.42      # Cooling surface area density [1/m]
 
         # Solid Diffusion (Paper uses 'effective' constants per C-rate/Temp rather than Arrhenius)
         # Note: To replicate the paper's plots exactly at a specific temperature,
         # you would manually tune these constants per run. Here we use the base reference values.
-        Ds_n = 3.3e-14 
+        # Ds_n = 3.3e-14 
         Ds_p = 4.0e-15
 
         # Helper AST macros
@@ -172,7 +173,7 @@ class ExactTSPMe(fx.PDE):
         # PDEs & Spatial Tensors
         # =====================================================================
         
-        N_s_n = -Ds_n * fx.grad(self.c_s_n, axis=self.r_n)
+        N_s_n = -self.Ds_n * fx.grad(self.c_s_n, axis=self.r_n)
         N_s_p = -Ds_p * fx.grad(self.c_s_p, axis=self.r_p)
         
         De_eff_n = De_ref * (eps_n ** b_brug)
@@ -225,6 +226,7 @@ if __name__ == "__main__":
     engine = fx.Engine(model=ExactTSPMe(), target="cpu:serial", jacobian_bandwidth=0)
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
+    tuned_Dn = {"0.5C": 0.9e-14, "1C": 2.0e-14, "2C": 6.0e-14}  # <-- ADDED (from Table 4)
     results = {}
     
     for name, current in rates.items():
@@ -234,7 +236,9 @@ if __name__ == "__main__":
             CC(rate=current, until=engine.model.V_cell <= 2.5, time=15000),
             Rest(time=7200)
         ])
-        results[name] = engine.solve(protocol=protocol)
+        
+        # <-- UPDATED: Inject the tuned parameter
+        results[name] = engine.solve(protocol=protocol, parameters={"Ds_n": tuned_Dn[name]})
 
 
     # =========================================================================
