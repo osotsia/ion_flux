@@ -13,7 +13,13 @@ def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str)
         Z = 0.05 + (0.1 / (1 + 1j * w_arr * 0.1)) + (0.01 / np.sqrt(1j * w_arr))
     else:
         N = session.engine.layout.n_states
+        
+        # EXACT MASS MATRIX EXTRACTION
+        # Because J(c_j) = dF/dy + c_j * dF/dydot, evaluating J at c_j=1.0 and 
+        # subtracting the steady-state J(0.0) extracts exactly dF/dydot (The Mass Matrix).
         J_steady = session.handle.get_jacobian(0.0)
+        J_1 = session.handle.get_jacobian(1.0)
+        M = J_1 - J_steady
         
         y = session.handle.get_state()
         ydot = np.zeros_like(y)
@@ -41,7 +47,6 @@ def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str)
         C[out_offset] = 1.0 
         
         Z = np.zeros_like(w_arr, dtype=np.complex128)
-        M = np.diag(session.id_arr)
         
         for i, w in enumerate(w_arr):
             A = 1j * w * M + J_steady
