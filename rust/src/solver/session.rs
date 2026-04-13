@@ -59,24 +59,63 @@ impl SolverHandle {
     }
 
     pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {
-        let mut res = vec![0.0; self.n];
-        unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), res.as_mut_ptr()); }
+        let max_iters = 50;
+        for _iter in 0..max_iters {
+            let mut res = vec![0.0; self.n];
+            unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), res.as_mut_ptr()); }
 
-        let mut max_res = 0.0_f64;
-        for i in 0..self.n {
-            if self.id[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
-        }
-        if max_res < 1e-8 { return Ok(()); }
+            let mut max_res = 0.0_f64;
+            for i in 0..self.n {
+                if self.id[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
+            }
+            if max_res < 1e-8 { break; }
 
-        let mut jac = vec![0.0; self.n * self.n];
-        unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+            let mut jac = vec![0.0; self.n * self.n];
+            unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
 
-        for i in 0..self.n {
-            if self.id[i] < 0.5 { 
-                let diag = jac[i * self.n + i];
-                if diag.abs() > 1e-12 {
-                    self.y[i] -= res[i] / diag;
+            if self.bw == -1 {
+                // Fallback under-relaxation for Matrix-Free GMRES initialization
+                for i in 0..self.n {
+                    if self.id[i] < 0.5 { 
+                        let diag = jac[i * self.n + i];
+                        if diag.abs() > 1e-12 {
+                            let mut step = -res[i] / diag;
+                            if self.max_steps[i] > 0.0 && step.abs() > self.max_steps[i] {
+                                step = step.signum() * self.max_steps[i];
+                            }
+                            self.y[i] += step * 0.5; 
+                        }
+                    }
                 }
+            } else {
+                // Exact Sparse LU fully coupled resolution
+                for i in 0..self.n {
+                    if self.id[i] > 0.5 {
+                        res[i] = 0.0;
+                        for j in 0..self.n {
+                            jac[j * self.n + i] = if i == j { 1.0 } else { 0.0 };
+                        }
+                    }
+                }
+
+                let mut dy = res.clone();
+                for i in 0..self.n { dy[i] = -dy[i]; }
+
+                if let Err(_) = self.lu_solver.factorize(&jac, &mut self.diag) { break; }
+                if let Err(_) = self.lu_solver.solve(&mut dy, &mut self.diag) { break; }
+
+                let mut max_step = 0.0;
+                for i in 0..self.n {
+                    if self.id[i] < 0.5 {
+                        let mut step = dy[i];
+                        if self.max_steps[i] > 0.0 && step.abs() > self.max_steps[i] {
+                            step = step.signum() * self.max_steps[i];
+                        }
+                        self.y[i] += step;
+                        if step.abs() > max_step { max_step = step.abs(); }
+                    }
+                }
+                if max_step < 1e-14 { break; } // Stalled
             }
         }
         
@@ -84,7 +123,7 @@ impl SolverHandle {
         self.history.k_used = 0;
         self.history.ns = 0;
         self.lu_solver.mark_stale();
-        self.diag.accepted_steps = 0; // Force a safe BDF cold start
+        self.diag.accepted_steps = 0; // Force safe BDF cold start
         
         Ok(())
     }

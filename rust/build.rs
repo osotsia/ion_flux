@@ -16,5 +16,7 @@ fn main() {
     println!("cargo:rustc-link-lib=sundials_nvecserial");
     println!("cargo:rustc-link-lib=sundials_sunmatrixdense");
     println!("cargo:rustc-link-lib=sundials_sunlinsoldense");
+    println!("cargo:rustc-link-lib=sundials_sunmatrixband");
+    println!("cargo:rustc-link-lib=sundials_sunlinsolband");
     println!("cargo:rustc-link-lib=sundials_core"); 
 }

@@ -125,19 +125,13 @@ pub fn solve_nonlinear_system(
                 for i in 0..n { dy[i] *= scale; }
             }
 
-            // --- Vector-wise Damping (Newton Step Clamping) ---
-            let mut min_eta = 1.0_f64;
+            // --- Component-Wise Damping (Newton Step Clamping) ---
+            let mut is_clamped = false;
             for i in 0..n {
                 if max_steps[i] > 0.0 && dy[i].abs() > max_steps[i] {
-                    let eta = max_steps[i] / dy[i].abs();
-                    if eta < min_eta { min_eta = eta; }
+                    dy[i] = dy[i].signum() * max_steps[i];
+                    is_clamped = true;
                 }
-            }
-            
-            let is_clamped = min_eta < 1.0;
-            
-            for i in 0..n {
-                dy[i] *= min_eta;
                 ee[i] += dy[i];
             }
             // -------------------------------------------------------

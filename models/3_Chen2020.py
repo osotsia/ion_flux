@@ -24,13 +24,15 @@ class Chen2020_DFN(fx.PDE):
     r_p = fx.Domain(bounds=(0, 5.22e-6), resolution=15, coord_sys="spherical", name="r_p") 
     
     # =========================================================================
-    # 2. States 
+    # 2. States & Observables
     # =========================================================================
     c_e = fx.State(domain=cell, name="c_e")         
-    phi_e = fx.State(domain=cell, name="phi_e")     
     
-    phi_s_n = fx.State(domain=x_n, name="phi_s_n")  
-    phi_s_p = fx.State(domain=x_p, name="phi_s_p")  
+    # SAFEGUARD: Clamping the spatial potentials to max 50mV jumps per Newton iteration.
+    # This prevents the exponential Butler-Volmer kinetics from blowing up at t=0.
+    phi_e = fx.State(domain=cell, name="phi_e", max_newton_step=0.05)     
+    phi_s_n = fx.State(domain=x_n, name="phi_s_n", max_newton_step=0.05)  
+    phi_s_p = fx.State(domain=x_p, name="phi_s_p", max_newton_step=0.05)  
     
     c_s_n = fx.State(domain=x_n * r_n, name="c_s_n") 
     c_s_p = fx.State(domain=x_p * r_p, name="c_s_p") 
@@ -41,6 +43,10 @@ class Chen2020_DFN(fx.PDE):
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     D_s_n = fx.Parameter(default=3.3e-14, name="D_s_n")
+
+    # Analytical Telemetry Trackers
+    J_n_obs = fx.Observable(domain=x_n, name="J_n_obs")
+    J_p_obs = fx.Observable(domain=x_p, name="J_p_obs")
     
     def math(self):
         # =====================================================================
@@ -129,7 +135,6 @@ class Chen2020_DFN(fx.PDE):
         D_eff_s, k_eff_s = D_e * (eps_s ** b_brug), k_e * (eps_s ** b_brug)
         D_eff_p, k_eff_p = D_e * (eps_p ** b_brug), k_e * (eps_p ** b_brug)
         
-        # CRITICAL FIX: Applying the gradient to the safe, clamped variable eradicates phantom currents!
         ce_diff_term = (2.0 * R_const * T / F) * (1.0 - t_plus) * (fx.grad(ce_safe) / ce_safe)
         
         flux_ce_n = -D_eff_n * fx.grad(self.c_e)
@@ -143,7 +148,7 @@ class Chen2020_DFN(fx.PDE):
         i_den = self.i_app / A_elec
 
         # =====================================================================
-        # 7. Explicit Equation Targeting & Boundary Masking
+        # 7. Explicit Equation Targeting
         # =====================================================================
         return {
             "equations": {
@@ -194,11 +199,16 @@ class Chen2020_DFN(fx.PDE):
                 
                 self.V_cell: 4.182,    
                 self.i_app: 0.0
+            },
+            "observables": {
+                self.J_n_obs: J_n,
+                self.J_p_obs: J_p
             }
         }
 
 if __name__ == "__main__":
-    engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial", jacobian_bandwidth=0)
+    # Ensure jacobian_bandwidth is 0 for coupled implicit spatial DAEs
+    engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial", solver_backend="native")
     
     discharge_rates = {
         "C/2":  {"current": 2.5, "D_s_n": 1.3e-14},
@@ -219,26 +229,119 @@ if __name__ == "__main__":
         results[label] = res
 
     # =========================================================================
-    # Replication of Figure 17 (Voltage Profiles)
+    # Spatial Coordinate Definitions
     # =========================================================================
-    fig, axs = plt.subplots(3, 1, figsize=(7, 10), sharex=True)
+    x_cell = np.linspace(0, 172.8, 72)
+    x_anode = np.linspace(0, 85.2, 35)
+    r_cathode = np.linspace(0, 5.22, 15)
     
+    # Identify indices for 10%, 50%, and 90% Depth of Discharge for the 1.5C rate
+    res_15c = results["1.5C"]
+    t_15c = res_15c["Time [s]"].data
+    mask_discharge = res_15c["i_app"].data > 0.1
+    t_discharge = t_15c[mask_discharge]
+    
+    idx_10 = np.searchsorted(t_discharge, t_discharge[-1] * 0.10)
+    idx_50 = np.searchsorted(t_discharge, t_discharge[-1] * 0.50)
+    idx_90 = np.searchsorted(t_discharge, t_discharge[-1] * 0.90)
+    indices = [idx_10, idx_50, idx_90]
+    labels = ["10% DOD", "50% DOD", "90% DOD"]
+    colors = ["tab:blue", "tab:orange", "tab:red"]
+
+    # =========================================================================
+    # FIGURE 1: Replication of Paper Figure 17 (Voltage Profiles)
+    # =========================================================================
+    fig1, axs1 = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
     for i, (label, res) in enumerate(results.items()):
         t_hours = res["Time [s]"].data / 3600.0
         v_cell = res["V_cell"].data
         
-        axs[i].plot(t_hours, v_cell, label="model", color="tab:orange", linewidth=2.5)
-        
-        axs[i].set_title(label, fontweight="bold", fontsize=12)
-        axs[i].set_ylabel("Voltage [V]", fontsize=12)
-        axs[i].set_ylim([2.4, 4.3])
-        axs[i].grid(True, linestyle="--", alpha=0.5)
+        axs1[i].plot(t_hours, v_cell, label="P2D Model", color="tab:orange", linewidth=2.5)
+        axs1[i].set_title(f"{label} Discharge", fontweight="bold", fontsize=13)
+        axs1[i].set_xlabel("Time [h]", fontsize=12)
+        axs1[i].set_ylim([2.4, 4.3])
+        axs1[i].grid(True, linestyle="--", alpha=0.5)
         
         if i == 0:
-            axs[i].legend(loc="upper right", fontsize=11)
-        if i == 2:
-            axs[i].set_xlabel("t [h]", fontsize=12)
+            axs1[i].set_ylabel("Terminal Voltage [V]", fontsize=12)
+            axs1[i].legend(loc="upper right", fontsize=11)
             
-    fig.suptitle("P2D Simulation Validation (Replicating Fig. 17 Left Column)", fontsize=14, fontweight="bold")
+    fig1.suptitle("Validation of P2D Model (Replicating Chen 2020 Fig. 17)", fontsize=15, fontweight="bold")
     plt.tight_layout()
+
+    # =========================================================================
+    # FIGURE 2: Electrolyte Starvation (Salt Polarization)
+    # =========================================================================
+    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    for label, res in results.items():
+        # Get concentration at the exact end of the active discharge phase
+        mask = res["i_app"].data > 0.1
+        c_e_end = res["c_e"].data[mask][-1]
+        ax2.plot(x_cell, c_e_end, linewidth=2.5, label=f"{label} (End of Discharge)")
+        
+    ax2.axvline(85.2, color='k', linestyle='--', alpha=0.5, label="Separator Interfaces")
+    ax2.axvline(97.2, color='k', linestyle='--', alpha=0.5)
+    
+    ax2.set_title("Electrolyte Concentration Polarization", fontsize=15, fontweight="bold")
+    ax2.set_ylabel("Concentration $[mol/m^3]$", fontsize=13)
+    ax2.set_xlabel("Distance from Anode Current Collector $[\mu m]$", fontsize=13)
+    ax2.grid(True, linestyle="--", alpha=0.6)
+    ax2.legend(fontsize=12)
+    plt.tight_layout()
+
+    # =========================================================================
+    # FIGURE 3: Spatiotemporal Reaction Heterogeneity
+    # =========================================================================
+    fig3, ax3 = plt.subplots(figsize=(8, 5))
+    
+    J_n_history = res_15c["J_n_obs"].data
+    for idx, label_text, color in zip(indices, labels, colors):
+        J_n_slice = J_n_history[idx]
+        ax3.plot(x_anode, J_n_slice, color=color, linewidth=2.5, label=label_text)
+
+    ax3.set_title("Anode Reaction Current Heterogeneity (1.5C)", fontsize=15, fontweight="bold")
+    ax3.set_ylabel("Volumetric Current Density, $J_n$ $[A/m^3]$", fontsize=13)
+    ax3.set_xlabel("Distance from Anode Current Collector $[\mu m]$", fontsize=13)
+    ax3.grid(True, linestyle="--", alpha=0.6)
+    ax3.legend(fontsize=12)
+    
+    # Annotate the spatial shift
+    ax3.annotate("Reaction zone shifts toward\ncurrent collector over time", 
+                 xy=(40, np.mean(J_n_history[idx_90])), 
+                 xytext=(10, np.max(J_n_history[idx_10])),
+                 arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=6),
+                 fontsize=12, bbox=dict(boxstyle="round", alpha=0.1))
+    plt.tight_layout()
+
+    # =========================================================================
+    # FIGURE 4: Cathode Core-Shell Saturation (The Voltage Bottleneck)
+    # =========================================================================
+    fig4, ax4 = plt.subplots(figsize=(8, 5))
+    
+    c_s_p_history = res_15c["c_s_p"].data
+    # The cathode has 31 macro nodes. The particle exactly at the separator is index 0.
+    # Reshape the flat 1D array into the 2D hierarchical geometry (31 macro x 15 micro)
+    for idx, label_text, color in zip(indices, labels, colors):
+        c_s_p_2d = c_s_p_history[idx].reshape((31, 15))
+        c_radial_profile = c_s_p_2d[0, :] # Extract radial profile at the separator interface
+        ax4.plot(r_cathode, c_radial_profile, color=color, linewidth=2.5, label=label_text)
+
+    # Indicate the maximum saturation limit (NMC 811 fills up during discharge)
+    c_max_p = 63104.0
+    ax4.axhline(c_max_p, color='k', linestyle=':', linewidth=2.5, label="Saturation Limit ($c_{max}$)")
+
+    ax4.set_title("Cathode Core-Shell Saturation at Separator Interface (1.5C)", fontsize=15, fontweight="bold")
+    ax4.set_ylabel("Solid Concentration, $c_{s,p}$ $[mol/m^3]$", fontsize=13)
+    ax4.set_xlabel("Particle Radius, $r$ $[\mu m]$ (0 = Core, 5.22 = Surface)", fontsize=13)
+    ax4.grid(True, linestyle="--", alpha=0.6)
+    ax4.legend(fontsize=12, loc="center right")
+    
+    ax4.annotate("Surface hits $c_{max}$, choking the\nreaction and crashing the voltage", 
+                 xy=(5.0, 62000), 
+                 xytext=(1.5, 55000),
+                 arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=6),
+                 fontsize=12, bbox=dict(boxstyle="round", alpha=0.1))
+                 
+    plt.tight_layout()
+
     plt.show()

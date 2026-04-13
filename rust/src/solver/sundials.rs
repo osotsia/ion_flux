@@ -32,12 +32,18 @@ extern "C" {
     
     pub fn SUNLinSol_Dense(y: N_Vector, A: SUNMatrix, ctx: SUNContext) -> SUNLinearSolver;
     pub fn SUNLinSolFree(LS: SUNLinearSolver);
+    pub fn SUNBandMatrix(N: SunIndexType, mupper: SunIndexType, mlower: SunIndexType, ctx: SUNContext) -> SUNMatrix;
+    pub fn SUNLinSol_Band(y: N_Vector, A: SUNMatrix, ctx: SUNContext) -> SUNLinearSolver;
+    pub fn SUNBandMatrix_Data(A: SUNMatrix) -> *mut SunRealType;
+    pub fn SUNBandMatrix_LDim(A: SUNMatrix) -> SunIndexType;
+    pub fn SUNBandMatrix_UpperBandwidth(A: SUNMatrix) -> SunIndexType;
     
     pub fn IDACreate(ctx: SUNContext) -> *mut c_void;
     pub fn IDAFree(ida_mem: *mut *mut c_void);
     pub fn IDAInit(ida_mem: *mut c_void, res: Option<unsafe extern "C" fn(SunRealType, N_Vector, N_Vector, N_Vector, *mut c_void) -> c_int>, t0: SunRealType, yy0: N_Vector, yp0: N_Vector) -> c_int;
     pub fn IDAReInit(ida_mem: *mut c_void, t0: SunRealType, yy0: N_Vector, yp0: N_Vector) -> c_int;
     pub fn IDASStolerances(ida_mem: *mut c_void, reltol: SunRealType, abstol: SunRealType) -> c_int;
+    pub fn IDASetSuppressAlg(ida_mem: *mut c_void, suppressalg: c_int) -> c_int;
     pub fn IDASetUserData(ida_mem: *mut c_void, user_data: *mut c_void) -> c_int;
     pub fn IDASetId(ida_mem: *mut c_void, id: N_Vector) -> c_int;
     pub fn IDASetLinearSolver(ida_mem: *mut c_void, LS: SUNLinearSolver, A: SUNMatrix) -> c_int;
@@ -56,6 +62,9 @@ pub struct SundialsUserData {
     pub obs_fn: Option<NativeObsFn>,
     pub p: Vec<f64>,
     pub m: Vec<f64>,
+    pub jac_buffer: Vec<f64>,
+    pub is_banded: bool,
+    pub sun_bw: isize,
 }
 
 unsafe extern "C" fn ida_res_callback(_t: c_double, y: N_Vector, yp: N_Vector, res: N_Vector, user_data: *mut c_void) -> c_int {
@@ -65,8 +74,30 @@ unsafe extern "C" fn ida_res_callback(_t: c_double, y: N_Vector, yp: N_Vector, r
 }
 
 unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, yp: N_Vector, _r: N_Vector, jac: SUNMatrix, user_data: *mut c_void, _t1: N_Vector, _t2: N_Vector, _t3: N_Vector) -> c_int {
-    let ud = &*(user_data as *const SundialsUserData);
-    (ud.jac_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), c_j, SUNDenseMatrix_Data(jac));
+    let ud = &mut *(user_data as *mut SundialsUserData);
+    let n = (ud.jac_buffer.len() as f64).sqrt() as usize;
+
+    (ud.jac_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), c_j, ud.jac_buffer.as_mut_ptr());
+
+    if ud.is_banded {
+        let a_data = SUNBandMatrix_Data(jac);
+        let ldim = SUNBandMatrix_LDim(jac) as usize;
+        let mu = SUNBandMatrix_UpperBandwidth(jac) as isize;
+
+        for c in 0..n {
+            let start_r = (c as isize - ud.sun_bw).max(0) as usize;
+            let end_r = (c as isize + ud.sun_bw).min(n as isize - 1) as usize;
+            for r in start_r..=end_r {
+                let band_idx = (r as isize - c as isize + mu) as usize + c * ldim;
+                *a_data.add(band_idx) = ud.jac_buffer[c * n + r];
+            }
+        }
+    } else {
+        let a_data = SUNDenseMatrix_Data(jac);
+        for i in 0..(n*n) {
+            *a_data.add(i) = ud.jac_buffer[i];
+        }
+    }
     0
 }
 
@@ -165,18 +196,48 @@ impl SundialsHandle {
         let id_vec = unsafe { N_VMake_Serial(n as i64, id.as_mut_ptr(), sunctx) };
         
         let ida_mem = unsafe { IDACreate(sunctx) };
-        let user_data = Box::new(SundialsUserData { res_fn, jac_fn, obs_fn, p, m });
+        
+        // Dynamically detect the physical bandwidth from the initial Jacobian
+        let mut jac_dense = vec![0.0; n * n];
+        unsafe { (jac_fn)(y0.as_ptr(), ydot0.as_ptr(), p.as_ptr(), m.as_ptr(), 1.0, jac_dense.as_mut_ptr()) };
+        
+        let mut actual_bw = 0;
+        for c in 0..n {
+            for r in 0..n {
+                if jac_dense[c * n + r].abs() > 1e-12 {
+                    let dist = (r as isize - c as isize).abs();
+                    if dist > actual_bw { actual_bw = dist; }
+                }
+            }
+        }
+        
+        // Threshold heuristic: Use Band solver if bandwidth is less than half the total states
+        let is_banded = actual_bw < (n as isize) / 2;
+        let sun_bw = actual_bw;
+        
+        let user_data = Box::new(SundialsUserData { 
+            res_fn, jac_fn, obs_fn, p, m, 
+            jac_buffer: jac_dense, is_banded, sun_bw 
+        });
         
         unsafe {
             IDAInit(ida_mem, Some(ida_res_callback), 0.0, y_vec, yp_vec);
             IDASStolerances(ida_mem, 1e-6, 1e-8);
+            IDASetSuppressAlg(ida_mem, 1); // CRITICAL: Prevent algebraic variables from dominating the truncation error step limiter
             IDASetUserData(ida_mem, &*user_data as *const _ as *mut c_void);
             IDASetId(ida_mem, id_vec);
             IDASetMaxNumSteps(ida_mem, 15000);
         }
         
-        let a_mat = unsafe { SUNDenseMatrix(n as i64, n as i64, sunctx) };
-        let ls = unsafe { SUNLinSol_Dense(y_vec, a_mat, sunctx) };
+        let (a_mat, ls) = if is_banded {
+            let a = unsafe { SUNBandMatrix(n as i64, sun_bw as i64, sun_bw as i64, sunctx) };
+            let l = unsafe { SUNLinSol_Band(y_vec, a, sunctx) };
+            (a, l)
+        } else {
+            let a = unsafe { SUNDenseMatrix(n as i64, n as i64, sunctx) };
+            let l = unsafe { SUNLinSol_Dense(y_vec, a, sunctx) };
+            (a, l)
+        };
         
         unsafe {
             IDASetLinearSolver(ida_mem, ls, a_mat);
@@ -219,24 +280,28 @@ impl SundialsHandle {
     }
     
     pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {
-        let mut res = vec![0.0; self.n];
-        unsafe { (self.user_data.res_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), res.as_mut_ptr()); }
+        let max_iters = 50;
+        for _ in 0..max_iters {
+            let mut res = vec![0.0; self.n];
+            unsafe { (self.user_data.res_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), res.as_mut_ptr()); }
 
-        let mut max_res = 0.0_f64;
-        for i in 0..self.n {
-            if self._id_data[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
-        }
-        if max_res < 1e-8 { return Ok(()); }
+            let mut max_res = 0.0_f64;
+            for i in 0..self.n {
+                if self._id_data[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
+            }
+            if max_res < 1e-8 { break; }
 
-        let mut jac = vec![0.0; self.n * self.n];
-        unsafe { (self.user_data.jac_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+            let mut jac = vec![0.0; self.n * self.n];
+            unsafe { (self.user_data.jac_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
 
-        // Take a 1-step exact diagonal Newton update exclusively for algebraic variables to bridge giant protocol jumps.
-        for i in 0..self.n {
-            if self._id_data[i] < 0.5 { 
-                let diag = jac[i * self.n + i];
-                if diag.abs() > 1e-12 {
-                    self._y_data[i] -= res[i] / diag;
+            for i in 0..self.n {
+                if self._id_data[i] < 0.5 { 
+                    let diag = jac[i * self.n + i];
+                    if diag.abs() > 1e-12 {
+                        let mut step = -res[i] / diag;
+                        if step.abs() > 0.1 { step = step.signum() * 0.1; } // Safety clamp
+                        self._y_data[i] += step * 0.5; // Under-relax diagonal step
+                    }
                 }
             }
         }

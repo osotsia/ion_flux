@@ -230,7 +230,7 @@ class ExactTSPMe(fx.PDE):
                 self.i_app: 0.0
             },
             
-            # Telemetry tracking
+            # Telemetry
             "observables": {
                 self.U_eq: U_eq,
                 self.eta_r: eta_r,
@@ -245,8 +245,7 @@ class ExactTSPMe(fx.PDE):
 
 if __name__ == "__main__":
     
-    # Bandwidth=0 signals FAER LU/GMRES to handle internal cross-domain sparsity natively
-    engine = fx.Engine(model=ExactTSPMe(), target="cpu:serial", jacobian_bandwidth=0)
+    engine = fx.Engine(model=ExactTSPMe(), target="cpu:serial", solver_backend="native")
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
     tuned_Dn = {"0.5C": 0.9e-14, "1C": 2.0e-14, "2C": 6.0e-14}  # <-- ADDED (from Table 4)
