@@ -3,7 +3,8 @@ from typing import Dict, Any, Union, List, Optional, TypedDict
 SystemDict = TypedDict('SystemDict', {
     'equations': Dict[Any, Any],
     'boundaries': Dict[Any, Any],
-    'initial_conditions': Dict[Any, Any]
+    'initial_conditions': Dict[Any, Any],
+    'observables': Dict[Any, Any]
 }, total=False)
 
 def Dirichlet(val: Union[float, 'Node']) -> 'Node':
@@ -70,6 +71,17 @@ class State(Node):
         if self.max_newton_step is not None: d["max_newton_step"] = self.max_newton_step
         return d
     def __repr__(self) -> str: return self.name or "<Unbound State>"
+    def __set_name__(self, owner, name):
+        if not self.name: self.name = name
+
+class Observable(Node):
+    __slots__ = ["domain", "name", "_original_name"]
+    def __init__(self, domain=None, name: str = ""):
+        self.domain = domain
+        self.name = name
+    def to_dict(self) -> Dict[str, Any]: 
+        return {"type": "Observable", "name": self.name}
+    def __repr__(self) -> str: return self.name or "<Unbound Observable>"
     def __set_name__(self, owner, name):
         if not self.name: self.name = name
 

@@ -8,7 +8,7 @@ import tempfile
 from typing import Dict, Any, List, Optional, Tuple, Sequence as TypingSequence
 import numpy as np
 
-from ion_flux.dsl.core import PDE, State, Parameter
+from ion_flux.dsl.core import PDE, State, Parameter, Observable
 from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp, extract_state_name
 from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
@@ -49,8 +49,9 @@ class Engine:
         
         states = model.components(State) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, State)]
         params = model.components(Parameter) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Parameter)]
+        observables = model.components(Observable) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Observable)]
         
-        self.layout = MemoryLayout(states, params)
+        self.layout = MemoryLayout(states, params, observables)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
         self.ast_payload: Dict[str, Any] = model.ast() if hasattr(model, "ast") else {}
         
@@ -71,7 +72,7 @@ class Engine:
             self.jacobian_bandwidth = jacobian_bandwidth
         
         if hasattr(model, "ast"):
-            self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, bandwidth=self.jacobian_bandwidth, target=self.target)
+            self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, observables, bandwidth=self.jacobian_bandwidth, target=self.target)
             self.runtime = None
             if not self.mock_execution:
                 try:
@@ -161,8 +162,10 @@ class Engine:
             "layout": {
                 "state_offsets": self.layout.state_offsets,
                 "param_offsets": self.layout.param_offsets,
+                "obs_offsets": self.layout.obs_offsets,
                 "n_states": self.layout.n_states,
                 "n_params": self.layout.n_params,
+                "n_obs": self.layout.n_obs,
                 "p_length": self.layout.p_length,
                 "m_length": self.layout.m_length,
                 "mesh_offsets": self.layout.mesh_offsets,
@@ -361,6 +364,12 @@ class Engine:
         m_list = self.layout.get_mesh_data()
         return self.runtime.evaluate_residual(y, ydot, p_list, m_list)
 
+    def evaluate_observables(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
+        if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
+        p_list = self._pack_parameters(parameters or {})
+        m_list = self.layout.get_mesh_data()
+        return self.runtime.evaluate_observables(y, ydot, p_list, m_list, self.layout.n_obs)
+
     def evaluate_jacobian(self, y: List[float], ydot: List[float], c_j: float, parameters: Optional[Dict[str, float]] = None) -> List[List[float]]:
         """Provides direct Python wrapper to evaluate the exact analytical Jacobian using Enzyme AD."""
         if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
@@ -385,6 +394,7 @@ class Engine:
             session = self.start_session(parameters)
             data_hist = {"Time [s]": []}
             for k in self.layout.state_offsets.keys(): data_hist[k] = []
+            for k in self.layout.obs_offsets.keys(): data_hist[k] = []
             raw_y_hist = []
             raw_p_hist = []
 
@@ -448,21 +458,27 @@ class Engine:
                         t_elapsed += low
                         data_hist["Time [s]"].append(session.time)
                         y = session.handle.get_state() if session.handle else session._mock_y
+                        obs = session.handle.get_observables_py() if session.handle else np.zeros(self.layout.n_obs)
                         raw_y_hist.append(y)
                         if requires_grad: raw_p_hist.append(self._pack_parameters(session.parameters))
                 
                         for k, (offset, size) in self.layout.state_offsets.items():
                             data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
+                        for k, (offset, size) in self.layout.obs_offsets.items():
+                            data_hist[k].append(obs[offset:offset+size] if size > 1 else obs[offset])
                         break
                     
                     t_elapsed += dt_step
                     data_hist["Time [s]"].append(session.time)
                     y = session.handle.get_state() if session.handle else session._mock_y
+                    obs = session.handle.get_observables_py() if session.handle else np.zeros(self.layout.n_obs)
                     raw_y_hist.append(y)
                     if requires_grad: raw_p_hist.append(self._pack_parameters(session.parameters))
                     
                     for k, (offset, size) in self.layout.state_offsets.items():
                         data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
+                    for k, (offset, size) in self.layout.obs_offsets.items():
+                        data_hist[k].append(obs[offset:offset+size] if size > 1 else obs[offset])
 
                     # --- PROGRESS BAR RENDERER ---
                     if show_progress:
@@ -516,13 +532,13 @@ class Engine:
         
         try:
             if self.solver_backend == "sundials":
-                y_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
-                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), show_progress
+                y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), self.layout.n_obs, show_progress
                 )
             else:
-                y_res, micro_t, micro_y, micro_ydot = solve_ida_native(
+                y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_native(
                     self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), 
-                    self.jacobian_bandwidth, spatial_diag, max_steps, record_history, self.debug, show_progress
+                    self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, record_history, self.debug, show_progress
                 )
         except RuntimeError as e:
             self._handle_native_crash(e)
@@ -531,6 +547,9 @@ class Engine:
         for state_name, (offset, size) in self.layout.state_offsets.items():
             if size == 1: data[state_name] = y_res[:, offset]
             else: data[state_name] = y_res[:, offset:offset+size]
+        for obs_name, (offset, size) in self.layout.obs_offsets.items():
+            if size == 1: data[obs_name] = obs_res[:, offset]
+            else: data[obs_name] = obs_res[:, offset:offset+size]
             
         trajectory = None
         if requires_grad: 
@@ -563,17 +582,20 @@ class Engine:
         try:
             y_res_batch = solve_batch_native(
                 self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, 
-                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.debug, max_workers, show_progress
+                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, self.debug, max_workers, show_progress
             )
         except RuntimeError as e:
             self._handle_native_crash(e)
             
         results = []
-        for p, y_res in zip(parameters, y_res_batch):
+        for p, (y_res, obs_res) in zip(parameters, y_res_batch):
             data = {"Time [s]": t_eval_arr}
             for state_name, (offset, size) in self.layout.state_offsets.items():
                 if size == 1: data[state_name] = y_res[:, offset]
                 else: data[state_name] = y_res[:, offset:offset+size]
+            for obs_name, (offset, size) in self.layout.obs_offsets.items():
+                if size == 1: data[obs_name] = obs_res[:, offset]
+                else: data[obs_name] = obs_res[:, offset:offset+size]
             results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=None))
 
         return results
@@ -595,6 +617,8 @@ class Engine:
         if hasattr(self, "layout") and self.layout:
             for state_name, (offset, size) in self.layout.state_offsets.items():
                 data[state_name] = np.zeros(time_len) if size == 1 else np.zeros((time_len, size))
+            for obs_name, (offset, size) in self.layout.obs_offsets.items():
+                data[obs_name] = np.zeros(time_len) if size == 1 else np.zeros((time_len, size))
                     
         data["Voltage [V]"] = np.array([4.2] * (time_len - 1) + [2.5])
         

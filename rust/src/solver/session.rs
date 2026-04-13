@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
-use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeObsFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::integrator::{step_bdf_vsvo, BdfHistory};
 use super::linalg::NativeSparseLuSolver;
 
@@ -8,10 +8,12 @@ use super::linalg::NativeSparseLuSolver;
 pub struct SolverHandle {
     _lib: libloading::Library,
     res_fn: NativeResFn,
+    obs_fn: Option<NativeObsFn>,
     jac_fn: NativeJacFn,
     jvp_fn: Option<NativeJvpFn>,
     pub n: usize,
     pub bw: isize,
+    pub n_obs: usize,
     pub t: f64,
     pub y: Vec<f64>,
     pub ydot: Vec<f64>,
@@ -22,7 +24,6 @@ pub struct SolverHandle {
     pub spatial_diag: Vec<f64>,
     pub max_steps: Vec<f64>,
     
-    // Architectural State
     history: BdfHistory,
     lu_solver: NativeSparseLuSolver,
     jac_buffer: Vec<f64>,
@@ -33,16 +34,17 @@ pub struct SolverHandle {
 #[pymethods]
 impl SolverHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, max_steps: Vec<f64>, _debug: bool) -> PyResult<Self> {
+    pub fn new(lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, _debug: bool) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let res_fn: NativeResFn = unsafe { *lib.get(b"evaluate_residual\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
+        let obs_fn: Option<NativeObsFn> = unsafe { lib.get(b"evaluate_observables\0").map(|s| *s).ok() };
         let jac_fn: NativeJacFn = unsafe { *lib.get(b"evaluate_jacobian\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let jvp_fn: Option<NativeJvpFn> = unsafe { lib.get(b"evaluate_jvp\0").map(|s| *s).ok() };
         
         let history = BdfHistory::new(n);
 
         let mut handle = SolverHandle { 
-            _lib: lib, res_fn, jac_fn, jvp_fn, n, bw, 
+            _lib: lib, res_fn, obs_fn, jac_fn, jvp_fn, n, bw, n_obs,
             t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag, max_steps,
             history, lu_solver: NativeSparseLuSolver::new(n, bw), jac_buffer: vec![0.0; n * n],
             config: SolverConfig::default(), diag: Diagnostics::default(),
@@ -60,7 +62,6 @@ impl SolverHandle {
         let mut res = vec![0.0; self.n];
         unsafe { (self.res_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), res.as_mut_ptr()); }
 
-        // If the residual is already perfectly zero, do nothing!
         let mut max_res = 0.0_f64;
         for i in 0..self.n {
             if self.id[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
@@ -90,6 +91,12 @@ impl SolverHandle {
 
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> { 
         numpy::ndarray::Array1::from_vec(self.y.clone()).to_pyarray_bound(py) 
+    }
+
+    pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let mut obs = vec![0.0; self.n_obs];
+        self.get_observables(&mut obs)?;
+        Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray_bound(py))
     }
     
     pub fn set_parameter(&mut self, idx: usize, val: f64) { 
@@ -134,6 +141,13 @@ impl SolverHandle {
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         
         self.t += dt;
+        Ok(())
+    }
+
+    pub fn get_observables(&mut self, obs: &mut [f64]) -> PyResult<()> {
+        if let Some(f) = self.obs_fn {
+            unsafe { f(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), obs.as_mut_ptr()); }
+        }
         Ok(())
     }
 }

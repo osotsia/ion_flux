@@ -32,12 +32,12 @@ class Session:
             if getattr(engine, "solver_backend", "native") == "sundials":
                 self.handle = SundialsHandle(
                     engine.runtime.lib_path, engine.layout.n_states,
-                    y0, ydot0, id_arr, p_list, m_list
+                    y0, ydot0, id_arr, p_list, m_list, engine.layout.n_obs
                 )
             else:
                 self.handle = SolverHandle(
                     engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, max_steps, self.debug
+                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, max_steps, engine.layout.n_obs, self.debug
                 )
                 try:
                     self.handle.calc_algebraic_roots()
@@ -54,13 +54,17 @@ class Session:
             self.handle.set_parameter(offset, value)
 
     def get_array(self, variable_name: str) -> np.ndarray:
-        y = self.handle.get_state() if self.handle else self._mock_y
         if variable_name in self.engine.layout.state_offsets:
+            y = self.handle.get_state() if self.handle else self._mock_y
             offset, size = self.engine.layout.state_offsets[variable_name]
             return y[offset:offset+size]
+        if variable_name in self.engine.layout.obs_offsets:
+            obs = self.handle.get_observables_py() if self.handle else np.zeros(self.engine.layout.n_obs)
+            offset, size = self.engine.layout.obs_offsets[variable_name]
+            return obs[offset:offset+size]
         if variable_name == "Voltage" and self.handle is None:
             return np.array([max(2.5, 4.2 - (self.time * 0.0001))])
-        raise KeyError(f"Variable '{variable_name}' not found in the current state.")
+        raise KeyError(f"Variable '{variable_name}' not found in the current state or observables.")
 
     def get(self, variable_name: str) -> float:
         return float(np.mean(self.get_array(variable_name)))

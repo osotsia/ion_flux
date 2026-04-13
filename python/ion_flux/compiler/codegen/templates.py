@@ -1,6 +1,6 @@
 import textwrap
 
-def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: int) -> str:
+def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, bandwidth: int) -> str:
     
     if bandwidth > 0:
         jacobian_logic = textwrap.dedent(f"""\
@@ -73,6 +73,10 @@ def generate_cpp_skeleton(n_states: int, n_params: int, body: str, bandwidth: in
 
         void evaluate_residual(const double* y, const double* ydot, const double* p, const double* m, double* res) {{
         {body}
+        }}
+
+        void evaluate_observables(const double* y, const double* ydot, const double* p, const double* m, double* obs) {{
+        {obs_body}
         }}
 
         void evaluate_jacobian(const double* y, const double* ydot, const double* p, const double* m, double c_j, double* jac_out) {{

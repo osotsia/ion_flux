@@ -33,7 +33,7 @@ class ExactTSPMe(fx.PDE):
     r_p = fx.Domain(bounds=(0, 5.22e-6), resolution=15, coord_sys="spherical", name="r_p") 
     
     # -------------------------------------------------------------------------
-    # 2. States 
+    # 2. States & Observables
     # -------------------------------------------------------------------------
     c_e = fx.State(domain=cell, name="c_e")
     c_s_n = fx.State(domain=r_n, name="c_s_n")
@@ -42,6 +42,17 @@ class ExactTSPMe(fx.PDE):
     T_cell = fx.State(domain=None, name="T_cell") # 0D Lumped Thermal ODE
     V_cell = fx.State(domain=None, name="V_cell") # 0D Algebraic Voltage Constraint
     i_app = fx.State(domain=None, name="i_app")   # 0D Cycler terminal 
+    
+    # --- Diagnostic Telemetry (Zero overhead on the implicit solver) ---
+    U_eq = fx.Observable(domain=None, name="U_eq")
+    eta_r = fx.Observable(domain=None, name="eta_r")
+    eta_e = fx.Observable(domain=None, name="eta_e")
+    dPhi_s = fx.Observable(domain=None, name="dPhi_s")
+    dPhi_e = fx.Observable(domain=None, name="dPhi_e")
+    
+    Q_s = fx.Observable(domain=None, name="Q_s")
+    Q_e = fx.Observable(domain=None, name="Q_e")
+    Q_irr = fx.Observable(domain=None, name="Q_irr")
     
     T_amb = fx.Parameter(default=298.15, name="T_amb")
     Ds_n = fx.Parameter(default=3.3e-14, name="Ds_n")  # <-- ADDED
@@ -217,6 +228,18 @@ class ExactTSPMe(fx.PDE):
                 self.T_cell: self.T_amb,   
                 self.V_cell: 4.10, 
                 self.i_app: 0.0
+            },
+            
+            # Telemetry tracking
+            "observables": {
+                self.U_eq: U_eq,
+                self.eta_r: eta_r,
+                self.eta_e: eta_e,
+                self.dPhi_s: dPhi_s,
+                self.dPhi_e: dPhi_e,
+                self.Q_s: Q_s,
+                self.Q_e: Q_e,
+                self.Q_irr: Q_irr
             }
         }
 
@@ -307,43 +330,82 @@ if __name__ == "__main__":
 
 
     # =========================================================================
-    # FIGURE 3: Internal PDE States
-    # (Electrolyte Concentration Profile Evolution during 2C Discharge)
+    # FIGURE 3: Anatomy of the Voltage Cliff (Deconstruction)
     # =========================================================================
-    print("Generating internal spatial state profiles...")
-    res_2c = results["2C"]
+    print("Generating Voltage Deconstruction analysis...")
+    fig3, axs3 = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
     
-    discharge_mask = res_2c["i_app"].data > 0.1
-    idx_end_discharge = np.where(discharge_mask)[0][-1]
-    idx_50 = idx_end_discharge // 2
-    idx_0 = 0
-    
-    c_e_2c = res_2c["c_e"].data
-    t_2c = res_2c["Time [s]"].data
-    
-    # 172.8 um with 144 spatial nodes
-    x_coords = np.linspace(0, 172.8, 144)
-    
-    fig3, ax3 = plt.subplots(figsize=(9, 5))
-    
-    ax3.plot(x_coords, c_e_2c[idx_0], label="t = 0s (0% DoD)", linestyle="--", color="gray", linewidth=2)
-    ax3.plot(x_coords, c_e_2c[idx_50], label=f"t = {t_2c[idx_50]:.0f}s (~50% DoD)", color="tab:blue", linewidth=2)
-    ax3.plot(x_coords, c_e_2c[idx_end_discharge], label=f"t = {t_2c[idx_end_discharge]:.0f}s (100% DoD - Max Depletion)", color="tab:red", linewidth=2)
-    
-    # Annotate topological boundaries (Anode: 85.2 um, Separator: 12 um, Cathode: 75.6 um)
-    ax3.axvline(85.2, color="black", linestyle=":", alpha=0.8)
-    ax3.axvline(97.2, color="black", linestyle=":", alpha=0.8)
-    
-    ax3.text(42.6, 600, "Negative\nElectrode", ha="center", va="center", alpha=0.6, fontsize=11, fontweight="bold")
-    ax3.text(91.2, 600, "Sep", ha="center", va="center", alpha=0.6, fontsize=11, fontweight="bold")
-    ax3.text(135.0, 600, "Positive\nElectrode", ha="center", va="center", alpha=0.6, fontsize=11, fontweight="bold")
+    for i, rate in enumerate(["0.5C", "2C"]):
+        res = results[rate]
+        
+        # Mask strictly to the discharge phase
+        mask = res["i_app"].data > 0.1
+        cap = (res["Time [s]"].data[mask] * rates[rate]) / 3600.0
+        
+        # Extract telemetry
+        u_eq = res["U_eq"].data[mask]
+        eta_r = res["eta_r"].data[mask]
+        eta_e = res["eta_e"].data[mask]
+        dphi_e = res["dPhi_e"].data[mask]
+        dphi_s = res["dPhi_s"].data[mask]
+        v_cell = res["V_cell"].data[mask]
+        
+        ax = axs3[i]
+        
+        # Calculate sequential drop layers
+        l1 = u_eq
+        l2 = l1 + eta_r
+        l3 = l2 + eta_e
+        l4 = l3 + dphi_e
+        l5 = l4 + dphi_s # Matches v_cell
+        
+        ax.plot(cap, l1, color='k', linestyle='--', linewidth=2, label="Thermodynamic $U_{eq}$")
+        ax.plot(cap, v_cell, color='k', linewidth=2, label="Terminal $V_{cell}$")
+        
+        ax.fill_between(cap, l1, l2, color="tab:red", alpha=0.5, label="Reaction Kinetics ($\eta_r$)")
+        ax.fill_between(cap, l2, l3, color="tab:orange", alpha=0.5, label="Electrolyte Transport ($\eta_e$)")
+        ax.fill_between(cap, l3, l4, color="tab:blue", alpha=0.5, label="Electrolyte Ohmic Drop ($\Delta\Phi_e$)")
+        ax.fill_between(cap, l4, l5, color="tab:gray", alpha=0.5, label="Solid Ohmic Drop ($\Delta\Phi_s$)")
+        
+        ax.set_title(f"Voltage Penalty Breakdown at {rate}", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Discharge Capacity [Ah]", fontsize=12)
+        if i == 0:
+            ax.set_ylabel("Voltage [V]", fontsize=12)
+            ax.legend(loc="lower left", fontsize=10)
+        ax.grid(True, linestyle="--", alpha=0.7)
 
-    ax3.set_title("Electrolyte Concentration ($c_e$) Depletion at 2C", fontsize=14, fontweight="bold")
-    ax3.set_xlabel("Cell Thickness [$\mu m$]", fontsize=12)
-    ax3.set_ylabel("Concentration [$mol/m^3$]", fontsize=12)
-    ax3.legend(loc="upper right")
-    ax3.grid(True, linestyle="--", alpha=0.7)
-    
     fig3.tight_layout()
+
+
+    # =========================================================================
+    # FIGURE 4: The Thermal Engine (Heat Apportionment)
+    # =========================================================================
+    print("Generating Heat Apportionment analysis...")
+    fig4, axs4 = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    
+    for i, rate in enumerate(["0.5C", "2C"]):
+        res = results[rate]
+        
+        mask = res["i_app"].data > 0.1
+        cap = (res["Time [s]"].data[mask] * rates[rate]) / 3600.0
+        
+        q_s = res["Q_s"].data[mask]
+        q_e = res["Q_e"].data[mask]
+        q_irr = res["Q_irr"].data[mask]
+        
+        ax = axs4[i]
+        
+        ax.stackplot(cap, q_s, q_e, q_irr, 
+                     labels=["Solid Ohmic ($Q_s$)", "Electrolyte Ohmic ($Q_e$)", "Irreversible Rxn ($Q_{irr}$)"],
+                     colors=["tab:gray", "tab:blue", "tab:red"], alpha=0.7)
+        
+        ax.set_title(f"Heat Source Apportionment at {rate}", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Discharge Capacity [Ah]", fontsize=12)
+        if i == 0:
+            ax.set_ylabel("Volumetric Heat Gen [$W/m^3$]", fontsize=12)
+            ax.legend(loc="upper left", fontsize=10)
+        ax.grid(True, linestyle="--", alpha=0.7)
+
+    fig4.tight_layout()
     
     plt.show()

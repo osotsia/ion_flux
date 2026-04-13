@@ -1,15 +1,16 @@
 import copy
 from typing import Dict, Any, List
-from .nodes import Node, State, Parameter, Boundary, _wrap, SystemDict, Piecewise
+from .nodes import Node, State, Parameter, Observable, Boundary, _wrap, SystemDict, Piecewise
 from .spatial import Domain, CompositeDomain, ConcatenatedDomain
 
 def merge(*systems: SystemDict) -> SystemDict:
-    merged: SystemDict = {"equations": {}, "boundaries": {}, "initial_conditions": {}}
+    merged: SystemDict = {"equations": {}, "boundaries": {}, "initial_conditions": {}, "observables": {}}
     for sys in systems:
         if not sys: continue
         merged["equations"].update(sys.get("equations", {}))
         merged["boundaries"].update(sys.get("boundaries", {}))
         merged["initial_conditions"].update(sys.get("initial_conditions", {}))
+        merged["observables"].update(sys.get("observables", {}))
     return merged
 
 class Condition:
@@ -23,7 +24,7 @@ class Condition:
         var_name = getattr(left, "name", str(left))
         
         if type(right).__name__ == "Scalar": target = right.value
-        elif type(right).__name__ in ("Parameter", "State"): target = right.name
+        elif type(right).__name__ in ("Parameter", "State", "Observable"): target = right.name
         else: target = float(str(right))
         self._compiled_logic = (var_name, op_map.get(expression.op), target)
 
@@ -68,13 +69,13 @@ class PDE:
         for name in dir(self.__class__):
             if name.startswith("__"): continue
             attr = getattr(self.__class__, name)
-            if isinstance(attr, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal, PDE)):
+            if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, ConcatenatedDomain, Terminal, PDE)):
                 to_copy[name] = attr
 
         clones = copy.deepcopy(to_copy)
         has_terminal = False
         for name, clone in clones.items():
-            if isinstance(clone, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
+            if isinstance(clone, (State, Parameter, Observable, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
                 clone.name = name
                 setattr(self, name, clone)
                 if isinstance(clone, Terminal): has_terminal = True
@@ -89,7 +90,7 @@ class PDE:
 
     def _apply_namespace(self, prefix: str) -> None:
         for name, attr in self.__dict__.items():
-            if isinstance(attr, (State, Parameter, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
+            if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
                 if not hasattr(attr, "_original_name"): attr._original_name = getattr(attr, "name", "") or name
                 attr.name = f"{prefix}_{attr._original_name}"
             elif isinstance(attr, PDE):
@@ -120,7 +121,7 @@ class PDE:
 
     def ast(self) -> Dict[str, Any]:
         raw = self.math()
-        compiled = {"equations": [], "boundaries": [], "initial_conditions": [], "domains": {}}
+        compiled = {"equations": [], "boundaries": [], "initial_conditions": [], "observables": [], "domains": {}}
         
         # Helper to recursively extract all Domain topologies (Standard and Composite)
         def add_domain(d):
@@ -148,6 +149,7 @@ class PDE:
         for d in self.components(Domain): add_domain(d)
         for d in self.components(CompositeDomain): add_domain(d)
         for s in self.components(State): add_domain(getattr(s, "domain", None))
+        for o in self.components(Observable): add_domain(getattr(o, "domain", None))
 
         for target, bcs in raw.get("boundaries", {}).items():
             if isinstance(target, State):
@@ -186,6 +188,14 @@ class PDE:
                 
         for state, val in raw.get("initial_conditions", {}).items():
             compiled["initial_conditions"].append({"state": state.name, "value": _wrap(val).to_dict()})
+            
+        for obs, eq in raw.get("observables", {}).items():
+            if isinstance(eq, Piecewise):
+                compiled["observables"].append({"state": obs.name, "type": "piecewise", "regions": eq.to_dict()["regions"]})
+                for reg in eq.region_map.keys():
+                    add_domain(reg)
+            else:
+                compiled["observables"].append({"state": obs.name, "type": "standard", "eq": _wrap(eq).to_dict()})
             
         if hasattr(self, "terminal") and self.terminal:
             m = self._term_mode

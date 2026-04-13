@@ -4,7 +4,7 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
 use std::os::raw::{c_char, c_double, c_int, c_long, c_void};
-use super::{NativeResFn, NativeJacFn};
+use super::{NativeResFn, NativeJacFn, NativeObsFn};
 
 pub type SunRealType = c_double;
 pub type SunIndexType = c_long; 
@@ -53,6 +53,7 @@ extern "C" {
 pub struct SundialsUserData {
     pub res_fn: NativeResFn,
     pub jac_fn: NativeJacFn,
+    pub obs_fn: Option<NativeObsFn>,
     pub p: Vec<f64>,
     pub m: Vec<f64>,
 }
@@ -141,6 +142,7 @@ pub struct SundialsHandle {
     user_data: Box<SundialsUserData>,
     pub n: usize,
     pub t: f64,
+    pub n_obs: usize,
     
     pub _y_data: Vec<f64>,
     pub _yp_data: Vec<f64>,
@@ -150,10 +152,11 @@ pub struct SundialsHandle {
 #[pymethods]
 impl SundialsHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, p: Vec<f64>, m: Vec<f64>) -> PyResult<Self> {
+    pub fn new(lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, p: Vec<f64>, m: Vec<f64>, n_obs: usize) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
         let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
+        let obs_fn: Option<NativeObsFn> = unsafe { lib.get::<NativeObsFn>(b"evaluate_observables\0").map(|s| *s).ok() };
         
         let sunctx = unsafe { get_safe_sundials_context() };
         
@@ -162,7 +165,7 @@ impl SundialsHandle {
         let id_vec = unsafe { N_VMake_Serial(n as i64, id.as_mut_ptr(), sunctx) };
         
         let ida_mem = unsafe { IDACreate(sunctx) };
-        let user_data = Box::new(SundialsUserData { res_fn, jac_fn, p, m });
+        let user_data = Box::new(SundialsUserData { res_fn, jac_fn, obs_fn, p, m });
         
         unsafe {
             IDAInit(ida_mem, Some(ida_res_callback), 0.0, y_vec, yp_vec);
@@ -182,7 +185,7 @@ impl SundialsHandle {
         
         let mut handle = SundialsHandle {
             _lib: lib, ida_mem, y_vec, yp_vec, id_vec, sunctx, a_mat, ls, user_data,
-            n, t: 0.0, _y_data: y0, _yp_data: ydot0, _id_data: id
+            n, t: 0.0, n_obs, _y_data: y0, _yp_data: ydot0, _id_data: id
         };
         
         handle.calc_algebraic_roots()?;
@@ -203,6 +206,12 @@ impl SundialsHandle {
     
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         numpy::ndarray::Array1::from_vec(self._y_data.clone()).to_pyarray_bound(py)
+    }
+
+    pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let mut obs = vec![0.0; self.n_obs];
+        self.get_observables(&mut obs)?;
+        Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray_bound(py))
     }
     
     pub fn set_parameter(&mut self, idx: usize, val: f64) {
@@ -256,6 +265,13 @@ impl SundialsHandle {
 
 // Internal Rust helpers
 impl SundialsHandle {
+    pub fn get_observables(&mut self, obs: &mut [f64]) -> PyResult<()> {
+        if let Some(f) = self.user_data.obs_fn {
+            unsafe { f(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), obs.as_mut_ptr()); }
+        }
+        Ok(())
+    }
+
     fn sync_from_sundials(&mut self) {
         let y_ptr = unsafe { N_VGetArrayPointer(self.y_vec) };
         let yp_ptr = unsafe { N_VGetArrayPointer(self.yp_vec) };

@@ -4,8 +4,9 @@ from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor
 from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
 from .templates import generate_cpp_skeleton
 
-def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
+def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
     state_map = {s.name: s for s in states}
+    obs_map = {o.name: o for o in observables}
     
     # --- Pass 1: Semantic Resolution ---
     ctx = SemanticContext(ast_payload)
@@ -97,7 +98,38 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ba
                 eq_stmts.append(Assign(res_ir, BinaryOp("-", y_ir, val_ir)))
 
     # --- Pass 3: C++ Emission ---
-    ir_stmts = dx_stmts + eq_stmts
-    body_str = "\n    ".join(stmt.to_cpp() for stmt in ir_stmts)
+    obs_stmts = []
+    for eq_data in ast_payload.get("observables", []):
+        obs_name = eq_data["state"]
+        offset, size = layout.obs_offsets[obs_name]
+        visitor.current_domain = getattr(obs_map[obs_name], "domain", None)
+        
+        if eq_data["type"] == "piecewise":
+            visitor.is_piecewise = True
+            for reg in eq_data["regions"]:
+                start = reg["start_idx"]
+                end = reg["end_idx"]
+                visitor.current_region_data = reg
+                
+                rhs_ir = visitor.lower(reg["eq"], Var("i"))
+                res_ir = ArrayAccess("obs", BinaryOp("+", Literal(offset), Var("i")))
+                assign = Assign(res_ir, rhs_ir)
+                
+                obs_stmts.append(Loop("i", Literal(start), Literal(end), [assign]))
+                
+            visitor.is_piecewise = False
+            visitor.current_region_data = None
+        elif eq_data["type"] == "standard":
+            visitor.is_piecewise = False
+            rhs_ir = visitor.lower(eq_data["eq"], Var("i"))
+            
+            res_ir = ArrayAccess("obs", BinaryOp("+", Literal(offset), Var("i")))
+            assign = Assign(res_ir, rhs_ir)
+            
+            pragma = "#pragma omp parallel for" if ("omp" in target and size > 50) else ""
+            obs_stmts.append(Loop("i", Literal(0), Literal(size), [assign], pragma=pragma))
+
+    body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + eq_stmts))
+    obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + obs_stmts))
     
-    return generate_cpp_skeleton(layout.n_states, layout.n_params, body_str, bandwidth)
+    return generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str, bandwidth)

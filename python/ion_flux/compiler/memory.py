@@ -1,13 +1,15 @@
 from typing import List, Dict, Tuple, Any
-from ion_flux.dsl.core import State, Parameter
+from ion_flux.dsl.core import State, Parameter, Observable
 
 class MemoryLayout:
-    def __init__(self, states: List[State], parameters: List[Parameter]):
+    def __init__(self, states: List[State], parameters: List[Parameter], observables: List[Observable] = None):
         self.state_offsets: Dict[str, Tuple[int, int]] = {}
         self.param_offsets: Dict[str, Tuple[int, int]] = {}
+        self.obs_offsets: Dict[str, Tuple[int, int]] = {}
         
         self.n_states = 0
         self.n_params = 0
+        self.n_obs = 0
 
         sorted_states = sorted(states, key=lambda s: s.name)
         for s in sorted_states:
@@ -19,6 +21,13 @@ class MemoryLayout:
         for p in sorted_params:
             self.param_offsets[p.name] = (self.n_params, 1)
             self.n_params += 1
+            
+        if observables:
+            sorted_obs = sorted(observables, key=lambda o: o.name)
+            for o in sorted_obs:
+                size = o.domain.resolution if o.domain else 1
+                self.obs_offsets[o.name] = (self.n_obs, size)
+                self.n_obs += size
             
         self.p_length = self.n_params
         self.m_length = 0
@@ -51,11 +60,13 @@ class MemoryLayout:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MemoryLayout":
-        obj = cls([], [])
+        obj = cls([], [], [])
         obj.state_offsets = data["state_offsets"]
         obj.param_offsets = data["param_offsets"]
+        obj.obs_offsets = data.get("obs_offsets", {})
         obj.n_states = data["n_states"]
         obj.n_params = data["n_params"]
+        obj.n_obs = data.get("n_obs", 0)
         obj.p_length = data.get("p_length", obj.n_params)
         obj.m_length = data.get("m_length", 0)
         obj.mesh_offsets = data.get("mesh_offsets", {})

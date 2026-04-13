@@ -35,6 +35,14 @@ class NativeRuntime:
             ctypes.POINTER(ctypes.c_double),
         ]
         self.dll.evaluate_residual.restype = None
+        
+        if hasattr(self.dll, "evaluate_observables"):
+            self.dll.evaluate_observables.argtypes = [
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            self.dll.evaluate_observables.restype = None
 
         # Signature: void evaluate_jacobian(y, ydot, p, c_j, jac_out)
         self.dll.evaluate_jacobian.argtypes = [
@@ -79,6 +87,17 @@ class NativeRuntime:
         
         self.dll.evaluate_residual(y_arr, ydot_arr, p_arr, m_arr, res_arr)
         return list(res_arr)
+        
+    def evaluate_observables(self, y: List[float], ydot: List[float], p: List[float], m: List[float], n_obs: int) -> List[float]:
+        y_arr = (ctypes.c_double * self.n_states)(*y)
+        ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
+        p_arr = (ctypes.c_double * len(p))(*p)
+        m_arr = (ctypes.c_double * len(m))(*m)
+        obs_arr = (ctypes.c_double * n_obs)()
+        
+        if hasattr(self.dll, "evaluate_observables"):
+            self.dll.evaluate_observables(y_arr, ydot_arr, p_arr, m_arr, obs_arr)
+        return list(obs_arr)
 
     def evaluate_jacobian(self, y: List[float], ydot: List[float], p: List[float], m: List[float], c_j: float) -> List[List[float]]:
         y_arr = (ctypes.c_double * self.n_states)(*y)
