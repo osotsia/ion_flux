@@ -55,10 +55,10 @@ class FastSPM(fx.PDE):
         }
 
 # ==============================================================================
-# SCENARIO 1: Stateless Fleet-Scale SaaS API (Zero Cold-Start Batching)
+# SCENARIO 1: Stateless Fleet-Scale SaaS Batching & Global Sensitivity
 # ==============================================================================
 def scenario_1_saas_fleet_batching():
-    print("\n--- SCENARIO 1: Stateless Fleet-Scale SaaS Batching ---")
+    print("\n--- SCENARIO 1: Stateless Fleet-Scale SaaS Batching & Global Sensitivity ---")
     
     # 1. Compile exactly once (simulating a CI/CD build step)
     compiler_engine = fx.Engine(model=FastSPM(), target="cpu:serial")
@@ -73,9 +73,18 @@ def scenario_1_saas_fleet_batching():
     # PyBaMM Pain Point: Holding 10,000 `Simulation` objects in RAM causes OOM. 
     # ion_flux maps parameters to flat C-arrays; Python memory overhead is zero.
     fleet_size = 10_000
+    
+    D_s_samples = np.random.uniform(1e-14, 5e-14, fleet_size)
+    R_samples = np.random.uniform(0.01, 0.05, fleet_size)
+    
     param_payloads = [
-        {"D_s": np.random.uniform(1e-14, 5e-14), "R_internal": np.random.uniform(0.01, 0.05)} 
-        for _ in range(fleet_size)
+        {
+            "D_s": D_s_samples[i], 
+            "R_internal": R_samples[i],
+            "_term_mode": 1.0,      # Constant Current mode
+            "_term_i_target": 10.0  # 10A discharge
+        } 
+        for i in range(fleet_size)
     ]
     
     print(f"Executing {fleet_size} parallel battery models...")
@@ -92,6 +101,25 @@ def scenario_1_saas_fleet_batching():
     
     elapsed = time.perf_counter() - start_time
     print(f"✅ Solved {fleet_size} models in {elapsed:.2f} seconds ({(fleet_size/elapsed):.1f} solves/sec).")
+
+    # 5. Global Sensitivity Analysis (Variance-Based)
+    print("\nExtracting Global Sensitivity Metrics (Variance Explained)...")
+    # Target: The final cell voltage at t=3600s
+    qoi_voltage = np.array([res["V_cell"].data[-1] for res in results])
+    
+    # Utilizing Pearson correlation squared (R^2) as a proxy for first-order global 
+    # variance contribution.
+    from scipy.stats import pearsonr
+    
+    r_ds, _ = pearsonr(D_s_samples, qoi_voltage)
+    r_res, _ = pearsonr(R_samples, qoi_voltage)
+    
+    var_ds = (r_ds ** 2) * 100
+    var_res = (r_res ** 2) * 100
+    
+    print(f"   D_s        : {var_ds:.1f}%")
+    print(f"   R_internal : {var_res:.1f}%")
+    print("   (Note: Residual variance indicates higher-order coupling or non-linearities not captured by R^2).")
 
 
 # ==============================================================================
@@ -156,7 +184,7 @@ def scenario_3_adjoint_gradient_optimization():
     t_eval = np.linspace(0, 150, 100) # 150-second 10A Constant Current discharge pulse
     
     print("1. Generating Synthetic 'Lab Data' (Ground Truth)...")
-    res_true = engine.solve(t_eval=t_eval, parameters=p_true)
+    res_true = engine.solve(t_eval=t_eval, parameters=p_true, show_progress=False)
     v_target = res_true["V_cell"].data
     
     # 2. Optimization Routine using L-BFGS-B (First-Order Exact Gradients)
@@ -189,7 +217,7 @@ def scenario_3_adjoint_gradient_optimization():
         
         # --- THE MAGIC HAPPENS HERE ---
         # Forward Pass (Records the highly non-linear integration trajectory)
-        res = engine.solve(t_eval=t_eval, parameters=p_guess, requires_grad=["D_s", "R_internal"])
+        res = engine.solve(t_eval=t_eval, parameters=p_guess, requires_grad=["D_s", "R_internal"], show_progress=False)
         
         # Backward Pass (Triggers the VJP Adjoint loop through the native Rust solver)
         loss = fx.metrics.rmse(predicted=res["V_cell"], target=v_target)

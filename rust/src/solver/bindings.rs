@@ -7,10 +7,10 @@ use super::session::SolverHandle;
 use super::sundials::SundialsHandle;
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, record_history=false, debug=false))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, record_history=false, debug=false, show_progress=true))]
 pub fn solve_ida_native<'py>(
     py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>,
-    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, record_history: bool, debug: bool,
+    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, record_history: bool, debug: bool, show_progress: bool,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     
     let constraints = vec![0.0; y0_py.len()];
@@ -29,7 +29,7 @@ pub fn solve_ida_native<'py>(
         handle.step_with_history(dt, history.as_mut())?;
         for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
         
-        if total_steps > 0 {
+        if show_progress && total_steps > 0 {
             let pct = (step as f64 / total_steps as f64) * 100.0;
             let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
             let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
@@ -37,7 +37,7 @@ pub fn solve_ida_native<'py>(
             std::io::stdout().flush().unwrap();
         }
     }
-    if total_steps > 0 { println!(); }
+    if show_progress && total_steps > 0 { println!(); }
     
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
     
@@ -64,9 +64,9 @@ pub fn solve_ida_native<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, show_progress=true))]
 pub fn solve_ida_sundials<'py>(
-    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>,
+    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, show_progress: bool,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     let mut handle = SundialsHandle::new(lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
@@ -79,7 +79,7 @@ pub fn solve_ida_sundials<'py>(
         handle.step(dt)?;
         for i in 0..handle.n { out_traj[step * handle.n + i] = handle._y_data[i]; }
         
-        if total_steps > 0 {
+        if show_progress && total_steps > 0 {
             let pct = (step as f64 / total_steps as f64) * 100.0;
             let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
             let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
@@ -87,7 +87,7 @@ pub fn solve_ida_sundials<'py>(
             std::io::stdout().flush().unwrap();
         }
     }
-    if total_steps > 0 { println!(); }
+    if show_progress && total_steps > 0 { println!(); }
     
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
     let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
@@ -96,9 +96,9 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, debug, max_workers=1))]
+#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, debug, max_workers=1, show_progress=true))]
 pub fn solve_batch_native<'py>(
-    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, debug: bool, max_workers: usize
+    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, debug: bool, max_workers: usize, show_progress: bool
 ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
     
     let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -124,18 +124,20 @@ pub fn solve_batch_native<'py>(
                 }
                 
                 let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                let pct = (c as f64 / total as f64) * 100.0;
-                let filled = ((c as f64 / total as f64) * 30.0) as usize;
-                let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-                print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
-                std::io::stdout().flush().unwrap();
+                if show_progress {
+                    let pct = (c as f64 / total as f64) * 100.0;
+                    let filled = ((c as f64 / total as f64) * 30.0) as usize;
+                    let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                    print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
+                    std::io::stdout().flush().unwrap();
+                }
                 
                 Ok(out_traj)
             }).collect()
         })
     });
     
-    println!();
+    if show_progress { println!(); }
 
     let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();
