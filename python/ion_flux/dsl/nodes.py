@@ -1,3 +1,4 @@
+import re
 from typing import Dict, Any, Union, List, Optional, TypedDict
 
 SystemDict = TypedDict('SystemDict', {
@@ -6,6 +7,14 @@ SystemDict = TypedDict('SystemDict', {
     'initial_conditions': Dict[Any, Any],
     'observables': Dict[Any, Any]
 }, total=False)
+
+def validate_identifier(name: str) -> str:
+    """Sanitizes AST names to prevent C++ RCE injection payloads."""
+    if not name:
+        return name
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name):
+        raise ValueError(f"Invalid identifier '{name}'. To prevent code injection, names must be valid C/C++ identifiers.")
+    return name
 
 def Dirichlet(val: Union[float, 'Node']) -> 'Node':
     """Syntactic sugar marking explicit state override bounds."""
@@ -64,7 +73,7 @@ class State(Node):
     __slots__ = ["domain", "name", "max_newton_step", "_original_name"]
     def __init__(self, domain=None, name: str = "", max_newton_step: Optional[float] = None):
         self.domain = domain
-        self.name = name
+        self.name = validate_identifier(name)
         self.max_newton_step = max_newton_step
     def to_dict(self) -> Dict[str, Any]: 
         d = {"type": "State", "name": self.name}
@@ -72,28 +81,28 @@ class State(Node):
         return d
     def __repr__(self) -> str: return self.name or "<Unbound State>"
     def __set_name__(self, owner, name):
-        if not self.name: self.name = name
+        if not self.name: self.name = validate_identifier(name)
 
 class Observable(Node):
     __slots__ = ["domain", "name", "_original_name"]
     def __init__(self, domain=None, name: str = ""):
         self.domain = domain
-        self.name = name
+        self.name = validate_identifier(name)
     def to_dict(self) -> Dict[str, Any]: 
         return {"type": "Observable", "name": self.name}
     def __repr__(self) -> str: return self.name or "<Unbound Observable>"
     def __set_name__(self, owner, name):
-        if not self.name: self.name = name
+        if not self.name: self.name = validate_identifier(name)
 
 class Parameter(Node):
     __slots__ = ["default", "name", "_original_name"]
     def __init__(self, default: float, name: str = ""):
         self.default = default
-        self.name = name
+        self.name = validate_identifier(name)
     def to_dict(self) -> Dict[str, Any]: return {"type": "Parameter", "name": self.name, "default": self.default}
     def __repr__(self) -> str: return self.name or f"<Unbound Param: {self.default}>"
     def __set_name__(self, owner, name):
-        if not self.name: self.name = name
+        if not self.name: self.name = validate_identifier(name)
 
 class BinaryOp(Node):
     __slots__ = ["op", "left_node", "right_node", "_bc_id"]

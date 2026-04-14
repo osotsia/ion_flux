@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
-use super::{NativeResFn, NativeObsFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeObsFn, NativeJacFn, NativeJvpFn, NativeSetThreadsFn, SolverConfig, Diagnostics};
 use super::integrator::{step_bdf_vsvo, BdfHistory};
 use super::linalg::NativeSparseLuSolver;
 
@@ -11,6 +11,7 @@ pub struct SolverHandle {
     obs_fn: Option<NativeObsFn>,
     jac_fn: NativeJacFn,
     jvp_fn: Option<NativeJvpFn>,
+    set_threads_fn: Option<NativeSetThreadsFn>,
     pub n: usize,
     pub bw: isize,
     pub n_obs: usize,
@@ -40,11 +41,12 @@ impl SolverHandle {
         let obs_fn: Option<NativeObsFn> = unsafe { lib.get(b"evaluate_observables\0").map(|s| *s).ok() };
         let jac_fn: NativeJacFn = unsafe { *lib.get(b"evaluate_jacobian\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let jvp_fn: Option<NativeJvpFn> = unsafe { lib.get(b"evaluate_jvp\0").map(|s| *s).ok() };
+        let set_threads_fn: Option<NativeSetThreadsFn> = unsafe { lib.get(b"set_spatial_threads\0").map(|s| *s).ok() };
         
         let history = BdfHistory::new(n);
 
         let mut handle = SolverHandle { 
-            _lib: lib, res_fn, obs_fn, jac_fn, jvp_fn, n, bw, n_obs,
+            _lib: lib, res_fn, obs_fn, jac_fn, jvp_fn, set_threads_fn, n, bw, n_obs,
             t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag, max_steps,
             history, lu_solver: NativeSparseLuSolver::new(n, bw), jac_buffer: vec![0.0; n * n],
             config: SolverConfig::default(), diag: Diagnostics::default(),
@@ -171,6 +173,11 @@ impl SolverHandle {
 }
 
 impl SolverHandle {
+    pub fn set_spatial_threads(&self, num_threads: i32) {
+        if let Some(f) = self.set_threads_fn {
+            unsafe { f(num_threads) };
+        }
+    }    
     pub fn step_with_history(&mut self, dt: f64, hist: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>) -> PyResult<()> {
         step_bdf_vsvo(
             self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.m, &self.id, &self.constraints, &self.spatial_diag, &self.max_steps,

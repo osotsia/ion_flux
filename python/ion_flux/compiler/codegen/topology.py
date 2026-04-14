@@ -12,10 +12,12 @@ def get_local_index(global_idx_var: str, domain: Any, axis_name: str) -> str:
     if hasattr(domain, "domains") and len(domain.domains) == 2:
         if domain.domains[1].name == axis_name:
             res = domain.domains[1].resolution
-            return f"({global_idx_var} % {res})"
+            # Explicit (int) cast ensures C++ modulo operator doesn't fail if index drops to double
+            return f"((int)({global_idx_var}) % {res})"
         elif domain.domains[0].name == axis_name:
             res_inner = domain.domains[1].resolution
-            return f"({global_idx_var} / {res_inner})"
+            # Explicit (int) cast ensures integer division for spatial strides
+            return f"((int)({global_idx_var}) / {res_inner})"
     return global_idx_var
 
 def get_coord_sys(domain: Any, axis_name: str) -> str:

@@ -1,0 +1,296 @@
+name: Build, Test, and Publish
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [ published ]
+  workflow_dispatch:
+
+jobs:
+  # ====================================================================
+  # Job 1: Prepare Toolchain (Runs exactly once per OS)
+  # ====================================================================
+  prepare_toolchain:
+    name: Prepare C++ Toolchain (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space (Linux Only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - name: Install System Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install sundials cmake ninja
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build curl
+
+      - name: Cache C++ Toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            python/ion_flux/compiler/toolchain
+            /usr/local/lib/libsundials*
+            /usr/local/include/sundials
+            /usr/local/include/nvector
+            /usr/local/include/sunmatrix
+            /usr/local/include/sunlinsol
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test.yml') }}
+
+      - name: Build SUNDIALS (Linux)
+        if: runner.os == 'Linux' && steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/LLNL/sundials/releases/download/v7.1.1/sundials-7.1.1.tar.gz -o sundials.tar.gz
+          tar -xzf sundials.tar.gz
+          cd sundials-7.1.1
+          mkdir build && cd build
+          cmake -G Ninja \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DEXAMPLES_ENABLE_C=OFF \
+            -DEXAMPLES_ENABLE_CXX=OFF \
+            -DBUILD_SHARED_LIBS=ON \
+            ..
+          ninja
+          sudo ninja install
+          cd ../..
+          rm -rf sundials-7.1.1 sundials.tar.gz
+
+      - name: Bundle Hermetic LLVM/Enzyme Toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          TOOLCHAIN_DIR="$PWD/python/ion_flux/compiler/toolchain"
+          mkdir -p $TOOLCHAIN_DIR/bin $TOOLCHAIN_DIR/lib $TOOLCHAIN_DIR/llvm
+          
+          LLVM_VERSION="19.1.0"
+          OS=$(uname -s)
+          ARCH=$(uname -m)
+          
+          if [ "$OS" = "Darwin" ]; then
+            if [ "$ARCH" = "arm64" ]; then
+              LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-macOS-ARM64.tar.xz"
+            else
+              LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-macOS-X64.tar.xz"
+            fi
+          else
+            LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
+          fi
+          
+          curl -L $LLVM_URL -o llvm.tar.xz
+          tar -xf llvm.tar.xz -C $TOOLCHAIN_DIR/llvm --strip-components=1
+          rm llvm.tar.xz
+          
+          git clone --depth 1 https://github.com/EnzymeAD/Enzyme.git enzyme_src
+          
+          export CC="$TOOLCHAIN_DIR/llvm/bin/clang"
+          export CXX="$TOOLCHAIN_DIR/llvm/bin/clang++"
+          
+          if [ "$OS" = "Darwin" ]; then
+            cmake -G Ninja -S enzyme_src/enzyme -B enzyme_src/build \
+              -DLLVM_DIR="$TOOLCHAIN_DIR/llvm/lib/cmake/llvm" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER="$CC" \
+              -DCMAKE_CXX_COMPILER="$CXX"
+          else
+            cmake -G Ninja -S enzyme_src/enzyme -B enzyme_src/build \
+              -DLLVM_DIR="$TOOLCHAIN_DIR/llvm/lib/cmake/llvm" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER="$CC" \
+              -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_LINKER="$TOOLCHAIN_DIR/llvm/bin/ld.lld" \
+              -DCMAKE_AR="$TOOLCHAIN_DIR/llvm/bin/llvm-ar" \
+              -DCMAKE_RANLIB="$TOOLCHAIN_DIR/llvm/bin/llvm-ranlib" \
+              -DCMAKE_C_FLAGS="-fuse-ld=lld" \
+              -DCMAKE_CXX_FLAGS="-fuse-ld=lld"
+          fi
+            
+          ninja -C enzyme_src/build
+          find enzyme_src/build -name "ClangEnzyme*" -type f -exec cp {} $TOOLCHAIN_DIR/lib/ \;
+          rm -rf enzyme_src
+          
+          cat << 'EOF' > $TOOLCHAIN_DIR/bin/clang++
+          #!/bin/bash
+          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+          
+          OS=$(uname -s)
+          if [ "$OS" = "Darwin" ]; then
+            SDK_PATH=$(xcrun --show-sdk-path 2>/dev/null || echo "")
+            if [ -n "$SDK_PATH" ]; then
+              SYSROOT_FLAG="-isysroot $SDK_PATH"
+            else
+              SYSROOT_FLAG=""
+            fi
+            exec "$DIR/../llvm/bin/clang++" $SYSROOT_FLAG "$@"
+          else
+            exec "$DIR/../llvm/bin/clang++" "$@"
+          fi
+          EOF
+          
+          chmod +x $TOOLCHAIN_DIR/bin/clang++
+          
+          # Prune LLVM sysroot to reduce cache payload from ~6GB to <1GB
+          echo "Pruning LLVM sysroot..."
+          cd $TOOLCHAIN_DIR/llvm/bin
+          find . -type f ! -name "clang*" ! -name "ld.lld" ! -name "llvm-ar" ! -name "llvm-ranlib" -delete
+          cd ..
+          rm -rf share libexec docs
+          
+          # CRITICAL FIX: Eliminate all broken symlinks to prevent Maturin OS Error 2
+          echo "Removing broken symlinks..."
+          find "$TOOLCHAIN_DIR" -type l ! -exec test -e {} \; -delete
+
+
+  # ====================================================================
+  # Job 2: Build & Test (Matrix: macOS/Linux x Python versions)
+  # ====================================================================
+  build_and_test:
+    name: Build & Test (${{ matrix.os }} / Py${{ matrix.python-version }})
+    needs: prepare_toolchain
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space (Linux Only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust -> target"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install System Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install sundials cmake ninja
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build curl
+
+      - name: Restore C++ Toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            python/ion_flux/compiler/toolchain
+            /usr/local/lib/libsundials*
+            /usr/local/include/sundials
+            /usr/local/include/nvector
+            /usr/local/include/sunmatrix
+            /usr/local/include/sunlinsol
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test.yml') }}
+          fail-on-cache-miss: true
+
+      - name: Update ldconfig (Linux)
+        if: runner.os == 'Linux'
+        run: sudo ldconfig
+
+      - name: Create and Activate Virtual Environment
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV
+
+      - name: Install Python Build Tools & Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install maturin auditwheel delocate pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib
+
+      - name: Run Rust Core Tests
+        run: |
+          cd rust
+          cargo test
+
+      - name: Build Wheels and Install (Maturin)
+        run: |
+          # Skip auditwheel/delocate phase to prevent OS Error 2 and Mach-O linking crashes
+          maturin build --release -o dist --auditwheel skip
+          maturin develop --release
+          
+          if [ "$(uname -s)" = "Linux" ]; then
+            for whl in dist/*.whl; do
+              # We explicitly manually repair Linux wheels only for SUNDIALS bundling
+              auditwheel repair "$whl" -w dist_repaired/
+            done
+            rm dist/*.whl
+            mv dist_repaired/*.whl dist/
+          fi
+          
+          pip install dist/*.whl --force-reinstall
+
+      - name: Run Python Test Suite
+        run: |
+          pytest tests/ -v
+
+      - name: Upload Wheel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 1
+
+
+  # ====================================================================
+  # Job 3: Publish to PyPI (Runs strictly on new releases)
+  # ====================================================================
+  publish_pypi:
+    name: Publish Wheels to PyPI
+    needs: build_and_test
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ion-flux
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download Wheel Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

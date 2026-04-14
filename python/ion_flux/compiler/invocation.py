@@ -121,33 +121,61 @@ class NativeRuntime:
 class NativeCompiler:
     """Manages the Clang/LLVM toolchain invocation and caching of emitted C++ strings."""
     def __init__(self, cache_dir: str = None):
-        self.cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), "ion_flux_jit")
-        os.makedirs(self.cache_dir, exist_ok=True)
+        if cache_dir:
+            self.cache_dir = cache_dir
+            os.makedirs(self.cache_dir, exist_ok=True)
+        else:
+            # Use mkdtemp to prevent predictable directory vulnerabilities (Local Privilege Escalation)
+            self.cache_dir = tempfile.mkdtemp(prefix="ion_flux_jit_")
+            
+        self.bundled_toolchain_dir = os.path.join(os.path.dirname(__file__), "toolchain")
         
-        self.compiler_cmd = self._find_compiler()
-        self.enzyme_plugin = self._find_enzyme_plugin()
+        # Determine both bundled and system paths for resilient fallback
+        self.bundled_compiler = self._find_bundled_compiler()
+        self.system_compiler = self._find_system_compiler()
+        
+        self.bundled_plugin = self._find_bundled_plugin()
+        self.system_plugin = self._find_system_plugin()
+        
+        # Start with bundled if available, fallback to system
+        self.compiler_cmd = self.bundled_compiler if self.bundled_compiler else self.system_compiler
+        self.enzyme_plugin = self.bundled_plugin if self.bundled_plugin else self.system_plugin
         
         if not self.compiler_cmd:
             logging.warning("No compatible C++ compiler found. Native execution will fail.")
 
-    def _find_compiler(self) -> str:
+    def _find_bundled_compiler(self) -> str:
+        bundled_clang = os.path.join(self.bundled_toolchain_dir, "bin", "clang++")
+        if os.path.exists(bundled_clang) and os.access(bundled_clang, os.X_OK):
+            return bundled_clang
+        return ""
+
+    def _find_system_compiler(self) -> str:
         if sys.platform == "darwin":
             for path in ["/opt/homebrew/opt/llvm/bin/clang++", "/usr/local/opt/llvm/bin/clang++"]:
                 if os.path.exists(path): return path
-        return shutil.which("clang++") or shutil.which("g++")
+        return shutil.which("clang++") or shutil.which("g++") or ""
 
-    def _find_enzyme_plugin(self) -> str:
+    def _find_bundled_plugin(self) -> str:
+        ext = ".dylib" if sys.platform == "darwin" else ".so"
+        bundled_matches = glob.glob(os.path.join(self.bundled_toolchain_dir, "lib", f"ClangEnzyme*{ext}"))
+        if bundled_matches:
+            return bundled_matches[0]
+        return ""
+
+    def _find_system_plugin(self) -> str:
+        ext = ".dylib" if sys.platform == "darwin" else ".so"
         if sys.platform == "darwin":
             for base in ["/opt/homebrew/lib", "/usr/local/lib"]:
-                matches = glob.glob(os.path.join(base, "ClangEnzyme*.dylib"))
+                matches = glob.glob(os.path.join(base, f"ClangEnzyme*{ext}"))
                 if matches: return matches[0]
         elif sys.platform == "linux":
             conda_prefix = os.environ.get("CONDA_PREFIX", "")
             if conda_prefix:
-                matches = glob.glob(os.path.join(conda_prefix, "lib", "ClangEnzyme*.so"))
+                matches = glob.glob(os.path.join(conda_prefix, "lib", f"ClangEnzyme*{ext}"))
                 if matches: return matches[0]
             for base in ["/usr/lib", "/usr/local/lib"]:
-                matches = glob.glob(os.path.join(base, "ClangEnzyme*.so"))
+                matches = glob.glob(os.path.join(base, f"ClangEnzyme*{ext}"))
                 if matches: return matches[0]
         return ""
 
@@ -170,31 +198,52 @@ class NativeCompiler:
         with open(source_path, "w") as f:
             f.write(cpp_source)
             
-        cmd = [self.compiler_cmd, "-O3", "-fPIC", "-shared", "-o", tmp_lib_path, source_path]
-        
-        if "#pragma omp" in cpp_source:
-            cmd.append("-fopenmp")
-            if sys.platform == "darwin":
-                cmd.extend(["-lomp", "-Wl,-rpath,/opt/homebrew/lib", "-Wl,-rpath,/usr/local/lib"])
-            elif sys.platform == "linux":
-                cmd.extend(["-static-libgcc", "-static-libstdc++", "-Wl,-Bstatic", "-lgomp", "-Wl,-Bdynamic"])
-        
-        if self.enzyme_plugin:
-            cmd.insert(1, f"-fplugin={self.enzyme_plugin}")
-            cmd.insert(2, "-DENZYME_ACTIVE")
-        else:
-            logging.warning("Enzyme plugin not found. Jacobian evaluation will return zeros.")
-        
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            # Atomic rename prevents JIT collisions in scalable Serverless environments
-            os.replace(tmp_lib_path, lib_path)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Clang compilation failed. cmd: {' '.join(cmd)}\nstderr:\n{e.stderr}")
-        finally:
-            if os.path.exists(source_path):
-                os.remove(source_path)
-            if os.path.exists(tmp_lib_path):
-                os.remove(tmp_lib_path)
+        def attempt_compile(compiler: str, plugin: str) -> bool:
+            cmd = [compiler, "-O3", "-fPIC", "-shared", "-o", tmp_lib_path, source_path]
+            
+            if "#pragma omp" in cpp_source:
+                cmd.append("-fopenmp")
+                if sys.platform == "darwin":
+                    cmd.extend(["-lomp", "-Wl,-rpath,/opt/homebrew/lib", "-Wl,-rpath,/usr/local/lib"])
+                elif sys.platform == "linux":
+                    cmd.extend(["-static-libgcc", "-static-libstdc++", "-Wl,-Bstatic", "-lgomp", "-Wl,-Bdynamic"])
+            
+            if plugin:
+                cmd.insert(1, f"-fplugin={plugin}")
+                cmd.insert(2, "-DENZYME_ACTIVE")
+            else:
+                logging.warning("Enzyme plugin not found. Jacobian evaluation will return zeros.")
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                os.replace(tmp_lib_path, lib_path)
+                return True
+            except subprocess.CalledProcessError as e:
+                self.last_error = f"cmd: {' '.join(cmd)}\nstderr:\n{e.stderr}"
+                return False
+
+        # First attempt: Bundled toolchain (if available)
+        success = False
+        if self.bundled_compiler:
+            success = attempt_compile(self.bundled_compiler, self.bundled_plugin)
+            
+        # Second attempt: Graceful fallback to System toolchain if the bundled one is incomplete/broken
+        if not success and self.system_compiler:
+            if self.bundled_compiler:
+                logger.info("Bundled compiler failed or lacked headers. Gracefully falling back to system compiler.")
+            success = attempt_compile(self.system_compiler, self.system_plugin)
+            if success:
+                # Update active compiler to system for future compilation calls to avoid repeated failures
+                self.compiler_cmd = self.system_compiler
+                self.enzyme_plugin = self.system_plugin
+
+        # Cleanup
+        if os.path.exists(source_path):
+            os.remove(source_path)
+        if os.path.exists(tmp_lib_path):
+            os.remove(tmp_lib_path)
+
+        if not success:
+            raise RuntimeError(f"Clang compilation failed.\n{getattr(self, 'last_error', 'Unknown error')}")
             
         return NativeRuntime(lib_path, n_states)

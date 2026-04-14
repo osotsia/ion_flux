@@ -6,7 +6,7 @@ pub mod adjoint;
 pub mod bindings;
 pub mod sundials;
 
-use std::os::raw::c_double;
+use std::os::raw::{c_double, c_int};
 use std::time::SystemTime;
 
 pub type NativeResFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *mut c_double);
@@ -14,6 +14,7 @@ pub type NativeObsFn = unsafe extern "C" fn(*const c_double, *const c_double, *c
 pub type NativeJacFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, c_double, *mut c_double);
 pub type NativeJvpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, c_double, *const c_double, *mut c_double);
 pub type NativeVjpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *const c_double, *mut c_double, *mut c_double, *mut c_double);
+pub type NativeSetThreadsFn = unsafe extern "C" fn(c_int);
 
 #[derive(Clone, Copy)]
 pub struct SolverConfig {

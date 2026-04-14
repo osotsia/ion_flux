@@ -13,20 +13,19 @@ No flattened arrays. No massive Python memory graphs. No "math gymnastics." Just
 
 ---
 
-## 🚀 Quick Start (MacOS / Linux)
+## 🚀 Quick Start (MacOS)
 
 ```bash
-# ion_flux relies on LLVM and Enzyme for AOT compilation and exact gradients
-brew install llvm enzyme cmake
+pip install ion_flux
 
-# Clone and setup the Python environment
+# Install the SUNDIALS solver (optional)
+brew install sundials
+
+# Clone the repository and set up a new environment
 git clone https://github.com/organization/ion_flux.git
 cd ion_flux
 python3.11 -m venv .venv && source .venv/bin/activate
-
-# Install build requirements and compile the Rust backend natively
-pip install maturin pytest numpy scipy
-pip install .
+pip install pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib
 
 # Run the showcase script
 python examples/6_demo.py

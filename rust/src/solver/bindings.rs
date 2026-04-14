@@ -135,6 +135,10 @@ pub fn solve_batch_native<'py>(
                 let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), m_list.clone(), spatial_diag.clone(), max_steps.clone(), n_obs, debug.clone())
                     .map_err(|e| e.to_string())?;
                     
+                // CRITICAL FIX: Prevent Rayon + OpenMP thread oversubscription.
+                // Explicitly clamp OpenMP to 1 thread strictly within this Rayon worker context.
+                handle.set_spatial_threads(1);
+
                 let step_list = if let Some(ref protos) = protocol_steps {
                     protos.get(b_idx).cloned().unwrap_or_default()
                 } else {

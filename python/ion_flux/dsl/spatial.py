@@ -1,5 +1,5 @@
 from typing import Dict, Any, Union, List, Optional
-from .nodes import Node, UnaryOp, Scalar
+from .nodes import Node, UnaryOp, Scalar, validate_identifier
 
 class DomainBoundary(Node):
     __slots__ = ["domain", "side"]
@@ -15,7 +15,7 @@ class ConcatenatedDomain:
     __slots__ = ["domains", "name", "_original_name"]
     def __init__(self, domains: List['Domain'], name: str = ""):
         self.domains = domains
-        self.name = name or "_plus_".join(d.name for d in domains)
+        self.name = validate_identifier(name) or validate_identifier("_plus_".join(d.name for d in domains))
         
     def __add__(self, other: Union['Domain', 'ConcatenatedDomain']) -> 'ConcatenatedDomain':
         if isinstance(other, Domain): return ConcatenatedDomain(self.domains + [other])
@@ -28,7 +28,7 @@ class Domain:
         self.bounds = bounds
         self.resolution = resolution
         self.coord_sys = coord_sys
-        self.name = name
+        self.name = validate_identifier(name)
         self.csr_data = csr_data
         self.parent = parent
         self.start_idx = start_idx
@@ -36,6 +36,7 @@ class Domain:
 
     def region(self, bounds: tuple, resolution: int, name: str) -> "Domain":
         """Creates a topological sub-mesh that shares the memory array stride of the parent Domain."""
+        name = validate_identifier(name)
         start_idx = None
         frac = (bounds[0] - self.bounds[0]) / (self.bounds[1] - self.bounds[0])
         ideal_start = int(round(frac * self.resolution))
@@ -59,6 +60,7 @@ class Domain:
 
     @classmethod
     def from_mesh(cls, mesh_data: Union[str, dict], name: str = "unstructured_mesh", surfaces: Optional[Dict[str, List[int]]] = None) -> "Domain":
+        name = validate_identifier(name)
         import numpy as np
         if isinstance(mesh_data, str):
             import json
@@ -137,13 +139,13 @@ class Domain:
         
     def __repr__(self) -> str: return self.name or f"Domain({self.bounds})"
     def __set_name__(self, owner, name):
-        if not self.name: self.name = name
+        if not self.name: self.name = validate_identifier(name)
 
 class CompositeDomain:
     __slots__ = ["domains", "name", "_original_name"]
     def __init__(self, domains: List[Domain], name: str = ""):
         self.domains = domains
-        self.name = name or "_x_".join([d.name for d in domains if d.name])
+        self.name = validate_identifier(name) or validate_identifier("_x_".join([d.name for d in domains if d.name]))
         
     @property
     def resolution(self) -> int:
@@ -152,4 +154,4 @@ class CompositeDomain:
         
     def __repr__(self) -> str: return self.name or f"CompositeDomain({[d.name for d in self.domains]})"
     def __set_name__(self, owner, name):
-        if not self.name: self.name = name
+        if not self.name: self.name = validate_identifier(name)
