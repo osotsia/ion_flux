@@ -18,10 +18,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
-from ion_flux.runtime.scheduler import MultiTenantScheduler
-
-import os
-import concurrent.futures
 
 
 class ThermalDFN(fx.PDE):
@@ -314,59 +310,30 @@ class ThermalDFN(fx.PDE):
             }
         }
 
-def run_single_worker(name, current):
-    """
-    Stateless worker function. 
-    Loads the pre-compiled model directly from disk, bypassing AST parsing and Clang.
-    """
-    engine = fx.Engine.load("dfn_parallel_prod.so", target="cpu:serial", solver_backend="SUNDIALS")
-    
-    # Instantiate the model locally purely to provide the AST nodes for the trigger conditions.
-    # The execution itself still runs natively on the stateless loaded binary.
-    model = ThermalDFN()
-    
-    protocol = Sequence([
-        CC(rate=current, until=model.V_cell <= 2.5, time=15000),
-        Rest(time=7200)
-    ])
-    
-    print(f"Task {name} started (Target = {current} A)")
-    start_t = time.perf_counter()
-    
-    # Suppress progress in workers to prevent terminal mangling from concurrent stdout writes
-    res = engine.solve(protocol=protocol, show_progress=True)
-    
-    print(f"Task {name} completed in {time.perf_counter() - start_t:.2f}s")
-    return name, res
-
-
 def run_parallel_processes():
-    # 1. Compile exactly once in the main process
-    print("Compiling AST to Native C++ Binary...")
+    print("Compiling DFN Math to Native C++ Binary...")
     compiler_engine = fx.Engine(model=ThermalDFN(), target="cpu:serial", jacobian_bandwidth=0, solver_backend="native")
-    compiler_engine.export_binary("dfn_parallel_prod.so")
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
-    results = {}
+    params_list = []
+    protocols_list = []
+    keys_order = []
     
-    # 2. Distribute across isolated Python processes
-    print("Initiating Multi-Process Execution...")
+    for name, current in rates.items():
+        keys_order.append(name)
+        params_list.append({}) # Target parameters can be overridden here
+        protocols_list.append(Sequence([
+            CC(rate=current, until=compiler_engine.model.V_cell <= 2.5, time=15000),
+            Rest(time=7200)
+        ]))
+    
+    # Drop into Rust, utilizing Rayon thread-pool to distribute state-machine evaluation.
+    print("\nInitiating Native Rayon Batch Execution...")
     start_time = time.perf_counter()
-    
-    with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(run_single_worker, name, current): name for name, current in rates.items()}
-        
-        for future in concurrent.futures.as_completed(futures):
-            name, res = future.result()
-            results[name] = res
-            
+    batch_results = compiler_engine.solve_batch(parameters=params_list, protocols=protocols_list, max_workers=3)
     print(f"\nAll batch processes completed in {time.perf_counter() - start_time:.2f}s")
     
-    # Clean up the generated CI/CD artifacts
-    if os.path.exists("dfn_parallel_prod.so"): os.remove("dfn_parallel_prod.so")
-    if os.path.exists("dfn_parallel_prod.so.meta.json"): os.remove("dfn_parallel_prod.so.meta.json")
-    
-    return results
+    return {keys_order[i]: res for i, res in enumerate(batch_results)}
 
 
 if __name__ == "__main__":

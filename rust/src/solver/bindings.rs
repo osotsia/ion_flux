@@ -115,51 +115,195 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, debug, max_workers=1, show_progress=true))]
+#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, debug, max_workers=1, show_progress=true, protocol_steps=None))]
 pub fn solve_batch_native<'py>(
-    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, debug: bool, max_workers: usize, show_progress: bool
-) -> PyResult<Vec<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)>> {
+    py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, 
+    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, debug: bool, max_workers: usize, show_progress: bool,
+    protocol_steps: Option<Vec<Vec<(i32, f64, f64, (bool, usize, usize, bool, i32, f64), usize, usize, usize)>>>
+) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)>> {
     
     let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     
     let completed = AtomicUsize::new(0);
     let total = p_batch.len();
 
-    let results: Result<Vec<(Vec<f64>, Vec<f64>)>, String> = py.allow_threads(|| {
+    let results: Result<Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, String> = py.allow_threads(|| {
         pool.install(|| {
-            p_batch.par_iter().map(|p| {
+            p_batch.par_iter().enumerate().map(|(b_idx, p)| {
                 let constraints = vec![0.0; y0.len()]; 
                 
                 let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), m_list.clone(), spatial_diag.clone(), max_steps.clone(), n_obs, debug.clone())
                     .map_err(|e| e.to_string())?;
                     
-                let mut out_traj = vec![0.0; t_eval.len() * handle.n];
-                let mut out_obs = vec![0.0; t_eval.len() * n_obs];
-                for i in 0..handle.n { out_traj[i] = handle.y[i]; }
+                let step_list = if let Some(ref protos) = protocol_steps {
+                    protos.get(b_idx).cloned().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 
+                let has_protocol = !step_list.is_empty();
                 let mut step_obs = vec![0.0; n_obs];
-                handle.get_observables(&mut step_obs).map_err(|e| e.to_string())?;
-                for i in 0..n_obs { out_obs[i] = step_obs[i]; }
                 
-                for step in 1..t_eval.len() {
-                    let dt = t_eval[step] - t_eval[step - 1];
-                    handle.step(dt).map_err(|e| e.to_string())?;
-                    for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
+                if has_protocol {
+                    // --- NATIVE STATE MACHINE EXECUTION ---
+                    let mut out_t = vec![0.0];
+                    let mut out_traj = handle.y.clone();
+                    if n_obs > 0 { handle.get_observables(&mut step_obs).unwrap_or(()); }
+                    let mut out_obs = step_obs.clone();
+                    
+                    for step in &step_list {
+                        let (s_type, target_val, t_limit, (has_trig, t_idx, t_size, t_is_obs, t_op, t_val), p_mode, p_i, p_v) = *step;
+                        
+                        if s_type == 0 { 
+                            handle.set_parameter(p_mode, 1.0); handle.set_parameter(p_i, target_val);
+                        } else if s_type == 1 { 
+                            handle.set_parameter(p_mode, 0.0); handle.set_parameter(p_v, target_val);
+                        } else if s_type == 2 { 
+                            handle.set_parameter(p_mode, 1.0); handle.set_parameter(p_i, 0.0);
+                        }
+                        handle.calc_algebraic_roots().unwrap_or(());
+                        
+                        let mut t_elapsed = 0.0;
+                        
+                        while t_elapsed < t_limit {
+                            if t_limit == std::f64::INFINITY && !has_trig { break; } 
+                            let dt_step = 1.0_f64.min(t_limit - t_elapsed);
+                            
+                            let ckpt = handle.clone_state().unwrap();
+                            let step_res = handle.step(dt_step);
+                            
+                            let mut triggered = false;
+                            if has_trig && step_res.is_ok() {
+                                for i in 0..t_size {
+                                    let val = if t_is_obs {
+                                        handle.get_observables(&mut step_obs).unwrap_or(());
+                                        step_obs[t_idx + i]
+                                    } else {
+                                        handle.y[t_idx + i]
+                                    };
+                                    let trig = match t_op {
+                                        1 => val > t_val, 2 => val < t_val, 3 => val >= t_val,
+                                        4 => val <= t_val, 5 => val == t_val, 6 => val != t_val,
+                                        _ => false,
+                                    };
+                                    if trig { triggered = true; break; }
+                                }
+                            }
+                            
+                            if triggered {
+                                handle.restore_state(ckpt.0, ckpt.1.clone(), ckpt.2.clone()).unwrap_or(());
+                                let mut low = 0.0;
+                                let mut high = dt_step;
+                                for _ in 0..15 {
+                                    let mid = (low + high) / 2.0;
+                                    if handle.step(mid).is_err() { break; }
+                                    
+                                    let mut trig_inner = false;
+                                    for i in 0..t_size {
+                                        let val = if t_is_obs {
+                                            handle.get_observables(&mut step_obs).unwrap_or(());
+                                            step_obs[t_idx + i]
+                                        } else {
+                                            handle.y[t_idx + i]
+                                        };
+                                        let trig = match t_op {
+                                            1 => val > t_val, 2 => val < t_val, 3 => val >= t_val,
+                                            4 => val <= t_val, 5 => val == t_val, 6 => val != t_val,
+                                            _ => false,
+                                        };
+                                        if trig { trig_inner = true; break; }
+                                    }
+                                    if trig_inner { high = mid; } else { low = mid; }
+                                    handle.restore_state(ckpt.0, ckpt.1.clone(), ckpt.2.clone()).unwrap_or(());
+                                }
+                                handle.step(low).unwrap_or(());
+                                t_elapsed += low;
+                                
+                                out_t.push(handle.t);
+                                out_traj.extend_from_slice(&handle.y);
+                                if n_obs > 0 { handle.get_observables(&mut step_obs).unwrap_or(()); }
+                                out_obs.extend_from_slice(&step_obs);
+                                
+                                // Cap off the step with a finalized 100% bar and a clean newline
+                                if show_progress {
+                                    let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
+                                    print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s   \n", step_name, handle.t);
+                                    std::io::stdout().flush().unwrap();
+                                }
+                                break; // Trigger met, advance
+                            }
+                            
+                            if step_res.is_err() { break; }
+                            
+                            t_elapsed += dt_step;
+                            out_t.push(handle.t);
+                            out_traj.extend_from_slice(&handle.y);
+                            if n_obs > 0 { handle.get_observables(&mut step_obs).unwrap_or(()); }
+                            out_obs.extend_from_slice(&step_obs);
+                            
+                            // Render the live, ticking progress bar 
+                            if show_progress {
+                                let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
+                                if t_limit == std::f64::INFINITY {
+                                    print!("\r▶ {} ⏳ t: {:.1}s   ", step_name, handle.t);
+                                } else {
+                                    let pct = (t_elapsed / t_limit).min(1.0);
+                                    let filled = (pct * 30.0) as usize;
+                                    let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                                    print!("\r▶ {} [{}] {:.1}% | t: {:.1}s   ", step_name, bar, pct * 100.0, handle.t);
+                                }
+                                std::io::stdout().flush().unwrap();
+                            }
+                        }
+                        
+                        // Finalize step if it completed via max time rather than trigger asymptote
+                        if show_progress && t_elapsed >= t_limit && t_limit != std::f64::INFINITY {
+                            let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
+                            print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s   \n", step_name, handle.t);
+                            std::io::stdout().flush().unwrap();
+                        }
+                    }
+                    
+                    let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if show_progress {
+                        let pct = (c as f64 / total as f64) * 100.0;
+                        let filled = ((c as f64 / total as f64) * 30.0) as usize;
+                        let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                        print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
+                        std::io::stdout().flush().unwrap();
+                    }
+                    
+                    Ok((out_t, out_traj, out_obs))
+                } else {
+                    // --- CONTINUOUS EVALUATION BLOCK (No Protocol) ---
+                    let out_t = t_eval.clone();
+                    let mut out_traj = vec![0.0; t_eval.len() * handle.n];
+                    let mut out_obs = vec![0.0; t_eval.len() * n_obs];
+                    for i in 0..handle.n { out_traj[i] = handle.y[i]; }
                     
                     handle.get_observables(&mut step_obs).map_err(|e| e.to_string())?;
-                    for i in 0..n_obs { out_obs[step * n_obs + i] = step_obs[i]; }
+                    for i in 0..n_obs { out_obs[i] = step_obs[i]; }
+                    
+                    for step in 1..t_eval.len() {
+                        let dt = t_eval[step] - t_eval[step - 1];
+                        handle.step(dt).map_err(|e| e.to_string())?;
+                        for i in 0..handle.n { out_traj[step * handle.n + i] = handle.y[i]; }
+                        
+                        handle.get_observables(&mut step_obs).map_err(|e| e.to_string())?;
+                        for i in 0..n_obs { out_obs[step * n_obs + i] = step_obs[i]; }
+                    }
+                    
+                    let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if show_progress {
+                        let pct = (c as f64 / total as f64) * 100.0;
+                        let filled = ((c as f64 / total as f64) * 30.0) as usize;
+                        let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                        print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
+                        std::io::stdout().flush().unwrap();
+                    }
+                    
+                    Ok((out_t, out_traj, out_obs))
                 }
-                
-                let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if show_progress {
-                    let pct = (c as f64 / total as f64) * 100.0;
-                    let filled = ((c as f64 / total as f64) * 30.0) as usize;
-                    let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-                    print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
-                    std::io::stdout().flush().unwrap();
-                }
-                
-                Ok((out_traj, out_obs))
             }).collect()
         })
     });
@@ -168,10 +312,12 @@ pub fn solve_batch_native<'py>(
 
     let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();
-    for (res_y, res_obs) in unwrapped { 
-        let y_arr = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), y0.len()), res_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
-        let obs_arr = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), res_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
-        py_results.push((y_arr, obs_arr)); 
+    for (res_t, res_y, res_obs) in unwrapped { 
+        let steps = res_t.len();
+        let t_arr = numpy::ndarray::Array1::from_vec(res_t).to_pyarray_bound(py);
+        let y_arr = numpy::ndarray::Array2::from_shape_vec((steps, y0.len()), res_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
+        let obs_arr = numpy::ndarray::Array2::from_shape_vec((steps, n_obs), res_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
+        py_results.push((t_arr, y_arr, obs_arr)); 
     }
     Ok(py_results)
 }

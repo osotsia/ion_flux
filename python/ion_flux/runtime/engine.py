@@ -565,31 +565,113 @@ class Engine:
         return SimulationResult(data, parameters or {}, status="completed", engine=self, trajectory=trajectory)
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 
-                    protocol: Any = None, max_workers: int = 1, show_progress: bool = True) -> List[SimulationResult]:
+                    protocols: Any = None, max_workers: int = 1, show_progress: bool = True) -> List[SimulationResult]:
+        """
+        Executes a massive payload of concurrent models using Rust's Rayon thread-pool,
+        entirely bypassing the Python Global Interpreter Lock (GIL).
+
+        Args:
+            parameters: A list of dictionaries containing parameter overrides for each model.
+            t_span: Default integration bounds if a protocol does not strictly dictate time.
+            protocols: A single `Sequence` protocol (broadcasted to all models), or a list 
+                       of `Sequence` protocols strictly matching the length of `parameters`.
+            max_workers: The number of independent OS threads to spawn in Rust.
+            show_progress: Whether to render a CLI progress bar for the batch execution.
+            
+        Returns:
+            A list of `SimulationResult` objects mapping 1-to-1 with the `parameters` list.
+        """
+        from ion_flux.protocols.profiles import Sequence
+        
+        # 1. Broadcast or Validate Protocol Lengths
+        if protocols:
+            if isinstance(protocols, Sequence):
+                protocols = [protocols] * len(parameters)
+            elif len(protocols) != len(parameters):
+                raise ValueError(
+                    f"Batch length mismatch: {len(parameters)} parameter payloads provided, "
+                    f"but {len(protocols)} protocols provided. Pass a single protocol to "
+                    f"broadcast to all models, or an exact 1-to-1 list."
+                )
+                
         if max_workers > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = "1"
             if getattr(self, "runtime", None):
                 self.runtime.set_spatial_threads(1)
             
+        # 2. Fallback to Python Loop for Mock Execution
         if self.mock_execution or not RUST_FFI_AVAILABLE:
-            return [self.solve(t_span=t_span, protocol=protocol, parameters=p) for p in parameters]
+            if not protocols:
+                protocols = [None] * len(parameters)
+            return [self.solve(t_span=t_span, protocol=prot, parameters=p) for p, prot in zip(parameters, protocols)]
 
         y0, ydot0, id_arr, spatial_diag, max_steps = self._extract_metadata()
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
         m_list = self.layout.get_mesh_data()
         
+        # 3. Crush Object-Oriented Protocols into flat C-ABI Instructions
+        protocol_payloads = None
+        if protocols:
+            protocol_payloads = []
+            
+            def _get_p_idx(keys):
+                for k in keys:
+                    if k in self.layout.param_offsets: return self.layout.param_offsets[k][0]
+                return 0
+                
+            # Extract standard parameter indexes for multiplexer hot-swapping
+            p_idx_mode = _get_p_idx(["_term_mode", "mode"])
+            p_idx_i = _get_p_idx(["_term_i_target", "i_target", "i_app"])
+            p_idx_v = _get_p_idx(["_term_v_target", "v_target"])
+            
+            for prot in protocols:
+                payload = []
+                for step in prot.steps:
+                    step_type = 0 if type(step).__name__ == "CC" else (1 if type(step).__name__ == "CV" else 2)
+                    target_val = getattr(step, "rate", getattr(step, "voltage", 0.0))
+                    time_limit = getattr(step, "time", float('inf'))
+                    
+                    has_trig = False
+                    trig_idx, trig_size, trig_is_obs, trig_op, trig_val = 0, 1, False, 0, 0.0
+                    
+                    cond = getattr(step, "until", None)
+                    if cond:
+                        has_trig = True
+                        var_name, op_str, t_val = cond._compiled_logic
+                        if var_name in self.layout.state_offsets:
+                            trig_idx, trig_size = self.layout.state_offsets[var_name]
+                        elif var_name in self.layout.obs_offsets:
+                            trig_idx, trig_size = self.layout.obs_offsets[var_name]
+                            trig_is_obs = True
+                        else:
+                            raise ValueError(f"Trigger variable '{var_name}' not found.")
+                        
+                        op_map = {">": 1, "<": 2, ">=": 3, "<=": 4, "==": 5, "!=": 6}
+                        trig_op = op_map.get(op_str, 0)
+                        trig_val = float(t_val)
+                        
+                    payload.append((
+                        step_type, target_val, time_limit, 
+                        (has_trig, trig_idx, trig_size, trig_is_obs, trig_op, trig_val), 
+                        p_idx_mode, p_idx_i, p_idx_v
+                    ))
+                protocol_payloads.append(payload)
+        
+        # 4. Native Rayon Execution
         try:
             y_res_batch = solve_batch_native(
                 self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, 
-                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, self.debug, max_workers, show_progress
+                t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, self.debug, 
+                max_workers, show_progress, protocol_payloads
             )
         except RuntimeError as e:
             self._handle_native_crash(e)
             
+        # 5. Unpack Flat Arrays into SimulationResults
         results = []
-        for p, (y_res, obs_res) in zip(parameters, y_res_batch):
-            data = {"Time [s]": t_eval_arr}
+        for p, (t_res, y_res, obs_res) in zip(parameters, y_res_batch):
+            data = {"Time [s]": t_res}
             for state_name, (offset, size) in self.layout.state_offsets.items():
                 if size == 1: data[state_name] = y_res[:, offset]
                 else: data[state_name] = y_res[:, offset:offset+size]
