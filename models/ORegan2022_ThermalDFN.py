@@ -330,7 +330,7 @@ def run_parallel_processes():
     # Drop into Rust, utilizing Rayon thread-pool to distribute state-machine evaluation.
     print("\nInitiating Native Rayon Batch Execution...")
     start_time = time.perf_counter()
-    batch_results = compiler_engine.solve_batch(parameters=params_list, protocols=protocols_list, max_workers=3)
+    batch_results = compiler_engine.solve_batch(parameters=params_list, protocols=protocols_list, max_workers=3, show_progress=True)
     print(f"\nAll batch processes completed in {time.perf_counter() - start_time:.2f}s")
     
     return {keys_order[i]: res for i, res in enumerate(batch_results)}

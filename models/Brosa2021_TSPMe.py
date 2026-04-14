@@ -1,12 +1,17 @@
-"""
+r"""
 Thermal Single Particle Model with Electrolyte (TSPMe)
 
 Reference:
 Brosa Planella, F., Sheikh, M., & Widanage, W. D. (2021).
-"Systematic derivation and validation of a reduced thermal-electrochemical 
+"Systematic derivation and validation of a reduced thermal-electrochemical
 model for lithium-ion batteries using asymptotic methods."
-Electrochimica Acta, 388, 138524. 
-https://doi.org/10.1016/j.electacta.2021.138524
+Electrochimica Acta, 388, 138524.
+
+This module implements a systematically reduced thermal-electrochemical model
+that preserves high-fidelity electrolyte dynamics at a fraction of the DFN's
+computational cost. It utilizes exact asymptotic integrals for Ohmic losses
+and precisely tracks spatial heat generation apportionment (Joule, reaction,
+and entropic heating).
 """
 
 import math

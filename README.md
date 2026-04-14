@@ -30,6 +30,9 @@ pip install .
 
 # Run the showcase script
 python examples/6_demo.py
+
+# Run some full models
+python models/Brosa2021_TSPMe.py
 ```
 
 ---

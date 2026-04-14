@@ -565,7 +565,7 @@ class Engine:
         return SimulationResult(data, parameters or {}, status="completed", engine=self, trajectory=trajectory)
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), 
-                    protocols: Any = None, max_workers: int = 1, show_progress: bool = True) -> List[SimulationResult]:
+                    protocols: Any = None, max_workers: int = 1, show_progress: bool = False) -> List[SimulationResult]:
         """
         Executes a massive payload of concurrent models using Rust's Rayon thread-pool,
         entirely bypassing the Python Global Interpreter Lock (GIL).

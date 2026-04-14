@@ -1,9 +1,15 @@
-"""
-Replication of Chen 2020: "Development of Experimental Techniques for 
-Parameterization of Multi-scale Lithium-ion Battery Models"
+r"""
+Isothermal Pseudo-Two-Dimensional (P2D) Doyle-Fuller-Newman Model
 
-Model: Isothermal Pseudo-Two-Dimensional (P2D) Doyle-Fuller-Newman
-Cell: LG M50 21700 (NMC 811 / Graphite-SiOx)
+Reference:
+Chen, C.-H., Brosa Planella, F., O'Regan, K., Gastol, D., Widanage, W. D., & Kendrick, E. (2020).
+"Development of experimental techniques for parameterization of multi-scale lithium-ion battery models."
+Journal of The Electrochemical Society, 167(8), 080534.
+
+This module implements the comprehensive 35-parameter dataset for the commercial
+LG M50 21700 cell (NMC 811 / Graphite-SiOx). It leverages hierarchical macro-micro
+composite domains to model solid diffusion, exposing severe electrolyte starvation,
+reaction heterogeneity, and cathode surface saturation during high C-rate discharges.
 """
 
 import numpy as np
@@ -15,36 +21,40 @@ class Chen2020_DFN(fx.PDE):
     # =========================================================================
     # 1. Topological Sub-Meshing (Table II & Table VII)
     # =========================================================================
+    # L_cell = 172.8 um (Total thickness). Discretized into 72 macro nodes.
     cell = fx.Domain(bounds=(0, 172.8e-6), resolution=72)
+    
+    # Regional Sub-Domains (L_n = 85.2 um, L_s = 12.0 um, L_p = 75.6 um)
     x_n = cell.region(bounds=(0, 85.2e-6), resolution=35, name="x_n")
     x_s = cell.region(bounds=(85.2e-6, 97.2e-6), resolution=6, name="x_s")
     x_p = cell.region(bounds=(97.2e-6, 172.8e-6), resolution=31, name="x_p")
     
+    # Microscopic Particle Domains (R_n = 5.86 um, R_p = 5.22 um)
     r_n = fx.Domain(bounds=(0, 5.86e-6), resolution=15, coord_sys="spherical", name="r_n") 
     r_p = fx.Domain(bounds=(0, 5.22e-6), resolution=15, coord_sys="spherical", name="r_p") 
     
     # =========================================================================
     # 2. States & Observables
     # =========================================================================
-    c_e = fx.State(domain=cell, name="c_e")         
+    c_e = fx.State(domain=cell, name="c_e")         # Electrolyte Li+ concentration [mol/m^3]
     
-    # SAFEGUARD: Clamping the spatial potentials to max 50mV jumps per Newton iteration.
-    # This prevents the exponential Butler-Volmer kinetics from blowing up at t=0.
-    phi_e = fx.State(domain=cell, name="phi_e", max_newton_step=0.05)     
-    phi_s_n = fx.State(domain=x_n, name="phi_s_n", max_newton_step=0.05)  
-    phi_s_p = fx.State(domain=x_p, name="phi_s_p", max_newton_step=0.05)  
+    phi_e = fx.State(domain=cell, name="phi_e")     # Electrolyte potential [V]
+    phi_s_n = fx.State(domain=x_n, name="phi_s_n")  # Solid potential (Anode) [V]
+    phi_s_p = fx.State(domain=x_p, name="phi_s_p")  # Solid potential (Cathode) [V]
     
+    # Hierarchical states (Macro x Micro) representing solid particle concentrations [mol/m^3]
     c_s_n = fx.State(domain=x_n * r_n, name="c_s_n") 
     c_s_p = fx.State(domain=x_p * r_p, name="c_s_p") 
     
-    V_cell = fx.State(domain=None, name="V_cell")    
-    i_app = fx.State(domain=None, name="i_app")      
+    V_cell = fx.State(domain=None, name="V_cell")    # 0D Terminal Voltage [V]
+    i_app = fx.State(domain=None, name="i_app")      # 0D Terminal Current [A]
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
+    # Tunable parameter (Table IX) to match discharge final voltage curves
     D_s_n = fx.Parameter(default=3.3e-14, name="D_s_n")
 
-    # Analytical Telemetry Trackers
+    # Analytical Telemetry Trackers for Volumetric Current Densities (J_k) [A/m^3]
     J_n_obs = fx.Observable(domain=x_n, name="J_n_obs")
     J_p_obs = fx.Observable(domain=x_p, name="J_p_obs")
     
@@ -53,22 +63,28 @@ class Chen2020_DFN(fx.PDE):
         # 3. Parameters (Table VII & Table IX Tuned Constants)
         # =====================================================================
         F, R_const, T = 96485.0, 8.314, 298.15
-        A_elec = 0.1027      
+        A_elec = 0.1027  # Electrode Plate Area [m^2]
         
+        # Microstructural Volume Fractions
         eps_n, eps_s, eps_p = 0.25, 0.47, 0.335
         eps_act_n, eps_act_p = 0.75, 0.665
+        
+        # Bruggeman tortuosity scaling (Noted on Page 18: "Theoretical value of 1.5 for packed spheres")
         b_brug = 1.5                     
         
+        # Specific active surface area [1/m] (Equation 26: a_k = 3 * eps_act_k / R_k)
         a_n = 3.0 * eps_act_n / 5.86e-6
         a_p = 3.0 * eps_act_p / 5.22e-6
         
+        # Maximum Solid Concentrations [mol/m^3]
         c_max_n = 33133.0
         c_max_p = 63104.0
         
-        sig_n, sig_p = 215.0, 0.18
-        D_s_p = 4.0e-15
-        t_plus = 0.2594
-        k_n, k_p = 6.48e-7, 3.42e-6
+        # Transport & Kinetic Constants
+        sig_n, sig_p = 215.0, 0.18    # Electronic conductivities [S/m]
+        D_s_p = 4.0e-15               # Cathode solid diffusivity [m^2/s]
+        t_plus = 0.2594               # Transference number
+        k_n, k_p = 6.48e-7, 3.42e-6   # Reaction rate constants [A/m^2 (m^3/mol)^1.5]
 
         # =====================================================================
         # 4. Helper AST Functions
@@ -89,15 +105,18 @@ class Chen2020_DFN(fx.PDE):
         # =====================================================================
         # 5. Thermodynamics & Kinetics
         # =====================================================================
+        # Extract surface concentrations natively from the Micro-Domains
         c_surf_n = fx.min(fx.max(self.c_s_n.boundary("right", domain=self.r_n), 10.0), c_max_n - 10.0)
         c_surf_p = fx.min(fx.max(self.c_s_p.boundary("right", domain=self.r_p), 10.0), c_max_p - 10.0)
         
+        # Active particle stoichiometries
         x_n = c_surf_n / c_max_n
         x_p = c_surf_p / c_max_p
         
         # Bound electrolyte concentration to prevent log singularities AND runaway Newton feedback loops
         ce_safe = fx.min(fx.max(self.c_e, 10.0), 5000.0)
         
+        # Equilibrium Open Circuit Potentials [V] (Equations 8 & 9)
         U_n = (1.9793 * fx.exp(-39.3631 * x_n) + 0.2482 
                - 0.0909 * tanh_ast(29.8538 * (x_n - 0.1234)) 
                - 0.04478 * tanh_ast(14.9159 * (x_n - 0.2769)) 
@@ -108,39 +127,50 @@ class Chen2020_DFN(fx.PDE):
                - 17.7326 * tanh_ast(15.7890 * (x_p - 0.3117)) 
                + 17.5842 * tanh_ast(15.9308 * (x_p - 0.3120)))
 
+        # Exchange Current Densities [A/m^2] (Table I: Reaction Kinetics)
         j0_n = k_n * (ce_safe * c_surf_n * (c_max_n - c_surf_n))**0.5
         j0_p = k_p * (ce_safe * c_surf_p * (c_max_p - c_surf_p))**0.5
         
+        # Local Overpotentials [V] (Table I)
         eta_n = self.phi_s_n - self.phi_e - U_n
         eta_p = self.phi_s_p - self.phi_e - U_p
         
-        F_RT = F / (2.0 * R_const * T)
+        # Volumetric Butler-Volmer Reaction Current Densities (J_k) [A/m^3] (Table I)
+        F_RT = F / (2.0 * R_const * T)  # Using alpha = 0.5 symmetry
         J_n = a_n * j0_n * sinh_ast(F_RT * eta_n)
         J_p = a_p * j0_p * sinh_ast(F_RT * eta_p)
 
         # =====================================================================
         # 6. Transport Tensors
         # =====================================================================
+        # Solid Fickian Diffusion Fluxes [mol/m^2 s] (Table I: Mass Conservation)
         N_s_n = -self.D_s_n * fx.grad(self.c_s_n, axis=self.r_n)
         N_s_p = -D_s_p * fx.grad(self.c_s_p, axis=self.r_p)
         
+        # Solid Ohmic Current Fluxes [A/m^2] (Table I: Charge Conservation)
         i_s_n = -sig_n * fx.grad(self.phi_s_n)
         i_s_p = -sig_p * fx.grad(self.phi_s_p)
         
-        c_L = ce_safe / 1000.0 
+        # Empirical Electrolyte Formulations (Equations 23 & 24)
+        c_L = ce_safe / 1000.0  # Convert to mol/dm^3 for the polynomial fits
         D_e = (8.794e-11 * c_L**2 - 3.972e-10 * c_L + 4.862e-10)
         k_e = (0.1297 * c_L**3 - 2.51 * c_L**1.5 + 3.329 * c_L)
         
+        # Effective Electrolyte Diffusivities & Conductivities (Bruggeman scaled)
         D_eff_n, k_eff_n = D_e * (eps_n ** b_brug), k_e * (eps_n ** b_brug)
         D_eff_s, k_eff_s = D_e * (eps_s ** b_brug), k_e * (eps_s ** b_brug)
         D_eff_p, k_eff_p = D_e * (eps_p ** b_brug), k_e * (eps_p ** b_brug)
         
+        # Electrolyte Concentration Polarization Term (From Table I: Charge Conservation)
+        # Represents: (2 * (1-t+) * R * T / F) * grad(ln(c_e)). Note: grad(ln(x)) = grad(x)/x
         ce_diff_term = (2.0 * R_const * T / F) * (1.0 - t_plus) * (fx.grad(ce_safe) / ce_safe)
         
+        # Electrolyte Li+ Mass Flux [mol/m^2 s]
         flux_ce_n = -D_eff_n * fx.grad(self.c_e)
         flux_ce_s = -D_eff_s * fx.grad(self.c_e)
         flux_ce_p = -D_eff_p * fx.grad(self.c_e)
         
+        # Electrolyte Current Flux [A/m^2] (Ohmic + Concentration Migration)
         i_e_n = -k_eff_n * fx.grad(self.phi_e) + k_eff_n * ce_diff_term
         i_e_s = -k_eff_s * fx.grad(self.phi_e) + k_eff_s * ce_diff_term
         i_e_p = -k_eff_p * fx.grad(self.phi_e) + k_eff_p * ce_diff_term
@@ -148,52 +178,70 @@ class Chen2020_DFN(fx.PDE):
         i_den = self.i_app / A_elec
 
         # =====================================================================
-        # 7. Explicit Equation Targeting
+        # 7. Explicit Equation Targeting (Mapping directly to Table I)
         # =====================================================================
         return {
             "equations": {
+                # --- Electrolyte Mass Conservation ---
                 self.c_e: fx.Piecewise({
                     self.x_n: eps_n * fx.dt(self.c_e) == -fx.div(flux_ce_n) + (1.0 - t_plus) * J_n / F,
                     self.x_s: eps_s * fx.dt(self.c_e) == -fx.div(flux_ce_s),
                     self.x_p: eps_p * fx.dt(self.c_e) == -fx.div(flux_ce_p) + (1.0 - t_plus) * J_p / F
                 }),
                 
+                # --- Electrolyte Charge Conservation (Spatial DAE) ---
                 self.phi_e: fx.Piecewise({
                     self.x_n: fx.div(i_e_n) == J_n,
                     self.x_s: fx.div(i_e_s) == 0.0,
                     self.x_p: fx.div(i_e_p) == J_p
                 }),
                 
+                # --- Solid Charge Conservation (Spatial DAE) ---
                 self.phi_s_n: fx.div(i_s_n) == -J_n,
                 self.phi_s_p: fx.div(i_s_p) == -J_p,
                 
+                # --- Solid Mass Conservation (Macro-Micro Unrolled PDE) ---
                 self.c_s_n: fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n),
                 self.c_s_p: fx.dt(self.c_s_p) == -fx.div(N_s_p, axis=self.r_p),
                 
+                # --- Global Terminal Voltage Algebraic Mapping ---
                 self.V_cell: self.V_cell == self.phi_s_p.right - self.phi_s_n.left
             },
+            
+            # =================================================================
+            # 8. Boundary Conditions
+            # =================================================================
             "boundaries": {
+                # Reference potential anchoring point (Prevents singular DAEs)
                 self.phi_s_n: {"left": fx.Dirichlet(0.0)}, 
                 
+                # Zero flux through current collectors (Except terminal i_app at cathode)
                 i_s_n:        {"right": 0.0},
                 i_s_p:        {"left": 0.0, "right": i_den}, 
                 
+                # Impermeable boundaries for electrolyte mass and charge
                 flux_ce_n:    {"left": 0.0},
                 flux_ce_p:    {"right": 0.0},
                 i_e_n:        {"left": 0.0},
                 i_e_p:        {"right": 0.0},
                 
+                # Volumetric faradaic current injected natively into micro-particle surfaces
                 N_s_n:        {"left": 0.0, "right": J_n / (a_n * F)},
                 N_s_p:        {"left": 0.0, "right": J_p / (a_p * F)},
             },
+            
+            # =================================================================
+            # 9. Initial Conditions
+            # =================================================================
             "initial_conditions": {
                 self.c_e: 1000.0,     
                 
-                # Equilibrium offsets calculated to zero out initial eta
+                # Equilibrium potential offsets calculated to zero out initial eta
                 self.phi_s_n: 0.0,  
                 self.phi_e: -0.092,
                 self.phi_s_p: 4.182,
                 
+                # Based on the 100% SOC stoichiometries from Table VII
                 self.c_s_n: 0.9014 * c_max_n,  
                 self.c_s_p: 0.27 * c_max_p,
                 
