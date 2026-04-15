@@ -128,7 +128,7 @@ class NativeCompiler:
             # Use mkdtemp to prevent predictable directory vulnerabilities (Local Privilege Escalation)
             self.cache_dir = tempfile.mkdtemp(prefix="ion_flux_jit_")
             
-        self.bundled_toolchain_dir = os.path.join(os.path.dirname(__file__), "toolchain")
+        self.bundled_toolchain_dir = os.path.expanduser("~/.cache/ion_flux/toolchain")
         
         # Determine both bundled and system paths for resilient fallback
         self.bundled_compiler = self._find_bundled_compiler()
@@ -142,7 +142,15 @@ class NativeCompiler:
         self.enzyme_plugin = self.bundled_plugin if self.bundled_plugin else self.system_plugin
         
         if not self.compiler_cmd:
-            logging.warning("No compatible C++ compiler found. Native execution will fail.")
+            logging.warning(
+                "No compatible C++ compiler found. Native execution will fail. "
+                "Please run `ion-flux install-toolchain` to fetch the required LLVM/Enzyme binaries."
+            )
+        elif not self.enzyme_plugin:
+            logging.warning(
+                "Enzyme plugin not found. Exact analytical Jacobians will be disabled. "
+                "Please run `ion-flux install-toolchain` to fetch the required Enzyme binaries."
+            )
 
     def _find_bundled_compiler(self) -> str:
         bundled_clang = os.path.join(self.bundled_toolchain_dir, "bin", "clang++")

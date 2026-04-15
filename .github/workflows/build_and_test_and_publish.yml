@@ -42,18 +42,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build curl
 
+      - name: Free System Directory Permissions (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /usr/local/lib /usr/local/include
+          sudo chown -R $USER /usr/local/lib /usr/local/include
+
       - name: Cache C++ Toolchain
         id: cache-toolchain
         uses: actions/cache@v4
         with:
           path: |
-            python/ion_flux/compiler/toolchain
+            ~/.cache/ion_flux/toolchain
             /usr/local/lib/libsundials*
             /usr/local/include/sundials
             /usr/local/include/nvector
             /usr/local/include/sunmatrix
             /usr/local/include/sunlinsol
-          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test.yml') }}
+            /opt/homebrew/lib/libsundials*
+            /opt/homebrew/include/sundials
+            /opt/homebrew/include/nvector
+            /opt/homebrew/include/sunmatrix
+            /opt/homebrew/include/sunlinsol
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test_and_publish.yml') }}
 
       - name: Build SUNDIALS (Linux)
         if: runner.os == 'Linux' && steps.cache-toolchain.outputs.cache-hit != 'true'
@@ -73,88 +84,10 @@ jobs:
           cd ../..
           rm -rf sundials-7.1.1 sundials.tar.gz
 
-      - name: Bundle Hermetic LLVM/Enzyme Toolchain
+      - name: Build Hermetic LLVM/Enzyme Toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          TOOLCHAIN_DIR="$PWD/python/ion_flux/compiler/toolchain"
-          mkdir -p $TOOLCHAIN_DIR/bin $TOOLCHAIN_DIR/lib $TOOLCHAIN_DIR/llvm
-          
-          LLVM_VERSION="19.1.0"
-          OS=$(uname -s)
-          ARCH=$(uname -m)
-          
-          if [ "$OS" = "Darwin" ]; then
-            if [ "$ARCH" = "arm64" ]; then
-              LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-macOS-ARM64.tar.xz"
-            else
-              LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-macOS-X64.tar.xz"
-            fi
-          else
-            LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
-          fi
-          
-          curl -L $LLVM_URL -o llvm.tar.xz
-          tar -xf llvm.tar.xz -C $TOOLCHAIN_DIR/llvm --strip-components=1
-          rm llvm.tar.xz
-          
-          git clone --depth 1 https://github.com/EnzymeAD/Enzyme.git enzyme_src
-          
-          export CC="$TOOLCHAIN_DIR/llvm/bin/clang"
-          export CXX="$TOOLCHAIN_DIR/llvm/bin/clang++"
-          
-          if [ "$OS" = "Darwin" ]; then
-            cmake -G Ninja -S enzyme_src/enzyme -B enzyme_src/build \
-              -DLLVM_DIR="$TOOLCHAIN_DIR/llvm/lib/cmake/llvm" \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_C_COMPILER="$CC" \
-              -DCMAKE_CXX_COMPILER="$CXX"
-          else
-            cmake -G Ninja -S enzyme_src/enzyme -B enzyme_src/build \
-              -DLLVM_DIR="$TOOLCHAIN_DIR/llvm/lib/cmake/llvm" \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_C_COMPILER="$CC" \
-              -DCMAKE_CXX_COMPILER="$CXX" \
-              -DCMAKE_LINKER="$TOOLCHAIN_DIR/llvm/bin/ld.lld" \
-              -DCMAKE_AR="$TOOLCHAIN_DIR/llvm/bin/llvm-ar" \
-              -DCMAKE_RANLIB="$TOOLCHAIN_DIR/llvm/bin/llvm-ranlib" \
-              -DCMAKE_C_FLAGS="-fuse-ld=lld" \
-              -DCMAKE_CXX_FLAGS="-fuse-ld=lld"
-          fi
-            
-          ninja -C enzyme_src/build
-          find enzyme_src/build -name "ClangEnzyme*" -type f -exec cp {} $TOOLCHAIN_DIR/lib/ \;
-          rm -rf enzyme_src
-          
-          cat << 'EOF' > $TOOLCHAIN_DIR/bin/clang++
-          #!/bin/bash
-          DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-          
-          OS=$(uname -s)
-          if [ "$OS" = "Darwin" ]; then
-            SDK_PATH=$(xcrun --show-sdk-path 2>/dev/null || echo "")
-            if [ -n "$SDK_PATH" ]; then
-              SYSROOT_FLAG="-isysroot $SDK_PATH"
-            else
-              SYSROOT_FLAG=""
-            fi
-            exec "$DIR/../llvm/bin/clang++" $SYSROOT_FLAG "$@"
-          else
-            exec "$DIR/../llvm/bin/clang++" "$@"
-          fi
-          EOF
-          
-          chmod +x $TOOLCHAIN_DIR/bin/clang++
-          
-          # Prune LLVM sysroot to reduce cache payload from ~6GB to <1GB
-          echo "Pruning LLVM sysroot..."
-          cd $TOOLCHAIN_DIR/llvm/bin
-          find . -type f ! -name "clang*" ! -name "ld.lld" ! -name "llvm-ar" ! -name "llvm-ranlib" -delete
-          cd ..
-          rm -rf share libexec docs
-          
-          # CRITICAL FIX: Eliminate all broken symlinks to prevent Maturin OS Error 2
-          echo "Removing broken symlinks..."
-          find "$TOOLCHAIN_DIR" -type l ! -exec test -e {} \; -delete
+          python3 python/ion_flux/cli.py install-toolchain
 
 
   # ====================================================================
@@ -168,7 +101,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - name: Checkout Repository
@@ -206,17 +139,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build curl
 
+      - name: Free System Directory Permissions (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /usr/local/lib /usr/local/include
+          sudo chown -R $USER /usr/local/lib /usr/local/include
+
       - name: Restore C++ Toolchain
         uses: actions/cache/restore@v4
         with:
           path: |
-            python/ion_flux/compiler/toolchain
+            ~/.cache/ion_flux/toolchain
             /usr/local/lib/libsundials*
             /usr/local/include/sundials
             /usr/local/include/nvector
             /usr/local/include/sunmatrix
             /usr/local/include/sunlinsol
-          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test.yml') }}
+            /opt/homebrew/lib/libsundials*
+            /opt/homebrew/include/sundials
+            /opt/homebrew/include/nvector
+            /opt/homebrew/include/sunmatrix
+            /opt/homebrew/include/sunlinsol
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test_and_publish.yml') }}
           fail-on-cache-miss: true
 
       - name: Update ldconfig (Linux)
@@ -241,6 +185,12 @@ jobs:
 
       - name: Build Wheels and Install (Maturin)
         run: |
+          # Clean old toolchain directory if it exists to prevent Maturin OS Error 2 on broken symlinks
+          rm -rf python/ion_flux/compiler/toolchain
+          
+          # Scrub broken symlinks natively (Single-liner to avoid YAML/Python indentation clashes)
+          python3 -c "import os; [os.unlink(os.path.join(r, f)) for r, d, fs in os.walk('python') for f in fs + d if os.path.islink(os.path.join(r, f)) and not os.path.exists(os.path.join(r, f))]"
+          
           # Skip auditwheel/delocate phase to prevent OS Error 2 and Mach-O linking crashes
           maturin build --release -o dist --auditwheel skip
           maturin develop --release

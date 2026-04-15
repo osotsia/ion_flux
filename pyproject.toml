@@ -5,8 +5,11 @@ build-backend = "maturin"
 [project]
 name = "ion-flux"
 version = "0.1.0"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
+
+[project.scripts]
+ion-flux = "ion_flux.cli:main"
 
 [tool.maturin]
 manifest-path = "rust/Cargo.toml"

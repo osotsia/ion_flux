@@ -1,6 +1,6 @@
 # ion_flux: The End-to-End Differentiable Engine for Battery Physics
 
-![CI Status](https://github.com/organization/osotsia/ion_flux/actions/workflows/build_and_test.yml/badge.svg)
+![CI Status](https://github.com/osotsia/ion_flux/actions/workflows/build_and_test_and_publish.yml/badge.svg)
 [![PyPI version](https://badge.fury.io/py/ion-flux.svg)](https://badge.fury.io/py/ion-flux)
 
 `ion_flux` is a next-generation execution engine for battery simulations. 
@@ -13,25 +13,40 @@ No flattened arrays. No massive Python memory graphs. No "math gymnastics." Just
 
 ---
 
-## 🚀 Quick Start (MacOS)
+## 🚀 Quick Start
 
+Because `ion_flux` leverages Ahead-of-Time (AOT) compilation and LLVM-level Automatic Differentiation, you must fetch and build its hermetic C++ toolchain locally after installing the Python package.
+
+**1. Install System Build Tools**
+* **macOS:** `brew install cmake ninja git sundials`
+* **Ubuntu:** `sudo apt update && sudo apt install cmake ninja-build git libsundials-dev`
+
+*(Note: SUNDIALS is strictly optional. `ion_flux` ships with a custom native Rust sparse solver by default).*
+
+**2. Install and Configure `ion_flux`**
 ```bash
+# Create a virtual environment
+python3 -m venv .venv && source .venv/bin/activate
+
+# Install the package
 pip install ion_flux
 
-# Install the SUNDIALS solver (optional)
-brew install sundials
+# Fetch LLVM and compile the Enzyme AD plugin
+ion-flux install-toolchain
+```
 
-# Clone the repository and set up a new environment
-git clone https://github.com/organization/ion_flux.git
+**3. Run the Showcase Models**
+```bash
+# Clone the repository to access the examples and reference models
+git clone https://github.com/osotsia/ion_flux.git
 cd ion_flux
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib
+pip install numpy scipy pandas matplotlib
 
-# Run the showcase script
+# Run the performance showcase
 python examples/6_demo.py
 
-# Run some full models
-python models/Brosa2021_TSPMe.py
+# Run a full DFN model
+python models/Chen2020_DFN.py
 ```
 
 ---
