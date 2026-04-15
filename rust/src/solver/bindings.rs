@@ -7,10 +7,10 @@ use super::session::SolverHandle;
 use super::sundials::SundialsHandle;
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, record_history=false, debug=false, show_progress=true))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, record_history=false, debug=false, show_progress=true, v_idx=-1))]
 pub fn solve_ida_native<'py>(
     py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>,
-    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, record_history: bool, debug: bool, show_progress: bool,
+    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, record_history: bool, debug: bool, show_progress: bool, v_idx: i32
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     
     let constraints = vec![0.0; y0_py.len()];
@@ -41,7 +41,8 @@ pub fn solve_ida_native<'py>(
             let pct = (step as f64 / total_steps as f64) * 100.0;
             let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
             let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-            print!("\r▶ Native [{}] {:.1}% | t: {:.1}s   ", bar, pct, t_eval[step]);
+            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
+            print!("\r▶ Native [{}] {:.1}% | t: {:.1}s{}   ", bar, pct, t_eval[step], v_str);
             std::io::stdout().flush().unwrap();
         }
     }
@@ -73,9 +74,9 @@ pub fn solve_ida_native<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, show_progress=true))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, show_progress=true, v_idx=-1))]
 pub fn solve_ida_sundials<'py>(
-    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, n_obs: usize, show_progress: bool,
+    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, n_obs: usize, show_progress: bool, v_idx: i32
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     let mut handle = SundialsHandle::new(lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list, n_obs)?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
@@ -101,7 +102,8 @@ pub fn solve_ida_sundials<'py>(
             let pct = (step as f64 / total_steps as f64) * 100.0;
             let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
             let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-            print!("\r▶ Sundials [{}] {:.1}% | t: {:.1}s   ", bar, pct, t_eval[step]);
+            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle._y_data[v_idx as usize]) } else { String::new() };
+            print!("\r▶ Sundials [{}] {:.1}% | t: {:.1}s{}   ", bar, pct, t_eval[step], v_str);
             std::io::stdout().flush().unwrap();
         }
     }
@@ -115,11 +117,12 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, debug, max_workers=1, show_progress=true, protocol_steps=None))]
+#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, debug, max_workers=1, show_progress=true, protocol_steps=None, v_idx=-1))]
 pub fn solve_batch_native<'py>(
     py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, 
     t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, debug: bool, max_workers: usize, show_progress: bool,
-    protocol_steps: Option<Vec<Vec<(i32, f64, f64, (bool, usize, usize, bool, i32, f64), usize, usize, usize)>>>
+    protocol_steps: Option<Vec<Vec<(i32, f64, f64, (bool, usize, usize, bool, i32, f64), usize, usize, usize)>>>,
+    v_idx: i32
 ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)>> {
     
     let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -231,7 +234,8 @@ pub fn solve_batch_native<'py>(
                                 // Cap off the step with a finalized 100% bar and a clean newline
                                 if show_progress {
                                     let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
-                                    print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s   \n", step_name, handle.t);
+                                    let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
+                                    print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", step_name, handle.t, v_str);
                                     std::io::stdout().flush().unwrap();
                                 }
                                 break; // Trigger met, advance
@@ -248,13 +252,14 @@ pub fn solve_batch_native<'py>(
                             // Render the live, ticking progress bar 
                             if show_progress {
                                 let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
+                                let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
                                 if t_limit == std::f64::INFINITY {
-                                    print!("\r▶ {} ⏳ t: {:.1}s   ", step_name, handle.t);
+                                    print!("\r▶ {} ⏳ t: {:.1}s{}   ", step_name, handle.t, v_str);
                                 } else {
                                     let pct = (t_elapsed / t_limit).min(1.0);
                                     let filled = (pct * 30.0) as usize;
                                     let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-                                    print!("\r▶ {} [{}] {:.1}% | t: {:.1}s   ", step_name, bar, pct * 100.0, handle.t);
+                                    print!("\r▶ {} [{}] {:.1}% | t: {:.1}s{}   ", step_name, bar, pct * 100.0, handle.t, v_str);
                                 }
                                 std::io::stdout().flush().unwrap();
                             }
@@ -263,7 +268,8 @@ pub fn solve_batch_native<'py>(
                         // Finalize step if it completed via max time rather than trigger asymptote
                         if show_progress && t_elapsed >= t_limit && t_limit != std::f64::INFINITY {
                             let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
-                            print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s   \n", step_name, handle.t);
+                            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
+                            print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", step_name, handle.t, v_str);
                             std::io::stdout().flush().unwrap();
                         }
                     }

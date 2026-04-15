@@ -374,6 +374,11 @@ class SpatialLoweringVisitor:
         axis_to_use = axis_name or self.current_axis or getattr(self.current_domain, "name", "")
         dx_ir = Var("dx_default") if not axis_to_use else Var(f"dx_{axis_to_use}")
         top_idx = self._get_topological_idx(idx)
+        
+        if hasattr(self.current_domain, "domains") and len(self.current_domain.domains) == 2:
+            local_idx_str = get_local_index(top_idx.to_cpp(), self.current_domain, axis_to_use)
+            return BinaryOp("*", RawCpp(local_idx_str), dx_ir)
+            
         return BinaryOp("*", top_idx, dx_ir)
 
     def _lower_grad(self, node: Dict[str, Any], child: Dict[str, Any], idx: Expr, face: Optional[str]) -> Expr:

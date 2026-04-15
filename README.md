@@ -7,7 +7,7 @@
 
 It is built on a radical philosophy: **Ruthlessly separate *Physical Intent* from *Computational Execution*.** 
 
-You write physics in pure, declarative Python exactly as they appear in a textbook. Behind the scenes, the engine automatically deduces how to discretize, differentiate, compile, and solve them using a native Rust orchestrator, Ahead-of-Time (AOT) LLVM compilation, and Enzyme Automatic Differentiation (AD).
+You write physics in pure, declarative Python almost exactly as they appear in a textbook. Behind the scenes, the engine automatically deduces how to discretize, differentiate, compile, and solve them using a native Rust orchestrator, Ahead-of-Time (AOT) LLVM compilation, and Enzyme Automatic Differentiation (AD).
 
 No flattened arrays. No massive Python memory graphs. No "math gymnastics." Just zero boilerplate and infinite scalability.
 

@@ -9,31 +9,55 @@ Electrochimica Acta.
 This script implements the parameterization of the LG M50 21700 cell.
 It leverages Async Task Parallelism to execute multiple state-machine protocols 
 concurrently, and extracts internal spatial fields to diagnose rate-limiting transport phenomena.
+
+TODO: change the current uniform mesh to exponential
 """
 
 import math
 import time
-import asyncio
 import numpy as np
 import matplotlib.pyplot as plt
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
+
+class MeshConfig:
+    """
+    Configuration class for the spatial discretization mesh.
+    """
+    # Macro-Scale Dimensions (Thicknesses in meters)
+    L_n = 85.2e-6
+    L_s = 12.0e-6
+    L_p = 75.6e-6
+    L_cell = L_n + L_s + L_p
+
+    # Micro-Scale Dimensions (Particle Radii in meters)
+    R_n = 5.86e-6
+    R_p = 5.22e-6
+
+    multiplier = 2
+
+    # Macro-Scale Resolutions (Number of spatial nodes)
+    res_n = 21*multiplier
+    res_s = 3*multiplier
+    res_p = 19*multiplier
+    res_cell = res_n + res_s + res_p
+
+    # Micro-Scale Resolutions (Radial nodes inside each particle)
+    res_r_n = 10*multiplier
+    res_r_p = 10*multiplier
 
 
 class ThermalDFN(fx.PDE):
     # =========================================================================
     # 1. Topological Sub-Meshing (LG M50 Dimensions, Table 8)
     # =========================================================================
-    # Cell thickness: Negative = 85.2 um, Separator = 12 um, Positive = 75.6 um
-    # Total Cell = 172.8 um. Using dx = 1.2 um ensures perfectly tiling indices.
-    cell = fx.Domain(bounds=(0, 172.8e-6), resolution=144)
-    x_n = cell.region(bounds=(0, 85.2e-6), resolution=71, name="x_n")
-    x_s = cell.region(bounds=(85.2e-6, 97.2e-6), resolution=10, name="x_s")
-    x_p = cell.region(bounds=(97.2e-6, 172.8e-6), resolution=63, name="x_p")
+    cell = fx.Domain(bounds=(0, MeshConfig.L_cell), resolution=MeshConfig.res_cell)
+    x_n = cell.region(bounds=(0, MeshConfig.L_n), resolution=MeshConfig.res_n, name="x_n")
+    x_s = cell.region(bounds=(MeshConfig.L_n, MeshConfig.L_n + MeshConfig.L_s), resolution=MeshConfig.res_s, name="x_s")
+    x_p = cell.region(bounds=(MeshConfig.L_n + MeshConfig.L_s, MeshConfig.L_cell), resolution=MeshConfig.res_p, name="x_p")
     
-    # Particle radii: Negative = 5.86 um, Positive = 5.22 um
-    r_n = fx.Domain(bounds=(0, 5.86e-6), resolution=50, coord_sys="spherical", name="r_n") 
-    r_p = fx.Domain(bounds=(0, 5.22e-6), resolution=50, coord_sys="spherical", name="r_p") 
+    r_n = fx.Domain(bounds=(0, MeshConfig.R_n), resolution=MeshConfig.res_r_n, coord_sys="spherical", name="r_n") 
+    r_p = fx.Domain(bounds=(0, MeshConfig.R_p), resolution=MeshConfig.res_r_p, coord_sys="spherical", name="r_p") 
     
     # =========================================================================
     # 2. States & Observables
@@ -52,9 +76,6 @@ class ThermalDFN(fx.PDE):
     T_cell = fx.State(domain=None, name="T_cell")    # 0D Lumped Cell Temperature
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
-    
-    # Double Layer Capacitance [F/m^2] (Numerical inertia for DAEs)
-    C_dl = fx.Parameter(default=0.2, name="C_dl")
 
     # Observables for spatial reaction diagnostics
     J_n_obs = fx.Observable(domain=x_n, name="J_n_obs")
@@ -66,16 +87,15 @@ class ThermalDFN(fx.PDE):
         # =====================================================================
         F, R_const, T_ref = 96485.0, 8.314, 298.15
         A_elec = 0.1024  # Active Electrode Area [m^2]
-        L_cell = 172.8e-6 # Total cell thickness [m]
         
         # Microstructural Parameters (Table 8)
         eps_sn, eps_en = 0.75, 0.25      
         eps_es = 0.47                    
-        eps_sp, eps_ep = 0.665, 0.335    
+        eps_sp, eps_ep = 0.665, 0.335
         b_brug = 1.5                     
         
-        a_n = 3.0 * eps_sn / 5.86e-6
-        a_p = 3.0 * eps_sp / 5.22e-6
+        a_n = 3.0 * eps_sn / MeshConfig.R_n
+        a_p = 3.0 * eps_sp / MeshConfig.R_p
         
         c_max_n = 29583.0
         c_max_p = 51765.0
@@ -137,11 +157,8 @@ class ThermalDFN(fx.PDE):
         j_n = a_n * i0_n * (fx.exp(alpha_n * F_RT * eta_n_safe) - fx.exp(-(1.0 - alpha_n) * F_RT * eta_n_safe))
         j_p = a_p * i0_p * (fx.exp(alpha_p * F_RT * eta_p_safe) - fx.exp(-(1.0 - alpha_p) * F_RT * eta_p_safe))
 
-        j_dl_n = a_n * self.C_dl * (fx.dt(self.phi_s_n) - fx.dt(self.phi_e))
-        j_dl_p = a_p * self.C_dl * (fx.dt(self.phi_s_p) - fx.dt(self.phi_e))
-
-        j_tot_n = j_n + j_dl_n
-        j_tot_p = j_p + j_dl_p
+        j_tot_n = j_n
+        j_tot_p = j_p
 
         # =====================================================================
         # 6. Transport PDEs (Thermally Coupled & Stoichiometry Dependent)
@@ -232,7 +249,7 @@ class ThermalDFN(fx.PDE):
         Q_total_area = (fx.integral(Q_rxn_n + Q_ohm_n, over=self.x_n) + 
                         fx.integral(Q_ohm_s, over=self.x_s) + 
                         fx.integral(Q_rxn_p + Q_ohm_p, over=self.x_p))
-        Q_vol = Q_total_area / L_cell
+        Q_vol = Q_total_area / MeshConfig.L_cell
         
         # Convective Newton Cooling
         # Effective Cell Area (5.31e-3) / Volume (2.42e-5) = ~219.42 m^-1 (Table 8)
@@ -310,9 +327,11 @@ class ThermalDFN(fx.PDE):
             }
         }
 
+
 def run_parallel_processes():
     print("Compiling DFN Math to Native C++ Binary...")
-    compiler_engine = fx.Engine(model=ThermalDFN(), target="cpu:serial", jacobian_bandwidth=0, solver_backend="native")
+    # NOTE: Set solver_backend to 'sundials' to utilize the robust IDA solver
+    compiler_engine = fx.Engine(model=ThermalDFN(), target="cpu:serial", solver_backend="sundials")
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
     params_list = []
@@ -381,14 +400,19 @@ if __name__ == "__main__":
     # =========================================================================
 
     fig2, ax2 = plt.subplots(figsize=(8, 5))
-    x_cell = np.linspace(0, 172.8, 144)
+    
+    # Extract dynamic grid variables from MeshConfig to ensure future-proof plotting
+    x_cell = np.linspace(0, MeshConfig.L_cell * 1e6, MeshConfig.res_cell)
     c_e_history = res_2c["c_e"].data
 
     for idx, label, color in zip(dod_indices, dod_labels, colors):
         ax2.plot(x_cell, c_e_history[idx], color=color, linewidth=2, label=label)
         
-    ax2.axvline(85.2, color='k', linestyle='--', alpha=0.5, label="Separator Interfaces")
-    ax2.axvline(97.2, color='k', linestyle='--', alpha=0.5)
+    sep_start = MeshConfig.L_n * 1e6
+    sep_end = (MeshConfig.L_n + MeshConfig.L_s) * 1e6
+    ax2.axvline(sep_start, color='k', linestyle='--', alpha=0.5, label="Separator Interfaces")
+    ax2.axvline(sep_end, color='k', linestyle='--', alpha=0.5)
+    
     ax2.set(title="Electrolyte Starvation at 2C", xlabel="Distance from Anode Collector (µm)", ylabel="Concentration (mol/m³)")
     ax2.legend(); ax2.grid(True, alpha=0.5)
     ax2.annotate("Deep depletion near Cathode interface\nincreases localized ohmic resistance.", 
@@ -400,15 +424,17 @@ if __name__ == "__main__":
     # =========================================================================
 
     fig3, ax3 = plt.subplots(figsize=(8, 5))
-    # The cathode has 63 macro nodes (indices 0 to 62). The node touching the separator is index 0.
-    # Micro grid resolution is 50. Reshape to (63, 50).
+    
+    # The cathode has `MeshConfig.res_p` macro nodes. The node touching the separator is index 0.
+    # Micro grid resolution is `MeshConfig.res_r_p`. Reshape to (res_p, res_r_p).
     c_s_p_history = res_2c["c_s_p"].data
-    r_p = np.linspace(0, 5.22, 50)
+    r_p_arr = np.linspace(0, MeshConfig.R_p * 1e6, MeshConfig.res_r_p)
     
     for idx, label, color in zip(dod_indices, dod_labels, colors):
-        c_s_p_2d = c_s_p_history[idx].reshape((63, 50))
-        c_radial = c_s_p_2d[0, :] # Interface particle
-        ax3.plot(r_p, c_radial, color=color, linewidth=2, label=label)
+        # We un-flatten the memory layout natively
+        c_s_p_2d = c_s_p_history[idx].reshape((MeshConfig.res_p, MeshConfig.res_r_p))
+        c_radial = c_s_p_2d[0, :] # Extract the particle precisely at the separator interface
+        ax3.plot(r_p_arr, c_radial, color=color, linewidth=2, label=label)
 
     c_max_p = 51765.0
     ax3.axhline(c_max_p, color='k', linestyle=':', label="Saturation Limit ($c_{max}$)")
@@ -423,8 +449,9 @@ if __name__ == "__main__":
     # =========================================================================
 
     fig4, (ax4a, ax4b) = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-    x_anode = np.linspace(0, 85.2, 71)
-    x_cathode = np.linspace(97.2, 172.8, 63)
+    
+    x_anode = np.linspace(0, MeshConfig.L_n * 1e6, MeshConfig.res_n)
+    x_cathode = np.linspace(sep_end, MeshConfig.L_cell * 1e6, MeshConfig.res_p)
     
     j_n_history = res_2c["J_n_obs"].data
     j_p_history = res_2c["J_p_obs"].data

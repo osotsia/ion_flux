@@ -530,15 +530,17 @@ class Engine:
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
         record_history = requires_grad is not None
         
+        v_idx = self.layout.state_offsets.get("V_cell", (-1, 0))[0]
+        
         try:
             if self.solver_backend == "sundials":
                 y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
-                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), self.layout.n_obs, show_progress
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), self.layout.n_obs, show_progress, v_idx
                 )
             else:
                 y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_native(
                     self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), 
-                    self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, record_history, self.debug, show_progress
+                    self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, record_history, self.debug, show_progress, v_idx
                 )
         except RuntimeError as e:
             self._handle_native_crash(e)
@@ -658,12 +660,14 @@ class Engine:
                     ))
                 protocol_payloads.append(payload)
         
+        v_idx = self.layout.state_offsets.get("V_cell", (-1, 0))[0]
+        
         # 4. Native Rayon Execution
         try:
             y_res_batch = solve_batch_native(
                 self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, 
                 t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, self.debug, 
-                max_workers, show_progress, protocol_payloads
+                max_workers, show_progress, protocol_payloads, v_idx
             )
         except RuntimeError as e:
             self._handle_native_crash(e)
