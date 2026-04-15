@@ -18,29 +18,29 @@ No flattened arrays. No massive Python memory graphs. No "math gymnastics." Just
 Because `ion_flux` leverages Ahead-of-Time (AOT) compilation and LLVM-level Automatic Differentiation, you must fetch and build its hermetic C++ toolchain locally after installing the Python package.
 
 **1. Install System Build Tools**
-* **macOS:** `brew install cmake ninja git sundials`
-* **Ubuntu:** `sudo apt update && sudo apt install cmake ninja-build git libsundials-dev`
+```bash
+# macOS
+brew install cmake ninja
 
-*(Note: SUNDIALS is strictly optional. `ion_flux` ships with a custom native Rust sparse solver by default).*
+# Ubuntu
+sudo apt update && sudo apt install cmake ninja-build
+```
 
 **2. Install and Configure `ion_flux`**
 ```bash
+# Clone the repository to access the examples and reference models
+git clone https://github.com/osotsia/ion_flux.git
+cd ion_flux
+
 # Create a virtual environment
 python3 -m venv .venv && source .venv/bin/activate
+pip install numpy scipy pandas matplotlib
 
 # Install the package
 pip install ion_flux
 
 # Fetch LLVM and compile the Enzyme AD plugin
 ion-flux install-toolchain
-```
-
-**3. Run the Showcase Models**
-```bash
-# Clone the repository to access the examples and reference models
-git clone https://github.com/osotsia/ion_flux.git
-cd ion_flux
-pip install numpy scipy pandas matplotlib
 
 # Run the performance showcase
 python examples/6_demo.py
