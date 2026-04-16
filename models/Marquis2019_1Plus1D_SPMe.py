@@ -263,7 +263,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 i_cn: {"right": 0.0},
                 
                 # Geometric current density flowing INTO the tab cross-section
-                i_cp: {"left": -self.I_app / (L_tab * L_cp), "right": 0.0},
+                i_cp: {"left": -self.I_app / (L_y * L_cp), "right": 0.0},
                 
                 # Tab Cooling Boundary (Eq 4.3)
                 flux_T: {"left": -1000.0 * (self.T_cell.boundary("left", domain=self.z) - T_inf), "right": 0.0}
@@ -305,7 +305,7 @@ if __name__ == "__main__":
     # =========================================================================
     t_mask = res["I_app"].data > 1.0 # Isolate the active discharge phase
     t_eval = res["Time [s]"].data[t_mask]
-    capacity_ah = (t_eval * 15.0) / 3600.0
+    capacity_ah = (t_eval * 2.043) / 3600.0
     
     z_coords = np.linspace(0, 137, 15)   # z in mm
     x_coords = np.linspace(0, 225, 25)   # x in um

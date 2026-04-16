@@ -6,6 +6,8 @@ use faer::sparse::SparseColMat;
 use faer::col::from_slice_mut;
 use faer::prelude::SpSolver;
 
+use std::fs::File;
+use std::io::Write;
 pub struct NativeSparseLuSolver {
     pub is_stale: bool,
     pub n: usize,
@@ -18,6 +20,24 @@ pub struct NativeSparseLuSolver {
 }
 
 impl NativeSparseLuSolver {
+    /// Dumps the current sparse matrix to a Matrix Market (.mtx) file for debugging
+    pub fn dump_matrix_market(&self, filename: &str) {
+        let mut file = match File::create(filename) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        
+        // MTX Header
+        writeln!(file, "%%MatrixMarket matrix coordinate real general").unwrap();
+        writeln!(file, "% Dumped during native solver panic").unwrap();
+        writeln!(file, "{} {} {}", self.n, self.n, self.triplets.len()).unwrap();
+        
+        // 1-based indexing for MTX format
+        for &(r, c, val) in &self.triplets {
+            writeln!(file, "{} {} {:.16e}", r + 1, c + 1, val).unwrap();
+        }
+    }
+
     pub fn new(n: usize, bw: isize) -> Self {
         let estimated_nnz = n * (2 * bw.max(0) as usize + 1).min(n);
         
@@ -87,51 +107,80 @@ impl NativeSparseLuSolver {
                 self.cached_pattern.push((r, c));
             }
         }
-        // --------------------------------
+            // --------------------------------
 
-        // FAER v0.20 panic boundary trap for structurally singular networks
-        let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| {
-            SparseColMat::try_new_from_triplets(n, n, &self.triplets)
-        }));
-        let jac_sparse = match jac_sparse_res {
-            Ok(Ok(mat)) => mat,
-            _ => return Err("Sparse matrix assembly failed or panicked".to_string()),
-        };
+            // ---> START REPLACING FROM HERE <---
 
-        if self.symbolic.is_none() {
-            let sym_res = catch_unwind(AssertUnwindSafe(|| {
-                SymbolicLu::try_new(jac_sparse.symbolic())
-            }));
-            self.symbolic = match sym_res {
-                Ok(Ok(s)) => Some(s),
-                _ => return Err("Symbolic LU failed or panicked".to_string()),
-            };
-        }
-
-        let num_res = catch_unwind(AssertUnwindSafe(|| {
-            Lu::try_new_with_symbolic(self.symbolic.as_ref().unwrap().clone(), jac_sparse.as_ref())
-        }));
-        
-        match num_res {
-            Ok(Ok(n_lu)) => self.numeric = Some(n_lu),
-            _ => {
-                // Fallback: Rebuild Symbolic safely inside a catch_unwind boundary
-                let fallback_res = catch_unwind(AssertUnwindSafe(|| -> Result<(SymbolicLu<usize>, Lu<usize, f64>), String> {
-                    let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic Fallback failed".to_string())?;
-                    let num = Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric Fallback failed".to_string())?;
-                    Ok((sym, num))
-                }));
-                
-                match fallback_res {
-                    Ok(Ok((sym, num))) => {
-                        self.symbolic = Some(sym);
-                        self.numeric = Some(num);
-                    },
-                    _ => return Err("LU Factorization failed or panicked".to_string()),
-                }
+            // --- TRIPLET SANITY CHECK BEFORE FAER ---
+            let mut has_nan_or_inf = false;
+            let mut col_counts = vec![0; n];
+            for &(r, c, val) in &self.triplets {
+                if !val.is_finite() { has_nan_or_inf = true; }
+                col_counts[c] += 1;
             }
-        };
+            
+            if has_nan_or_inf {
+                return Err("Pre-Factorization Check: Non-finite value in triplets.".to_string());
+            }
+            if col_counts.iter().any(|&count| count == 0) {
+                return Err("Pre-Factorization Check: Structurally empty column detected.".to_string());
+            }
 
+            // FAER v0.20 panic boundary trap for structurally singular networks
+            let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| {
+                SparseColMat::try_new_from_triplets(n, n, &self.triplets)
+            }));
+            let jac_sparse = match jac_sparse_res {
+                Ok(Ok(mat)) => mat,
+                _ => {
+                    std::fs::create_dir_all("ion_flux_diagnostics").ok();
+                    self.dump_matrix_market("ion_flux_diagnostics/faer_panic_assembly.mtx");
+                    return Err("Sparse matrix assembly panicked. Matrix dumped to diagnostics.".to_string());
+                }
+            };
+
+            if self.symbolic.is_none() {
+                let sym_res = catch_unwind(AssertUnwindSafe(|| {
+                    SymbolicLu::try_new(jac_sparse.symbolic())
+                }));
+                self.symbolic = match sym_res {
+                    Ok(Ok(s)) => Some(s),
+                    _ => {
+                        std::fs::create_dir_all("ion_flux_diagnostics").ok();
+                        self.dump_matrix_market("ion_flux_diagnostics/faer_panic_symbolic.mtx");
+                        return Err("Symbolic LU panicked. Matrix dumped to diagnostics.".to_string());
+                    }
+                };
+            }
+
+            let num_res = catch_unwind(AssertUnwindSafe(|| {
+                Lu::try_new_with_symbolic(self.symbolic.as_ref().unwrap().clone(), jac_sparse.as_ref())
+            }));
+            
+            match num_res {
+                Ok(Ok(n_lu)) => self.numeric = Some(n_lu),
+                _ => {
+                    // Fallback: Rebuild Symbolic safely inside a catch_unwind boundary
+                    let fallback_res = catch_unwind(AssertUnwindSafe(|| -> Result<(SymbolicLu<usize>, Lu<usize, f64>), String> {
+                        let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Symbolic Fallback failed".to_string())?;
+                        let num = Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Numeric Fallback failed".to_string())?;
+                        Ok((sym, num))
+                    }));
+                    
+                    match fallback_res {
+                        Ok(Ok((sym, num))) => {
+                            self.symbolic = Some(sym);
+                            self.numeric = Some(num);
+                        },
+                        _ => {
+                            std::fs::create_dir_all("ion_flux_diagnostics").ok();
+                            self.dump_matrix_market("ion_flux_diagnostics/faer_panic_numeric.mtx");
+                            return Err("LU Factorization panicked. Matrix dumped to diagnostics.".to_string());
+                        }
+                    }
+                }
+            };
+            
         self.is_stale = false;
         diag.numeric_factorizations += 1;
         diag.linear_solve_time_us += start_time.elapsed().as_micros();
