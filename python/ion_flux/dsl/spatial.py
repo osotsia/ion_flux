@@ -12,10 +12,19 @@ class DomainBoundary(Node):
     def __repr__(self) -> str: return f"{self.domain.name}.{self.side}"
 
 class ConcatenatedDomain:
-    __slots__ = ["domains", "name", "_original_name"]
+    __slots__ = ["domains", "_original_name"]
     def __init__(self, domains: List['Domain'], name: str = ""):
         self.domains = domains
-        self.name = validate_identifier(name) or validate_identifier("_plus_".join(d.name for d in domains))
+        self._original_name = validate_identifier(name)
+        
+    @property
+    def name(self) -> str:
+        if self._original_name: return self._original_name
+        return validate_identifier("_plus_".join(d.name for d in self.domains if d.name))
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._original_name = validate_identifier(value)
         
     def __add__(self, other: Union['Domain', 'ConcatenatedDomain']) -> 'ConcatenatedDomain':
         if isinstance(other, Domain): return ConcatenatedDomain(self.domains + [other])
@@ -142,10 +151,19 @@ class Domain:
         if not self.name: self.name = validate_identifier(name)
 
 class CompositeDomain:
-    __slots__ = ["domains", "name", "_original_name"]
+    __slots__ = ["domains", "_original_name"]
     def __init__(self, domains: List[Domain], name: str = ""):
         self.domains = domains
-        self.name = validate_identifier(name) or validate_identifier("_x_".join([d.name for d in domains if d.name]))
+        self._original_name = validate_identifier(name)
+        
+    @property
+    def name(self) -> str:
+        if self._original_name: return self._original_name
+        return validate_identifier("_x_".join([d.name for d in self.domains if d.name]))
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._original_name = validate_identifier(value)
         
     @property
     def resolution(self) -> int:
@@ -154,4 +172,4 @@ class CompositeDomain:
         
     def __repr__(self) -> str: return self.name or f"CompositeDomain({[d.name for d in self.domains]})"
     def __set_name__(self, owner, name):
-        if not self.name: self.name = validate_identifier(name)
+        if not self._original_name: self._original_name = validate_identifier(name)

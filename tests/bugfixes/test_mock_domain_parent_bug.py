@@ -90,11 +90,13 @@ def test_unbound_subregion_memory_mapping():
     evaluated_integral = -res[off_int]
     
     # The physical volume of reg_B is 1.0. 
-    # If it correctly integrates over reg_B, Area = 100.0 * 1.0 = 100.0
-    # If the bug exists, it integrates over reg_A, Area = 0.0 * 1.0 = 0.0
-    
-    assert evaluated_integral == pytest.approx(100.0), \
-        f"BUG DETECTED: Expected integral 100.0, but got {evaluated_integral}. " \
+    # The discrete FVM numerical volume of reg_B (10 nodes, dx = 2.0 / 19.0) is:
+    # 9 * (2.0 / 19.0) = 18.0 / 19.0 = 0.9473684210526315
+    # Therefore, the integrated value of a 100.0 field over reg_B is exactly 94.73684210526315.
+    exact_fvm_integral = 100.0 * (18.0 / 19.0)
+         
+    assert evaluated_integral == pytest.approx(exact_fvm_integral), \
+        f"BUG DETECTED: Expected integral {exact_fvm_integral}, but got {evaluated_integral}. " \
         "The compiler dropped the topological start_idx offset and read the wrong memory addresses!"
 
 if __name__ == "__main__":

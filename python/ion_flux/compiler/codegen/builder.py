@@ -3,131 +3,134 @@ from ion_flux.compiler.passes.semantic import SemanticContext
 from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor
 from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
 from .templates import generate_cpp_skeleton
+from .topology import TopologyAnalyzer
+
+def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor, 
+                    bounds_override=None, is_obs=False) -> List[Any]:
+    """Generates an N-dimensional nested loop assigning an AST node to a target array."""
+    target_domain = getattr(visitor.state_map.get(target_state), "domain", None)
+    axes = topo.get_axes(target_domain.name if target_domain else None)
+    bounds_override = bounds_override or {}
+    
+    # Initialize default axis context for Neumann boundary interception
+    visitor.current_axis = topo.get_base_axis(axes[-1]) if axes else None
+    
+    # 1. Build the active Index Environment
+    env = {}
+    for axis in axes:
+        base = topo.get_base_axis(axis)
+        start = topo.domains.get(axis, {}).get("start_idx", 0)
+        res = topo.domains.get(axis, {}).get("resolution", 1)
+        
+        loop_start, _ = bounds_override.get(base, (start, res))
+        loop_var = f"idx_{axis}"
+        # The environment stores the ABSOLUTE topological index
+        env[base] = BinaryOp("+", Var(loop_var), Literal(loop_start))
+    
+    offset = layout.obs_offsets[target_state][0] if is_obs else layout.state_offsets[target_state][0]
+    array_name = "obs" if is_obs else "res"
+    flat_idx = visitor._flat_index(target_domain.name if target_domain else None, env)
+    res_ir = ArrayAccess(array_name, BinaryOp("+", Literal(offset), flat_idx))
+    
+    # 2. Lower the AST using the active environment
+    if isinstance(eq_dict, dict) and eq_dict.get("type") == "dirichlet_bnd":
+        rhs_ir = visitor.lower(eq_dict["node"], env)
+        y_ir = ArrayAccess("y", BinaryOp("+", Literal(offset), flat_idx))
+        assign = Assign(res_ir, BinaryOp("-", y_ir, rhs_ir))
+    elif not is_obs:
+        # Evaluate full PDE/DAE (lhs - rhs)
+        lhs_ir = visitor.lower(eq_dict["left"], env)
+        rhs_ir = visitor.lower(eq_dict["right"], env)
+        
+        for ale_ir in visitor.generate_ale_dilution(target_state, env):
+            rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
+            
+        assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
+    else:
+        rhs_ir = visitor.lower(eq_dict, env)
+        assign = Assign(res_ir, rhs_ir)
+            
+    # 3. Wrap assignment in N-Dimensional nested loops
+    curr_body = [assign]
+    for i, axis in reversed(list(enumerate(axes))):
+        base = topo.get_base_axis(axis)
+        res = topo.domains.get(axis, {}).get("resolution", 1)
+        
+        _, loop_res = bounds_override.get(base, (0, res))
+        loop_var = f"idx_{axis}"
+        
+        pragma = "#pragma omp parallel for" if i == 0 and loop_res > 50 and "omp" in visitor.target else ""
+        curr_body = [Loop(loop_var, Literal(0), Literal(loop_res), curr_body, pragma)]
+        
+    return curr_body
 
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
-    state_map = {s.name: s for s in states}
-    obs_map = {o.name: o for o in observables}
-    
-    # --- Pass 1: Semantic Resolution ---
+    topo = TopologyAnalyzer(ast_payload.get("domains", {}))
     ctx = SemanticContext(ast_payload)
-    
-    # --- Pass 2: Spatial Lowering ---
-    visitor = SpatialLoweringVisitor(layout, state_map, ctx)
+    visitor = SpatialLoweringVisitor(layout, {s.name: s for s in states}, ctx, topo, target)
     
     eq_stmts = []
-    dx_stmts = []
+    dx_stmts = [RawCpp("double dx_default = 1.0;")]
     
+    # Emit dx spatial strides
     for d_name, d_info in ast_payload.get("domains", {}).items():
-        # Composite domains do not have a flat `dx`. Their spatial steps are defined by their 1D sub-domains.
-        if d_info.get("type") == "composite":
-            continue
-            
+        if d_info.get("type") == "composite": continue
         res_val = max(d_info.get("resolution", 2) - 1, 1)
         if d_name in ctx.dynamic_domains:
-            rhs_ir = visitor.lower(ctx.dynamic_domains[d_name]["rhs"], Literal(0))
+            rhs_ir = visitor.lower(ctx.dynamic_domains[d_name]["rhs"], {topo.get_base_axis(d_name): Literal(0)})
             dx_stmts.append(RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
         else:
             bounds = d_info.get("bounds", (0.0, 1.0))
-            dx_val = float(bounds[1] - bounds[0]) / res_val
-            dx_stmts.append(RawCpp(f"double dx_{d_name} = {dx_val};"))
-            
-    dx_stmts.append(RawCpp("double dx_default = 1.0;"))
-    
+            dx_stmts.append(RawCpp(f"double dx_{d_name} = {float(bounds[1] - bounds[0]) / res_val};"))
+
+    # Process Equations
+    from ion_flux.compiler.codegen.ast_analysis import extract_div_child
     for eq_data in ast_payload.get("equations", []):
         state_name = eq_data["state"]
-        offset, size = layout.state_offsets[state_name]
-        visitor.current_domain = getattr(state_map[state_name], "domain", None)
         
         if eq_data["type"] == "piecewise":
             visitor.is_piecewise = True
-            from ion_flux.compiler.codegen.ast_analysis import extract_div_child
-            region_divs = {}
-            for reg in eq_data["regions"]:
-                region_divs[reg["domain"]] = extract_div_child(reg["eq"])
-                
             visitor.piecewise_regions = eq_data["regions"]
-            visitor.region_divs = region_divs
+            visitor.region_divs = {r["domain"]: extract_div_child(r["eq"]) for r in eq_data["regions"]}
             
             for reg in eq_data["regions"]:
-                start = reg["start_idx"]
-                end = reg["end_idx"]
                 visitor.current_region_data = reg
+                b_axis = topo.get_base_axis(reg["domain"])
+                # Limit the specific axis loop to the region's bounds
+                override = {b_axis: (reg["start_idx"], reg["end_idx"] - reg["start_idx"])}
+                eq_stmts.extend(emit_assignment(state_name, reg["eq"], layout, topo, visitor, override))
                 
-                lhs_ir = visitor.lower(reg["eq"]["left"], Var("i"))
-                rhs_ir = visitor.lower(reg["eq"]["right"], Var("i"))
-                
-                for ale_ir in visitor.generate_ale_dilution(state_name, offset, size, "i"):
-                    rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
-                    
-                # Strict Face-Sharing FVM: isolated assignments, interface handled by flux logic
-                res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Var("i")))
-                assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
-                
-                eq_stmts.append(Loop("i", Literal(start), Literal(end), [assign]))
-                
-            visitor.piecewise_regions = None
-            visitor.region_divs = None
-            visitor.current_region_data = None
-
-        elif eq_data["type"] == "standard":
             visitor.is_piecewise = False
-            lhs_ir = visitor.lower(eq_data["eq"]["left"], Var("i"))
-            rhs_ir = visitor.lower(eq_data["eq"]["right"], Var("i"))
-            
-            for ale_ir in visitor.generate_ale_dilution(state_name, offset, size, "i"):
-                rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
-                
-            res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Var("i")))
-            assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
-            
-            pragma = "#pragma omp parallel for" if ("omp" in target and size > 50) else ""
-            eq_stmts.append(Loop("i", Literal(0), Literal(size), [assign], pragma=pragma))
+            visitor.current_region_data = None
+        else:
+            eq_stmts.extend(emit_assignment(state_name, eq_data["eq"], layout, topo, visitor))
 
+    # Process Dirichlet Boundaries
     for bc_data in ast_payload.get("boundaries", []):
         if bc_data["type"] == "dirichlet":
             state_name = bc_data["state"]
-            offset, size = layout.state_offsets[state_name]
-            visitor.current_domain = getattr(state_map[state_name], "domain", None)
+            d_name = getattr(visitor.state_map[state_name], "domain", None)
+            base_axis = topo.get_base_axis(topo.get_axes(d_name.name if d_name else None)[0]) if d_name else None
+            res = topo.domains.get(base_axis, {}).get("resolution", 1)
             
             for side, val_dict in bc_data["bcs"].items():
-                idx = 0 if side == "left" else size - 1
-                val_ir = visitor.lower(val_dict, Literal(idx))
-                res_ir = ArrayAccess("res", BinaryOp("+", Literal(offset), Literal(idx)))
-                y_ir = ArrayAccess("y", BinaryOp("+", Literal(offset), Literal(idx)))
-                
-                eq_stmts.append(Assign(res_ir, BinaryOp("-", y_ir, val_ir)))
+                dirichlet_node = {"type": "dirichlet_bnd", "node": val_dict}
+                idx = 0 if side == "left" else res - 1
+                override = {base_axis: (idx, 1)} if base_axis else {}
+                eq_stmts.extend(emit_assignment(state_name, dirichlet_node, layout, topo, visitor, override))
 
-    # --- Pass 3: C++ Emission ---
+    # Process Observables
     obs_stmts = []
+    visitor.state_map.update({o.name: o for o in observables})
     for eq_data in ast_payload.get("observables", []):
         obs_name = eq_data["state"]
-        offset, size = layout.obs_offsets[obs_name]
-        visitor.current_domain = getattr(obs_map[obs_name], "domain", None)
-        
         if eq_data["type"] == "piecewise":
-            visitor.is_piecewise = True
             for reg in eq_data["regions"]:
-                start = reg["start_idx"]
-                end = reg["end_idx"]
-                visitor.current_region_data = reg
-                
-                rhs_ir = visitor.lower(reg["eq"], Var("i"))
-                res_ir = ArrayAccess("obs", BinaryOp("+", Literal(offset), Var("i")))
-                assign = Assign(res_ir, rhs_ir)
-                
-                obs_stmts.append(Loop("i", Literal(start), Literal(end), [assign]))
-                
-            visitor.is_piecewise = False
-            visitor.current_region_data = None
-        elif eq_data["type"] == "standard":
-            visitor.is_piecewise = False
-            rhs_ir = visitor.lower(eq_data["eq"], Var("i"))
-            
-            res_ir = ArrayAccess("obs", BinaryOp("+", Literal(offset), Var("i")))
-            assign = Assign(res_ir, rhs_ir)
-            
-            pragma = "#pragma omp parallel for" if ("omp" in target and size > 50) else ""
-            obs_stmts.append(Loop("i", Literal(0), Literal(size), [assign], pragma=pragma))
+                b_axis = topo.get_base_axis(reg["domain"])
+                override = {b_axis: (reg["start_idx"], reg["end_idx"] - reg["start_idx"])}
+                obs_stmts.extend(emit_assignment(obs_name, reg["eq"], layout, topo, visitor, override, is_obs=True))
+        else:
+            obs_stmts.extend(emit_assignment(obs_name, eq_data["eq"], layout, topo, visitor, is_obs=True))
 
     body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + eq_stmts))
     obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + obs_stmts))

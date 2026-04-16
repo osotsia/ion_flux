@@ -1,36 +1,36 @@
-from typing import Any
+from typing import Dict, Any, List
 
-def get_stride(domain: Any, axis_name: str) -> str:
-    """Calculates spatial strides for hierarchical cross-product domains."""
-    if hasattr(domain, "domains") and len(domain.domains) == 2:
-        if domain.domains[0].name == axis_name:
-            return str(domain.domains[1].resolution)
-    return "1"
+class TopologyAnalyzer:
+    """Resolves hierarchical and composite domain topologies into N-dimensional traits."""
+    def __init__(self, domains: Dict[str, Any]):
+        self.domains = domains
 
-def get_local_index(global_idx_var: str, domain: Any, axis_name: str) -> str:
-    """Extracts the localized dimensional index from a flattened global hardware index."""
-    if hasattr(domain, "domains") and len(domain.domains) == 2:
-        if domain.domains[1].name == axis_name:
-            res = domain.domains[1].resolution
-            # Explicit (int) cast ensures C++ modulo operator doesn't fail if index drops to double
-            return f"((int)({global_idx_var}) % {res})"
-        elif domain.domains[0].name == axis_name:
-            res_inner = domain.domains[1].resolution
-            # Explicit (int) cast ensures integer division for spatial strides
-            return f"((int)({global_idx_var}) / {res_inner})"
-    return global_idx_var
+    def get_axes(self, domain_name: str) -> List[str]:
+        """Flattens a composite domain into its fundamental 1D axes."""
+        if not domain_name: return []
+        d = self.domains.get(domain_name)
+        if not d: return [domain_name]
+        
+        if d.get("type") == "composite":
+            axes = []
+            for sub in d.get("domains", []):
+                axes.extend(self.get_axes(sub))
+            return axes
+        return [domain_name]
 
-def get_coord_sys(domain: Any, axis_name: str) -> str:
-    if hasattr(domain, "domains"):
-        for d in domain.domains:
-            if d.name == axis_name:
-                return getattr(d, "coord_sys", "cartesian")
-    return getattr(domain, "coord_sys", "cartesian")
+    def get_base_axis(self, domain_name: str) -> str:
+        """Resolves a sub-region to its foundational parent axis."""
+        d = self.domains.get(domain_name, {})
+        parent = d.get("parent")
+        return self.get_base_axis(parent) if parent else domain_name
 
-def get_resolution(domain: Any, axis_name: str) -> str:
-    """Returns the resolution of the domain axis."""
-    if hasattr(domain, "domains"):
-        for d in domain.domains:
-            if d.name == axis_name:
-                return str(d.resolution)
-    return str(getattr(domain, "resolution", "1"))
+    def get_strides(self, domain_name: str) -> Dict[str, int]:
+        """Calculates the flat C-array memory stride for each axis in the domain."""
+        axes = self.get_axes(domain_name)
+        strides = {}
+        current_stride = 1
+        for axis in reversed(axes):
+            strides[axis] = current_stride
+            res = self.domains.get(axis, {}).get("resolution", 1)
+            current_stride *= res
+        return strides
