@@ -206,6 +206,13 @@ class Engine:
         # diagonal shifts natively via Mass Matrices and Row Equilibration.
         spatial_diag = [0.0] * self.layout.n_states
         
+        from ion_flux.compiler.codegen.topology import TopologyAnalyzer
+        import itertools
+        topo = TopologyAnalyzer(self.ast_payload.get("domains", {}))
+        
+        all_states = self.model.components(State) if hasattr(self.model, "components") else [attr for attr in self.model.__dict__.values() if isinstance(attr, State)]
+        state_dict = {getattr(s, "name", ""): s for s in all_states}
+
         # ---------------------------------------------------------------------
         # 1. Extract the Differential/Algebraic Mask (id_arr)
         # Recursively scans explicit equations for fx.dt() nodes. 
@@ -222,26 +229,108 @@ class Engine:
                 for item in node:
                     _mark_differentials(item, start, end)
 
+        def _check_dt(node: Dict[str, Any]) -> bool:
+            if isinstance(node, dict):
+                if node.get("type") == "UnaryOp" and node.get("op") == "dt":
+                    return True
+                for v in node.values():
+                    if _check_dt(v): return True
+            elif isinstance(node, list):
+                for item in node:
+                    if _check_dt(item): return True
+            return False
+
         for eq_data in self.ast_payload.get("equations", []):
-            offset, size = self.layout.state_offsets[eq_data["state"]]
+            state_name = eq_data["state"]
+            offset, size = self.layout.state_offsets[state_name]
+            
             if eq_data["type"] == "piecewise":
+                state_node = state_dict.get(state_name)
+                d_name = state_node.domain.name if state_node and getattr(state_node, "domain", None) else None
+                
                 for reg in eq_data["regions"]:
-                    _mark_differentials(reg["eq"], offset + reg["start_idx"], offset + reg["end_idx"])
+                    if not _check_dt(reg["eq"]): continue
+                    
+                    if not d_name:
+                        id_arr[offset] = 1.0
+                        continue
+                        
+                    axes = topo.get_axes(d_name)
+                    strides = topo.get_strides(d_name)
+                    b_axis = topo.get_base_axis(reg["domain"])
+                    
+                    ranges = []
+                    for axis in axes:
+                        base = topo.get_base_axis(axis)
+                        if base == b_axis:
+                            ranges.append(range(reg["start_idx"], reg["end_idx"]))
+                        else:
+                            res = topo.domains.get(axis, {}).get("resolution", 1)
+                            ranges.append(range(res))
+                    
+                    for indices in itertools.product(*ranges):
+                        flat_idx = 0
+                        for axis, idx in zip(axes, indices):
+                            flat_idx += idx * strides[axis]
+                        id_arr[offset + flat_idx] = 1.0
             else:
                 _mark_differentials(eq_data["eq"], offset, offset + size)
                 
+        # ---------------------------------------------------------------------
+        # 2. Extract Dirichlet Boundaries (Override to Algebraic)
         # Dirichlet boundaries mathematically override the bulk PDE at the boundary 
         # nodes, turning them into pure algebraic constraints (0.0).
+        # ---------------------------------------------------------------------
         for bc_data in self.ast_payload.get("boundaries", []):
             if bc_data["type"] == "dirichlet":
-                offset, size = self.layout.state_offsets[bc_data["state"]]
-                if "left" in bc_data["bcs"]: 
-                    id_arr[offset] = 0.0
-                if "right" in bc_data["bcs"]: 
-                    id_arr[offset + size - 1] = 0.0
+                state_name = bc_data["state"]
+                offset, size = self.layout.state_offsets[state_name]
+                
+                state_node = state_dict.get(state_name)
+                d_name = state_node.domain.name if state_node and getattr(state_node, "domain", None) else None
+                
+                if not d_name:
+                    if "left" in bc_data["bcs"]: id_arr[offset] = 0.0
+                    if "right" in bc_data["bcs"]: id_arr[offset + size - 1] = 0.0
+                    continue
+                    
+                axes = topo.get_axes(d_name)
+                strides = topo.get_strides(d_name)
+                b_axis = axes[-1]
+                coord_sys = topo.domains.get(b_axis, {}).get("coord_sys", "cartesian")
+                
+                if coord_sys == "unstructured":
+                    surfaces = self.layout.mesh_offsets.get(b_axis, {}).get("surfaces", {})
+                    for side in bc_data["bcs"]:
+                        if side in surfaces:
+                            mask_off = surfaces[side]
+                            for i in range(size):
+                                if self.layout.mesh_cache.get(mask_off + i, 0.0) > 0.5:
+                                    id_arr[offset + i] = 0.0
+                    continue
+                
+                b_res = topo.domains.get(b_axis, {}).get("resolution", 1)
+                
+                ranges = []
+                for axis in axes:
+                    if axis == b_axis:
+                        ranges.append([0]) 
+                    else:
+                        res = topo.domains.get(axis, {}).get("resolution", 1)
+                        ranges.append(range(res))
+                        
+                for indices in itertools.product(*ranges):
+                    base_flat = 0
+                    for axis, idx in zip(axes, indices):
+                        base_flat += idx * strides[axis]
+                        
+                    if "left" in bc_data["bcs"]:
+                        id_arr[offset + base_flat] = 0.0
+                    if "right" in bc_data["bcs"]:
+                        id_arr[offset + base_flat + (b_res - 1) * strides[b_axis]] = 0.0
                 
         # ---------------------------------------------------------------------
-        # 2. Evaluate Initial Conditions (y0)
+        # 3. Evaluate Initial Conditions (y0)
         # Recursively evaluates the static scalar AST expressions at t=0.
         # ---------------------------------------------------------------------
         def _eval_ic(node: Dict[str, Any], idx: int, dx: float) -> float:
@@ -288,7 +377,7 @@ class Engine:
                 y0[offset + i] = _eval_ic(ic_data["value"], i, dx)
 
         # ---------------------------------------------------------------------
-        # 3. Extract Newton Step Clamps (max_steps)
+        # 4. Extract Newton Step Clamps (max_steps)
         # ---------------------------------------------------------------------
         max_steps = [0.0] * self.layout.n_states
         for state_name, (offset, size) in self.layout.state_offsets.items():

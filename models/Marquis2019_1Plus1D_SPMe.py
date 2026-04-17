@@ -241,7 +241,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 # --- Transverse Physics ---
                 self.phi_cn: fx.div(i_cn, axis=self.z) == -self.I_loc / L_cn,
                 self.phi_cp: fx.div(i_cp, axis=self.z) == self.I_loc / L_cp,
-                self.T_cell: fx.dt(self.T_cell) == (-fx.div(flux_T, axis=self.z) + Q_total) / rho_eff, #so the solver isn't dealing with residuals in the millions
+                self.T_cell: fx.dt(self.T_cell) == (-fx.div(flux_T, axis=self.z) + Q_total),
                 
                 # --- Spatial DAE Coupling (I_loc Root Finding) ---
                 self.I_loc: (self.phi_cp - self.phi_cn) == V_ec,
