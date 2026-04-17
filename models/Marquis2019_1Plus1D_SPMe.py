@@ -241,7 +241,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 # --- Transverse Physics ---
                 self.phi_cn: fx.div(i_cn, axis=self.z) == -self.I_loc / L_cn,
                 self.phi_cp: fx.div(i_cp, axis=self.z) == self.I_loc / L_cp,
-                self.T_cell: rho_eff * fx.dt(self.T_cell) == -fx.div(flux_T, axis=self.z) + Q_total,
+                self.T_cell: fx.dt(self.T_cell) == (-fx.div(flux_T, axis=self.z) + Q_total) / rho_eff, #so the solver isn't dealing with residuals in the millions
                 
                 # --- Spatial DAE Coupling (I_loc Root Finding) ---
                 self.I_loc: (self.phi_cp - self.phi_cn) == V_ec,
@@ -275,7 +275,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 self.phi_cn: 0.0,
                 self.phi_cp: 4.15,
                 self.T_cell: T_inf,
-                self.I_loc: 0.0,
+                self.I_loc: 1e-6, #to push it off the flat gradient plateau at t=0
                 self.V_term: 4.15,
                 self.I_app: 0.0
             }

@@ -53,6 +53,8 @@ pub fn solve_nonlinear_system(
     let mut res = vec![0.0; n];
     let mut dy = vec![0.0; n];
     
+    diag.recent_newton_norms.clear(); // Reset trace for the new step
+
     // Inner loop allows the solver to flush a stale Jacobian and try again 
     // WITHOUT collapsing the integration step size `dt`.
     loop {
@@ -140,8 +142,21 @@ pub fn solve_nonlinear_system(
             diag.last_dy = dy.clone();
             diag.last_weights = weights.to_vec();
 
+            if diag.recent_newton_norms.len() >= 5 { diag.recent_newton_norms.pop_front(); }
+            diag.recent_newton_norms.push_back((iter + 1, f_norm, dy_norm));
+
             // 3. Stringent SUNDIALS Convergence Criteria
             if iter == 0 {
+                // Trap initialization balance errors
+                if diag.accepted_steps == 0 {
+                    let mut max_r = 0.0;
+                    let mut max_idx = 0;
+                    for i in 0..n {
+                        if res[i].abs() > max_r { max_r = res[i].abs(); max_idx = i; }
+                    }
+                    diag.t0_max_res = max_r;
+                    diag.t0_max_res_idx = max_idx;
+                }
                 old_fnorm = dy_norm;
                 if dy_norm <= 1e-8 * config.eps_newt {
                     return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);

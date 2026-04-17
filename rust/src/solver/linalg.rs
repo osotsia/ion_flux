@@ -84,6 +84,16 @@ impl NativeSparseLuSolver {
             }
         }
 
+        let mut j_max = 0.0_f64;
+        let mut j_min = std::f64::MAX;
+        for &(_, _, val) in &self.triplets {
+            let abs_val = val.abs();
+            if abs_val > j_max { j_max = abs_val; }
+            if abs_val > 0.0 && abs_val < j_min { j_min = abs_val; }
+        }
+        diag.jac_max = j_max;
+        diag.jac_min = j_min;
+
         // --- PROACTIVE SPARSITY CHECK ---
         // Faer's SymbolicLu aggressively caches the structural sparsity pattern.
         // If physics derivatives underflow to exactly 0.0 (e.g., saturation plateaus),

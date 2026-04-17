@@ -1,3 +1,5 @@
+// File: rust/src/solver/mod.rs
+
 pub mod linalg;
 pub mod newton;
 pub mod integrator;
@@ -49,7 +51,7 @@ impl Default for SolverConfig {
 
 /// Zero-overhead telemetry recorded during the solve. 
 /// Dumped to JSON post-execution for observability.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Diagnostics {
     // --- Global Counters ---
     pub total_steps: usize,
@@ -79,6 +81,26 @@ pub struct Diagnostics {
     pub last_dy: Vec<f64>,
     pub last_weights: Vec<f64>,
     pub last_rho: f64,
+    
+    // --- Enhanced Diagnostics ---
+    pub jac_max: f64,
+    pub jac_min: f64,
+    pub t0_max_res: f64,
+    pub t0_max_res_idx: usize,
+    pub recent_newton_norms: std::collections::VecDeque<(usize, f64, f64)>, // (Iter, F_norm, dy_norm)
+}
+
+impl Default for Diagnostics {
+    fn default() -> Self {
+        Self {
+            total_steps: 0, accepted_steps: 0, rejected_steps: 0, newton_iterations: 0,
+            jacobian_evaluations: 0, numeric_factorizations: 0, max_chromatic_number: 0,
+            jacobian_assembly_time_us: 0, linear_solve_time_us: 0, residual_time_us: 0,
+            trace_t: Vec::new(), trace_dt: Vec::new(), trace_order: Vec::new(), trace_iters: Vec::new(), trace_err: Vec::new(),
+            last_y_pred: Vec::new(), last_ydot_pred: Vec::new(), last_res: Vec::new(), last_dy: Vec::new(), last_weights: Vec::new(), last_rho: 0.0,
+            jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0, recent_newton_norms: std::collections::VecDeque::new(),
+        }
+    }
 }
 
 impl Diagnostics {

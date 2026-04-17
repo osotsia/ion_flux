@@ -327,32 +327,62 @@ class Engine:
             for name, (offset, size) in self.layout.state_offsets.items():
                 for i in range(size):
                     idx_to_name[offset + i] = f"{name}[{i}]" if size > 1 else name
+            
+            # Inject names back into the JSON payload for better local debugging
+            for off in crash_data.get("top_offenders", []):
+                off["name"] = idx_to_name.get(off.get("index", -1), f"Unknown[{off.get('index', -1)}]")
+                
+            if "initialization_health" in crash_data:
+                idx = crash_data["initialization_health"].get("t0_max_residual_index", -1)
+                crash_data["initialization_health"]["t0_max_residual_name"] = idx_to_name.get(idx, f"Unknown[{idx}]")
+            
+            # Save the enriched JSON so users have context directly in the file
+            with open(latest_crash, "w") as f:
+                json.dump(crash_data, f, indent=2)
                     
-            msg = f"\n{'-'*85}\n"
+            msg = f"\n{'-'*100}\n"
             msg += f"🔥 NATIVE SOLVER CRASH: {str(original_error)}\n"
-            msg += f"{'-'*85}\n"
+            msg += f"{'-'*100}\n"
             msg += f"Reason: {crash_data.get('reason', 'Unknown')}\n"
-            msg += f"Accepted Steps: {crash_data.get('accepted_steps', 0)}\n\n"
-            msg += "Top Offenders (Ranked by NaN presence, then Absolute Residual):\n"
-            msg += f"{'State Name':<30} | {'Type':<10} | {'Residual':<12} | {'y':<12} | {'y_dot':<12}\n"
-            msg += "-" * 85 + "\n"
+            msg += f"Accepted Steps: {crash_data.get('accepted_steps', 0)}\n"
+            
+            init_health = crash_data.get("initialization_health", {})
+            if init_health.get("t0_max_residual", 0.0) > 1e3:
+                msg += f"\n⚠️ INITIALIZATION WARNING: Massive residual at t=0 detected!\n"
+                msg += f"   Variable: {init_health.get('t0_max_residual_name')} (Residual: {init_health.get('t0_max_residual'):.3e})\n"
+                msg += f"   Check your `initial_conditions` for severe algebraic imbalances.\n"
+                
+            jac_health = crash_data.get("jacobian_health", {})
+            if jac_health.get("condition_warning", False):
+                msg += f"\n⚠️ JACOBIAN CONDITION WARNING: Matrix is likely singular or badly scaled.\n"
+                msg += f"   Max element: {jac_health.get('max_element'):.3e}, Min non-zero: {jac_health.get('min_nonzero_element'):.3e}\n"
+                
+            trace = crash_data.get("newton_thrashing_trace", [])
+            if trace:
+                msg += f"\nNewton Trace (Last {len(trace)} iterations):\n"
+                for t in trace:
+                    msg += f"   Iter {t.get('iter')}: Residual Norm = {t.get('residual_norm'):.3e}, Step Norm = {t.get('step_norm'):.3e}\n"
+            
+            msg += f"\nTop Offenders (Ranked by NaN presence, then Absolute Residual):\n"
+            msg += f"{'State Name':<25} | {'Type':<9} | {'Residual':<10} | {'Weight':<9} | {'Step dy':<10} | {'y_val':<10}\n"
+            msg += "-" * 100 + "\n"
             
             for off in crash_data.get("top_offenders", []):
-                idx = off["index"]
-                name = idx_to_name.get(idx, f"Unknown[{idx}]")
+                name = off.get("name", "")
                 rtype = off.get("type", "")
                 
                 def fmt(v):
-                    try: return f"{float(v):<12.3e}"
-                    except: return f"{v:<12}"
+                    try: return f"{float(v):<10.3e}"
+                    except: return f"{v:<10}"
                     
                 res = fmt(off.get("residual", 0.0))
                 yv = fmt(off.get("y_val", 0.0))
-                ydv = fmt(off.get("ydot_val", 0.0))
+                dy = fmt(off.get("proposed_step_dy", 0.0))
+                w = fmt(off.get("solver_weight", 0.0))
                 
-                msg += f"{name[:29]:<30} | {rtype:<10} | {res} | {yv} | {ydv}\n"
+                msg += f"{name[:24]:<25} | {rtype:<9} | {res} | {w} | {dy} | {yv}\n"
                 
-            msg += f"{'-'*85}\n"
+            msg += f"{'-'*100}\n"
             raise RuntimeError(msg) from None
         except Exception:
             raise original_error from None

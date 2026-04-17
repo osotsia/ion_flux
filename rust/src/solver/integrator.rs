@@ -353,13 +353,15 @@ pub fn step_bdf_vsvo(
 pub fn dump_crash_report(diag: &Diagnostics, y: &[f64], ydot: &[f64], id: &[f64], reason: &str) {
     std::fs::create_dir_all("ion_flux_diagnostics").ok();
     
-    let mut offenders: Vec<(usize, f64, f64, f64, f64, bool)> = diag.last_res.iter().enumerate()
+    let mut offenders: Vec<(usize, f64, f64, f64, f64, f64, f64, bool)> = diag.last_res.iter().enumerate()
         .map(|(i, &res)| {
-            let err = diag.last_dy.get(i).unwrap_or(&0.0) * diag.last_weights.get(i).unwrap_or(&0.0);
+            let weight = diag.last_weights.get(i).copied().unwrap_or(0.0);
+            let dy = diag.last_dy.get(i).copied().unwrap_or(0.0);
+            let err = dy * weight;
             let is_diff = id.get(i).unwrap_or(&0.0) > &0.5;
             let y_v = y.get(i).copied().unwrap_or(0.0);
             let ydot_v = ydot.get(i).copied().unwrap_or(0.0);
-            (i, res, err.abs(), y_v, ydot_v, is_diff)
+            (i, res, err.abs(), y_v, ydot_v, dy, weight, is_diff)
         }).collect();
     
     offenders.sort_by(|a, b| {
@@ -370,36 +372,34 @@ pub fn dump_crash_report(diag: &Diagnostics, y: &[f64], ydot: &[f64], id: &[f64]
         b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal)
     });
     
-    let top_offenders: Vec<String> = offenders.into_iter().take(15).map(|(i, res, err, y_v, ydot_v, is_diff)| {
+    let top_offenders: Vec<String> = offenders.into_iter().take(15).map(|(i, res, err, y_v, ydot_v, dy, weight, is_diff)| {
         let eq_type = if is_diff { "ODE/PDE" } else { "Algebraic" };
-        format!("{{\"index\": {}, \"type\": \"{}\", \"y_val\": {:.3e}, \"ydot_val\": {:.3e}, \"residual\": {:.3e}, \"weighted_error\": {:.3e}}}", i, eq_type, y_v, ydot_v, res, err)
+        format!(
+            "{{\n      \"index\": {},\n      \"type\": \"{}\",\n      \"y_val\": {:.3e},\n      \"ydot_val\": {:.3e},\n      \"residual\": {:.3e},\n      \"proposed_step_dy\": {:.3e},\n      \"solver_weight\": {:.3e},\n      \"weighted_error\": {:.3e}\n    }}",
+            i, eq_type, y_v, ydot_v, res, dy, weight, err
+        )
     }).collect();
 
-    let mut volatile: Vec<(usize, f64)> = diag.last_dy.iter().enumerate()
-        .map(|(i, &dy)| (i, dy.abs()))
-        .collect();
-    volatile.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    
-    let top_volatile: Vec<String> = volatile.into_iter().take(5).map(|(i, dy)| {
-        format!("{{\"index\": {}, \"dy_abs\": {:.3e}}}", i, dy)
-    }).collect();
-
-    let mut history_str = String::new();
-    let hist_len = diag.trace_t.len();
-    let start_idx = hist_len.saturating_sub(5);
-    for i in start_idx..hist_len {
-        history_str.push_str(&format!("{{\"step\": {}, \"t\": {:.3e}, \"dt\": {:.3e}, \"order\": {}, \"err_norm\": {:.3e}}}",
-            i, diag.trace_t[i], diag.trace_dt[i], diag.trace_order[i], diag.trace_err[i]));
-        if i < hist_len - 1 { history_str.push_str(",\n    "); }
+    let mut newton_trace_str = String::new();
+    let trace_len = diag.recent_newton_norms.len();
+    for (i, &(iter, fnorm, dynorm)) in diag.recent_newton_norms.iter().enumerate() {
+        newton_trace_str.push_str(&format!("{{\"iter\": {}, \"residual_norm\": {:.3e}, \"step_norm\": {:.3e}}}", iter, fnorm, dynorm));
+        if i < trace_len - 1 { newton_trace_str.push_str(",\n    "); }
     }
+
+    let cond_warning = diag.jac_max > 0.0 && diag.jac_min > 0.0 && (diag.jac_max / diag.jac_min) > 1e12;
 
     let ts = Diagnostics::generate_timestamp();
     let filename = format!("ion_flux_diagnostics/crash_{}.json", ts);
     
     if let Ok(mut file) = File::create(&filename) {
         let json = format!(
-            "{{\n  \"status\": \"CRASH\",\n  \"reason\": \"{}\",\n  \"accepted_steps\": {},\n  \"recent_history\": [\n    {}\n  ],\n  \"top_volatile_states\": [\n    {}\n  ],\n  \"top_offenders\": [\n    {}\n  ]\n}}",
-            reason, diag.accepted_steps, history_str, top_volatile.join(",\n    "), top_offenders.join(",\n    ")
+            "{{\n  \"status\": \"CRASH\",\n  \"reason\": \"{}\",\n  \"accepted_steps\": {},\n  \"initialization_health\": {{\n    \"t0_max_residual\": {:.3e},\n    \"t0_max_residual_index\": {}\n  }},\n  \"jacobian_health\": {{\n    \"max_element\": {:.3e},\n    \"min_nonzero_element\": {:.3e},\n    \"condition_warning\": {}\n  }},\n  \"newton_thrashing_trace\": [\n    {}\n  ],\n  \"top_offenders\": [\n    {}\n  ]\n}}",
+            reason, diag.accepted_steps,
+            diag.t0_max_res, diag.t0_max_res_idx,
+            diag.jac_max, diag.jac_min, cond_warning,
+            newton_trace_str,
+            top_offenders.join(",\n    ")
         );
         file.write_all(json.as_bytes()).ok();
     }
