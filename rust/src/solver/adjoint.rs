@@ -73,5 +73,5 @@ pub fn discrete_adjoint_native<'py>(
         prev_dydot_vjp = dydot_out;
         prev_c_j = c_j;
     }
-    Ok(numpy::ndarray::Array1::from_vec(p_grad).to_pyarray_bound(py))
+    Ok(numpy::ndarray::Array1::from_vec(p_grad).to_pyarray(py))
 }

@@ -48,8 +48,8 @@ pub fn solve_ida_native<'py>(
     }
     if show_progress && total_steps > 0 { println!(); }
     
-    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
-    let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
+    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
+    let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
     
     if let Some(hist) = history {
         let h_len = hist.len();
@@ -63,12 +63,12 @@ pub fn solve_ida_native<'py>(
                 micro_ydot[i * handle.n + j] = ydot[j];
             }
         }
-        Ok((res_y, res_obs, numpy::ndarray::Array1::from_vec(micro_t).to_pyarray_bound(py), 
-            numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py), 
-            numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_ydot).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py)))
+        Ok((res_y, res_obs, numpy::ndarray::Array1::from_vec(micro_t).to_pyarray(py), 
+            numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py), 
+            numpy::ndarray::Array2::from_shape_vec((h_len, handle.n), micro_ydot).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py)))
     } else {
-        let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
-        let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
+        let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray(py);
+        let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray(py);
         Ok((res_y, res_obs, empty_t, empty_y.clone(), empty_y))
     }
 }
@@ -109,10 +109,10 @@ pub fn solve_ida_sundials<'py>(
     }
     if show_progress && total_steps > 0 { println!(); }
     
-    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
-    let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
-    let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray_bound(py);
-    let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray_bound(py);
+    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
+    let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
+    let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray(py);
+    let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray(py);
     Ok((res_y, res_obs, empty_t, empty_y.clone(), empty_y))
 }
 
@@ -324,9 +324,9 @@ pub fn solve_batch_native<'py>(
     let mut py_results = Vec::new();
     for (res_t, res_y, res_obs) in unwrapped { 
         let steps = res_t.len();
-        let t_arr = numpy::ndarray::Array1::from_vec(res_t).to_pyarray_bound(py);
-        let y_arr = numpy::ndarray::Array2::from_shape_vec((steps, y0.len()), res_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
-        let obs_arr = numpy::ndarray::Array2::from_shape_vec((steps, n_obs), res_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray_bound(py);
+        let t_arr = numpy::ndarray::Array1::from_vec(res_t).to_pyarray(py);
+        let y_arr = numpy::ndarray::Array2::from_shape_vec((steps, y0.len()), res_y).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
+        let obs_arr = numpy::ndarray::Array2::from_shape_vec((steps, n_obs), res_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
         py_results.push((t_arr, y_arr, obs_arr)); 
     }
     Ok(py_results)

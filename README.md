@@ -33,7 +33,7 @@ git clone https://github.com/osotsia/ion_flux.git
 cd ion_flux
 
 # Create a virtual environment
-python3 -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install numpy scipy pandas matplotlib jinja2
 
 # Install the package

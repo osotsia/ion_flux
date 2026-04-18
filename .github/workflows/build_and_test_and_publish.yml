@@ -101,7 +101,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout Repository
@@ -191,6 +191,9 @@ jobs:
           # Scrub broken symlinks natively (Single-liner to avoid YAML/Python indentation clashes)
           python3 -c "import os; [os.unlink(os.path.join(r, f)) for r, d, fs in os.walk('python') for f in fs + d if os.path.islink(os.path.join(r, f)) and not os.path.exists(os.path.join(r, f))]"
           
+          # Build the Source Distribution (THE SAFETY NET)
+          maturin sdist -o dist
+
           # Skip auditwheel/delocate phase to prevent OS Error 2 and Mach-O linking crashes
           maturin build --release -o dist --auditwheel skip
           maturin develop --release

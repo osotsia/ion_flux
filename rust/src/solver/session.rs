@@ -131,13 +131,13 @@ impl SolverHandle {
     }
 
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> { 
-        numpy::ndarray::Array1::from_vec(self.y.clone()).to_pyarray_bound(py) 
+        numpy::ndarray::Array1::from_vec(self.y.clone()).to_pyarray(py) 
     }
 
     pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let mut obs = vec![0.0; self.n_obs];
         self.get_observables(&mut obs)?;
-        Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray_bound(py))
+        Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray(py))
     }
     
     pub fn set_parameter(&mut self, idx: usize, val: f64) { 
@@ -168,7 +168,7 @@ impl SolverHandle {
         unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), c_j, self.jac_buffer.as_mut_ptr()) };
         let jac_2d = numpy::ndarray::Array2::from_shape_vec((self.n, self.n), self.jac_buffer.clone())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(jac_2d.to_pyarray_bound(py))
+        Ok(jac_2d.to_pyarray(py))
     }
 }
 

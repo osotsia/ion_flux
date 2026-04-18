@@ -266,13 +266,13 @@ impl SundialsHandle {
     }
     
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        numpy::ndarray::Array1::from_vec(self._y_data.clone()).to_pyarray_bound(py)
+        numpy::ndarray::Array1::from_vec(self._y_data.clone()).to_pyarray(py)
     }
 
     pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let mut obs = vec![0.0; self.n_obs];
         self.get_observables(&mut obs)?;
-        Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray_bound(py))
+        Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray(py))
     }
     
     pub fn set_parameter(&mut self, idx: usize, val: f64) {
