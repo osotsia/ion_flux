@@ -14,7 +14,7 @@ def get_toolchain_dir() -> str:
 def check_system_dependencies():
     """Ensure the user has the required build tools to compile Enzyme."""
     missing = []
-    for tool in ["git", "cmake", "ninja"]:
+    for tool in ["cmake", "ninja"]:
         if shutil.which(tool) is None:
             missing.append(tool)
     if missing:
@@ -22,7 +22,7 @@ def check_system_dependencies():
         print("Please install them via your system package manager (e.g., `brew install cmake ninja` or `sudo apt install cmake ninja-build`).")
         sys.exit(1)
 
-def install_toolchain(llvm_version: str = "19.1.0"):
+def install_toolchain(llvm_version: str = "19.1.0", enzyme_version: str = "v0.0.256"):
     """Fetches LLVM binaries and compiles Enzyme from source against them."""
     target_dir = get_toolchain_dir()
     
@@ -69,11 +69,24 @@ def install_toolchain(llvm_version: str = "19.1.0"):
         if os.path.exists(tarball_path):
             os.remove(tarball_path)
 
-    print("Cloning EnzymeAD/Enzyme repository...")
+    print(f"Downloading Enzyme {enzyme_version}...")
     enzyme_src = os.path.join(target_dir, "enzyme_src")
     if os.path.exists(enzyme_src):
         shutil.rmtree(enzyme_src)
-    subprocess.run(["git", "clone", "--depth", "1", "https://github.com/EnzymeAD/Enzyme.git", enzyme_src], check=True)
+    os.makedirs(enzyme_src, exist_ok=True)
+
+    enzyme_tarball = os.path.join(target_dir, "enzyme.tar.gz")
+    enzyme_url = f"https://github.com/EnzymeAD/Enzyme/archive/refs/tags/{enzyme_version}.tar.gz"
+
+    try:
+        urllib.request.urlretrieve(enzyme_url, enzyme_tarball)
+        subprocess.run(["tar", "-xzf", enzyme_tarball, "-C", enzyme_src, "--strip-components=1"], check=True)
+    except Exception as e:
+        print(f"Error downloading or extracting Enzyme: {e}")
+        sys.exit(1)
+    finally:
+        if os.path.exists(enzyme_tarball):
+            os.remove(enzyme_tarball)
 
     print("Configuring Enzyme build with CMake...")
     cc = os.path.join(llvm_dir, "bin", "clang")

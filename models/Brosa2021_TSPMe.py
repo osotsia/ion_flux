@@ -340,10 +340,10 @@ if __name__ == "__main__":
     ax_v = axs2[1, 0]
     ax_v.plot(cap, l1, 'k--', linewidth=2, label="Thermodynamic $U_{eq}$")
     ax_v.plot(cap, v_cell, 'k-', linewidth=2, label="Terminal $V_{cell}$")
-    ax_v.fill_between(cap, l1, l2, color="tab:red", alpha=0.5, label="Reaction ($\eta_r$)")
-    ax_v.fill_between(cap, l2, l3, color="tab:orange", alpha=0.5, label="Electrolyte Trans. ($\eta_e$)")
-    ax_v.fill_between(cap, l3, l4, color="tab:blue", alpha=0.5, label="Electrolyte Ohmic ($\Delta\Phi_e$)")
-    ax_v.fill_between(cap, l4, l5, color="tab:gray", alpha=0.5, label="Solid Ohmic ($\Delta\Phi_s$)")
+    ax_v.fill_between(cap, l1, l2, color="tab:red", alpha=0.5, label=r"Reaction ($\eta_r$)")
+    ax_v.fill_between(cap, l2, l3, color="tab:orange", alpha=0.5, label=r"Electrolyte Trans. ($\eta_e$)")
+    ax_v.fill_between(cap, l3, l4, color="tab:blue", alpha=0.5, label=r"Electrolyte Ohmic ($\Delta\Phi_e$)")
+    ax_v.fill_between(cap, l4, l5, color="tab:gray", alpha=0.5, label=r"Solid Ohmic ($\Delta\Phi_s$)")
     ax_v.set(title="Voltage Penalty Breakdown (2C)", ylabel="Voltage [V]", xlabel="Discharge Capacity [Ah]")
     ax_v.legend(loc="best", fontsize=9)
     

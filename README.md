@@ -34,7 +34,7 @@ cd ion_flux
 
 # Create a virtual environment
 python -m venv .venv && source .venv/bin/activate
-pip install numpy scipy pandas matplotlib jinja2
+pip install numpy scipy pandas matplotlib jinja2 pytest pytest-asyncio
 
 # Install the package
 pip install ion_flux
@@ -184,7 +184,7 @@ while session.time < 3600.0:
     # multiplexer Jacobian natively, without re-initializing the solver!
     session.step(dt=0.01, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
     
-    if session.triggered(model.V_cell > 4.25):
+    if session.triggered(fx.Condition(model.V_cell > 4.25)):
         print("BMS Safety Halt Triggered!")
         break
 ```

@@ -299,7 +299,7 @@ if __name__ == "__main__":
         axs[0, 1].plot(x_cell, c_e_end, label=f"{label} (End of Discharge)", color=colors_macro[label], linewidth=2)
 
     axs[0, 0].set(title="Voltage Profiles (Rep. Fig 17)", xlabel="Time [h]", ylabel="Terminal Voltage [V]", ylim=[2.4, 4.3])
-    axs[0, 1].set(title="Electrolyte Concentration Polarization", xlabel="Distance from Anode Collector $[\mu m]$", ylabel="Concentration $[mol/m^3]$")
+    axs[0, 1].set(title="Electrolyte Concentration Polarization", xlabel=r"Distance from Anode Collector $[\mu m]$", ylabel="Concentration $[mol/m^3]$")
     axs[0, 1].axvline(85.2, color='k', linestyle='--', alpha=0.5, label="Separator Interface")
     axs[0, 1].axvline(97.2, color='k', linestyle='--', alpha=0.5)
 
@@ -327,8 +327,8 @@ if __name__ == "__main__":
         c_radial_profile = c_s_p_history[idx].reshape((31, 15))[0, :] 
         axs[1, 1].plot(r_cathode, c_radial_profile, color=color, linewidth=2.5, label=label_text)
 
-    axs[1, 0].set(title="Anode Reaction Current Heterogeneity (1.5C)", xlabel="Distance from Anode Collector $[\mu m]$", ylabel="Volumetric Current, $J_n$ $[A/m^3]$")
-    axs[1, 1].set(title="Cathode Core-Shell Saturation (1.5C @ Separator)", xlabel="Particle Radius, $r$ $[\mu m]$ (0=Core)", ylabel="Solid Concentration $[mol/m^3]$")
+    axs[1, 0].set(title="Anode Reaction Current Heterogeneity (1.5C)", xlabel=r"Distance from Anode Collector $[\mu m]$", ylabel="Volumetric Current, $J_n$ $[A/m^3]$")
+    axs[1, 1].set(title="Cathode Core-Shell Saturation (1.5C @ Separator)", xlabel=r"Particle Radius, $r$ $[\mu m]$ (0=Core)", ylabel="Solid Concentration $[mol/m^3]$")
     axs[1, 1].axhline(63104.0, color='k', linestyle=':', linewidth=2.5, label="Saturation Limit ($c_{max}$)")
 
     for ax in axs.flat:

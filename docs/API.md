@@ -205,7 +205,7 @@ while session.time < 3600:
     session.step(dt=0.1, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
     
     # 4. Check for arbitrary safety aborts
-    if session.triggered(model.V_cell < 2.5):
+    if session.triggered(fx.Condition(model.V_cell < 2.5)):
         print("BMS Safety Halt Triggered")
         break
 ```

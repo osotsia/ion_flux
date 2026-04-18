@@ -41,89 +41,98 @@
 
 ### **Project Structure: `ion_flux/`**
 
+The directory structure reflects a strict "Compiler-and-Runtime" separation. Each module is designed to isolate the *intent* of the battery physics from the *execution* of the numerical linear algebra, pushing heavy computation down to LLVM and Rust.
+
 ```text
 ion_flux/
-├── .github/                        # CI/CD Workflows
+├── .github/                        
 │   └── workflows/
-│       └── build_and_test.yml      # CI pipeline for testing and Maturin wheel building
-├── docs/                           # Documentation
-│   ├── API.md                      # V2 Public API Reference Architecture
-│   ├── Ion_Flux_project_structure.md # Project architecture and data flow
-│   └── Pybamm_project_structure.md # Comparison architecture documentation
-├── examples/                       # API usage and execution showcase scripts
-│   ├── 0_simple_circuit.py         # 0D ODE equivalent circuit
-│   ├── 1_equivalent_circuit.py     # 0D DAE equivalent circuit with thermal coupling
-│   ├── 2_macro_micro_spm.py        # 1D-1D Macro-Micro cross-product mesh validation
-│   ├── 3_single_particle.py        # 1D Lumped spherical particle validation
-│   ├── 4_swelling_spm.py           # ALE moving mesh kinematics (Stefan problem)
-│   ├── 5_model_composition.py      # Submodel instantiation and AST merging
-│   └── 6_demo.py                   # Rayon SaaS batching, BMS HIL, and Adjoint optimization
-├── models/                         # Reference industry implementations
-│   └── 1_TSPMe.py                  # Exact asymptotic Thermal Single Particle Model with electrolyte
-├── python/                         # Python Source Code (Frontend, Middle-end, & Runtime)
+│       └── build_and_test.yml      # Automates C++ toolchain caching and Rust FFI wheel building (Maturin). 
+│                                   # Prevents manual setup errors and Mach-O linking crashes on release.
+├── docs/                           
+│   ├── API.md                      
+│   └── Ion_Flux_project_structure.md 
+├── examples/                       
+│   ├── 1_equivalent_circuit.py     
+│   ├── 2_macro_micro_spm.py        
+│   ├── 3_single_particle.py        
+│   ├── 4_swelling_spm.py           
+│   ├── 5_model_composition.py      
+│   └── 6_demo.py                   # Minimal runnable scripts isolating specific architectural features 
+│                                   # (ALE, Macro-Micro, Composition) without the noise of full industry parameter sets.
+│
+├── models/                         # Full-scale industry implementations. Provides rigorous, peer-reviewed                          
+│   │                               # baselines proving the engine scales to highly-coupled real-world battery physics.
+│   ├── Brosa2021_TSPMe.py          
+│   ├── Chen2020_DFN.py             
+│   ├── Marquis2019_1Plus1D_SPMe.py 
+│   └── ORegan2022_ThermalDFN.py    
+│                                   
+├── python/                         
 │   └── ion_flux/
-│       ├── __init__.py             # Public API exposition
-│       ├── metrics.py              # Differentiable loss tracking (RMSE, etc.)
-│       ├── battery/                # Pre-built domain models and parameter sets
-│       │   ├── __init__.py
-│       │   ├── models.py           # SPM, DFN PDE definitions
-│       │   └── parameters.py       # Chen2020, Marquis2019 flat parameter dicts
-│       ├── compiler/               # Middle-end: C++ Code Generation & FFI Mapping
-│       │   ├── __init__.py
-│       │   ├── invocation.py       # Subprocesses Clang + Enzyme & loads binaries
-│       │   ├── memory.py           # Maps multi-dim spatial states to flat 1D C-arrays
-│       │   ├── codegen/            # C++ Emission
-│       │   │   ├── __init__.py
-│       │   │   ├── ast_analysis.py # AST traversal and State extraction utilities
-│       │   │   ├── builder.py      # Orchestrator for IR string emission
-│       │   │   ├── templates.py    # C++ execution skeleton and Enzyme boilerplate
-│       │   │   └── topology.py     # Hierarchical grid math and spatial strides
-│       │   └── passes/             # Compilation transformations
-│       │       ├── ir.py           # Intermediate Representation node definitions
-│       │       ├── semantic.py     # Boundary condition routing and ALE triggers
-│       │       ├── spatial.py      # Discretization, FVM lowering, and dimension unrolling
-│       │       └── verification.py # Topological manifold and memory overlap verification
-│       ├── dsl/                    # The Researcher API: Mathematical AST Construction
-│       │   ├── __init__.py
-│       │   ├── core.py             # Public exports for the AST components
-│       │   ├── nodes.py            # Base AST node wrappers (Scalar, State, BinaryOp, Piecewise)
-│       │   ├── operators.py        # Topology-agnostic math operators (grad, div, dt)
-│       │   ├── pde.py              # Base PDE class, Terminal abstraction, and AST compiler
-│       │   └── spatial.py          # Domain, CompositeDomain, and Mesh generation
-│       ├── protocols/              # Experimental execution instructions
-│       │   ├── __init__.py
-│       │   └── profiles.py         # CC, CV, Rest, and continuous CurrentProfile logic
-│       └── runtime/                # The Engineer API: Execution and Scheduling
-│           ├── __init__.py
-│           ├── eis.py              # Native Frequency-Domain solver via Enzyme Jacobians
-│           ├── engine.py           # Main orchestrator (compiles, routes, and solves)
-│           ├── results.py          # Multidimensional array mapping and plotting wrappers
-│           ├── scheduler.py        # Async task queueing for multi-tenant constraints
-│           ├── session.py          # Stateful HIL/SIL memory session manager
-│           └── telemetry.py        # Hardware cache-hit heuristics and sparsity metrics
-├── rust/                           # Rust Source Code (Backend: Execution & Linear Algebra)
-│   ├── Cargo.toml                  # Rust dependencies (PyO3, rayon, libloading, faer)
-│   ├── build.rs                    # Linker script for dynamic SUNDIALS libraries
+│       ├── __init__.py             
+│       ├── cli.py                  # Automates hermetic fetching/building of LLVM 19 + Enzyme to ensure 
+│       │                           # strict ABI compatibility for Compile-Time Automatic Differentiation (AD).
+│       ├── metrics.py              # Bridges Python loss functions to Rust's VJP adjoint solvers for optimization.
+│       ├── compiler/               # --- MIDDLE-END ---
+│       │   ├── invocation.py       # Subprocesses Clang+Enzyme, statically generating exact analytical Jacobians 
+│       │   │                       # into portable `.so` binaries, bypassing Python JIT overhead.
+│       │   ├── memory.py           # Flattens hierarchical topologies (e.g., Macro x Micro) into highly 
+│       │   │                       # optimized 1D C-arrays for the native solver.
+│       │   ├── codegen/            
+│       │   │   ├── ast_analysis.py 
+│       │   │   ├── builder.py      # Orchestrates the emission of the raw C++ residual/observable skeletons.
+│       │   │   ├── templates.py    
+│       │   │   └── topology.py     # Resolves dimension strides for C-array multi-dimensional indexing.
+│       │   └── passes/             
+│       │       ├── discretization.py # Isolates coordinate geometry (Spherical/Cartesian FVM math) from AST traversal.
+│       │       ├── ir.py           
+│       │       ├── semantic.py     # Pre-processes domain boundary logic into O(1) lookup tables.
+│       │       ├── spatial.py      # Transforms abstract mathematical operators into explicit, mass-conserving 
+│       │       │                   # Finite Volume Method (FVM) stencils.
+│       │       └── verification.py # Defends against topological overlaps, memory overwrites, and missing boundaries.
+│       ├── dsl/                    # --- FRONTEND ---
+│       │   ├── core.py             
+│       │   ├── nodes.py            # Allows researchers to declare physics using operator-overloaded Python 
+│       │   │                       # AST nodes, rather than tracking flat array indices manually.
+│       │   ├── operators.py        # Provides topology-agnostic math operators (grad, div, dt).
+│       │   ├── pde.py              # Manages submodel deepcopying and namespace prefixing during composition.
+│       │   └── spatial.py          
+│       ├── protocols/              
+│       │   ├── profiles.py         # Abstracts CCCV cycling into triggers that the solver can bisect natively.
+│       │   └── __init__.py
+│       └── runtime/                # --- PYTHON EXECUTION ORCHESTRATION ---
+│           ├── eis.py              # Solves Frequency-Domain impedance analytically via Enzyme Mass Matrices.
+│           ├── engine.py           # Main interface. Compiles ASTs, routes FFI payloads, and manages multi-threading.
+│           ├── results.py          # Wraps flat C-arrays back into multidimensional Python structures for plotting.
+│           ├── scheduler.py        
+│           ├── session.py          # Keeps native memory and integration history "hot" for micro-stepping HIL.
+│           └── telemetry.py        
+├── rust/                           # --- NATIVE BACKEND ---
+│   ├── Cargo.toml                  
+│   ├── build.rs                    # Dynamically links SUNDIALS for the C-ABI oracle wrapper.
 │   └── src/
-│       ├── lib.rs                  # PyO3 extension module entry point
-│       └── solver/                 # Highly modular numerical math engine
-│           ├── adjoint.rs          # Reverse-time continuous sensitivity tracking via VJPs
-│           ├── bindings.rs         # PyO3 FFI definitions and Rayon parallel batching
-│           ├── integrator.rs       # Implicit VSVO BDF stepper and truncation error logic
-│           ├── linalg.rs           # Sparse LU factorization (faer) and Matrix-Free GMRES
-│           ├── mod.rs              # C-ABI signatures, Config, and Diagnostics
-│           ├── newton.rs           # Inexact Newton-Raphson root finding and constraint checks
-│           ├── session.rs          # FFI pointer management & state lifecycle
-│           └── sundials.rs         # Direct C-ABI wrapper for the SUNDIALS IDAS library
-├── tests/                          # Automated Test Suite
-│   ├── conftest.py                 # Shared mock PDEs
-│   ├── 01_frontend_dsl/            # Tests semantic AST capture and component isolation
-│   ├── 02_middle_end_codegen/      # Tests C++ spatial lowering, Piecewise logic, and topology
-│   ├── 03_backend_compilation/     # Tests Clang invocation, CPR coloring, and Enzyme gradients
-│   ├── 04_runtime_execution/       # Tests integrators, ALE, EIS, and stateful sessions
-│   ├── 05_e2e_integration/         # Tests full battery models against the Sundials oracle
-│   ├── 06_benchmarks/              # Performance tracking
-│   └── bugfixes/                   # Strict mathematical oracles preventing regression
-├── pyproject.toml                  # Maturin build configuration
-└── README.md                       # Core concepts and Quick Start guide
+│       ├── lib.rs                  
+│       └── solver/                 
+│           ├── adjoint.rs          # Tracks continuous sensitivities backwards through time, providing O(1) 
+│           │                       # memory exact gradients for stiff trajectories.
+│           ├── bindings.rs         # Safely maps Python Numpy arrays to Rust/C pointers. Uses Rayon to 
+│           │                       # distribute concurrent battery models across all vCPUs, bypassing the GIL.
+│           ├── integrator.rs       # VSVO BDF Stepper. Handles extreme stiffness by dynamically adapting step sizes.
+│           ├── linalg.rs           # Dispatches Faer (Sparse LU) or GMRES based on the battery mesh complexity.
+│           ├── newton.rs           # Resolves non-linear algebraic roots and enforces state constraints.
+│           ├── session.rs          
+│           └── sundials.rs         # Battle-tested industry oracle (IDAS) to cross-validate the custom solver.
+├── tests/                          # --- ORACLE-DRIVEN TEST SUITE ---
+│   ├── conftest.py                 
+│   ├── 01_frontend_dsl/            
+│   ├── 02_middle_end_codegen/      
+│   ├── 03_backend_compilation/     
+│   ├── 04_runtime_execution/       
+│   ├── 05_e2e_integration/         
+│   ├── 06_benchmarks/              
+│   └── bugfixes/                   # Explicit Method of Manufactured Solutions (MMS) probes designed to 
+│                                   # isolate and prove the absence of specific historical compiler/solver failures.
+├── pyproject.toml                  # Configures Maturin to build the mixed Python/Rust/C++ ecosystem securely.
+└── README.md
 ```

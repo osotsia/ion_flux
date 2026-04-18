@@ -125,31 +125,22 @@ class NativeCompiler:
             self.cache_dir = cache_dir
             os.makedirs(self.cache_dir, exist_ok=True)
         else:
-            # Use mkdtemp to prevent predictable directory vulnerabilities (Local Privilege Escalation)
             self.cache_dir = tempfile.mkdtemp(prefix="ion_flux_jit_")
             
         self.bundled_toolchain_dir = os.path.expanduser("~/.cache/ion_flux/toolchain")
         
-        # Determine both bundled and system paths for resilient fallback
-        self.bundled_compiler = self._find_bundled_compiler()
-        self.system_compiler = self._find_system_compiler()
-        
-        self.bundled_plugin = self._find_bundled_plugin()
-        self.system_plugin = self._find_system_plugin()
-        
-        # Start with bundled if available, fallback to system
-        self.compiler_cmd = self.bundled_compiler if self.bundled_compiler else self.system_compiler
-        self.enzyme_plugin = self.bundled_plugin if self.bundled_plugin else self.system_plugin
+        self.compiler_cmd = self._find_bundled_compiler()
+        self.enzyme_plugin = self._find_bundled_plugin()
         
         if not self.compiler_cmd:
-            logging.warning(
-                "No compatible C++ compiler found. Native execution will fail. "
-                "Please run `ion-flux install-toolchain` to fetch the required LLVM/Enzyme binaries."
+            raise RuntimeError(
+                "Hermetic C++ toolchain not found. Native execution requires the bundled LLVM/Enzyme toolchain. "
+                "Execute `ion-flux install-toolchain` in your terminal to install it."
             )
-        elif not self.enzyme_plugin:
-            logging.warning(
-                "Enzyme plugin not found. Exact analytical Jacobians will be disabled. "
-                "Please run `ion-flux install-toolchain` to fetch the required Enzyme binaries."
+        if not self.enzyme_plugin:
+            raise RuntimeError(
+                "Enzyme AD plugin not found. Exact analytical Jacobians require the bundled plugin. "
+                "Execute `ion-flux install-toolchain` in your terminal to install it."
             )
 
     def _find_bundled_compiler(self) -> str:
@@ -216,11 +207,8 @@ class NativeCompiler:
                 elif sys.platform == "linux":
                     cmd.extend(["-static-libgcc", "-static-libstdc++", "-Wl,-Bstatic", "-lgomp", "-Wl,-Bdynamic"])
             
-            if plugin:
-                cmd.insert(1, f"-fplugin={plugin}")
-                cmd.insert(2, "-DENZYME_ACTIVE")
-            else:
-                logging.warning("Enzyme plugin not found. Jacobian evaluation will return zeros.")
+            cmd.insert(1, f"-fplugin={plugin}")
+            cmd.insert(2, "-DENZYME_ACTIVE")
             
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -230,20 +218,7 @@ class NativeCompiler:
                 self.last_error = f"cmd: {' '.join(cmd)}\nstderr:\n{e.stderr}"
                 return False
 
-        # First attempt: Bundled toolchain (if available)
-        success = False
-        if self.bundled_compiler:
-            success = attempt_compile(self.bundled_compiler, self.bundled_plugin)
-            
-        # Second attempt: Graceful fallback to System toolchain if the bundled one is incomplete/broken
-        if not success and self.system_compiler:
-            if self.bundled_compiler:
-                logger.info("Bundled compiler failed or lacked headers. Gracefully falling back to system compiler.")
-            success = attempt_compile(self.system_compiler, self.system_plugin)
-            if success:
-                # Update active compiler to system for future compilation calls to avoid repeated failures
-                self.compiler_cmd = self.system_compiler
-                self.enzyme_plugin = self.system_plugin
+        success = attempt_compile(self.compiler_cmd, self.enzyme_plugin)
 
         # Cleanup
         if os.path.exists(source_path):
@@ -252,6 +227,6 @@ class NativeCompiler:
             os.remove(tmp_lib_path)
 
         if not success:
-            raise RuntimeError(f"Clang compilation failed.\n{getattr(self, 'last_error', 'Unknown error')}")
+            raise RuntimeError(f"Hermetic compilation failed.\n{getattr(self, 'last_error', 'Unknown error')}")
             
         return NativeRuntime(lib_path, n_states)
