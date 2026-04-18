@@ -1,8 +1,3 @@
-"""
-Pass 1: Semantic Resolver
-Separates "What the math means" from "How it is executed".
-Resolves Neumann boundary tags and ALE dynamic domains into a clean, queryable context.
-"""
 from typing import Dict, Any, Optional
 
 class SemanticContext:
@@ -10,6 +5,7 @@ class SemanticContext:
         self.payload = ast_payload
         self.neumann_bcs: Dict[str, Dict[str, Any]] = {}
         self.dynamic_domains: Dict[str, Dict[str, Any]] = {}
+        self.dirichlet_bcs: Dict[str, Dict[str, Any]] = {}
         
         self._resolve_boundaries()
 
@@ -25,8 +21,9 @@ class SemanticContext:
             elif bc["type"] == "moving_domain":
                 d_name = bc["domain"]
                 for side, rhs_ast in bc["bcs"].items():
-                    # We store the math driving the boundary movement (Stefan problems)
                     self.dynamic_domains[d_name] = {"side": side, "rhs": rhs_ast}
+            elif bc["type"] == "dirichlet":
+                self.dirichlet_bcs[bc["state"]] = bc["bcs"]
 
     def get_neumann_bc(self, node_id: Optional[str], face: str) -> Optional[Dict[str, Any]]:
         """Returns the AST dict and domain info of the boundary condition if one applies to this face."""
@@ -35,3 +32,6 @@ class SemanticContext:
         if bcs and face in bcs:
             return bcs[face]
         return None
+        
+    def get_dirichlet_bc(self, state_name: str) -> Optional[Dict[str, Any]]:
+        return self.dirichlet_bcs.get(state_name)

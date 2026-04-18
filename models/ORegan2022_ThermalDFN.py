@@ -34,17 +34,15 @@ class MeshConfig:
     R_n = 5.86e-6
     R_p = 5.22e-6
 
-    multiplier = 2
-
     # Macro-Scale Resolutions (Number of spatial nodes)
-    res_n = 21*multiplier
-    res_s = 3*multiplier
-    res_p = 19*multiplier
+    res_n = 42
+    res_s = 6
+    res_p = 38
     res_cell = res_n + res_s + res_p
 
     # Micro-Scale Resolutions (Radial nodes inside each particle)
-    res_r_n = 10*multiplier
-    res_r_p = 10*multiplier
+    res_r_n = 20
+    res_r_p = 20
 
 
 class ThermalDFN(fx.PDE):

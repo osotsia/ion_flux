@@ -34,7 +34,7 @@ cd ion_flux
 
 # Create a virtual environment
 python3 -m venv .venv && source .venv/bin/activate
-pip install numpy scipy pandas matplotlib
+pip install numpy scipy pandas matplotlib jinja2
 
 # Install the package
 pip install ion_flux

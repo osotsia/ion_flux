@@ -176,7 +176,7 @@ jobs:
       - name: Install Python Build Tools & Dependencies
         run: |
           pip install --upgrade pip
-          pip install maturin auditwheel delocate pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib
+          pip install maturin auditwheel delocate pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib jinja2
 
       - name: Run Rust Core Tests
         run: |

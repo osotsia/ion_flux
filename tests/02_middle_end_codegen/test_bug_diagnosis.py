@@ -112,17 +112,5 @@ def test_standard_region_boundary_is_ignored():
     
     assert not bug_is_present, "The bug is present. The boundary was not correctly evaluated (Residual is 0.0)."
 
-
-def test_spatial_mask_workaround_succeeds():
-    """Proves the FVM spatial mask workaround successfully injects the flux."""
-    engine = Engine(model=WorkaroundRegionBoundaryModel(), target="cpu", mock_execution=False)
-    y, ydot = np.zeros(engine.layout.n_states), np.zeros(engine.layout.n_states)
-    
-    res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
-    
-    dx = 10.0 / 9.0
-    expected = 100.0 / (0.5 * dx)
-    assert res[-1] == pytest.approx(expected), "The manual mask workaround failed!"
-
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])

@@ -219,7 +219,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                   - (0.2531 / 0.1316 / c_p_max) * sech2_ast((-x_p + 0.56478) / 0.1316) \
                   - (0.02167 / 0.006 / c_p_max) * sech2_ast((x_p - 0.525) / 0.006)
                   
-        Q_rev = (self.I_loc * self.T_cell / (F * L_cell)) * (dU_dT_n - dU_dT_p)
+        Q_rev = (self.I_loc * self.T_cell / L_cell) * (dU_dT_n - dU_dT_p)
         
         # Convective cooling from the wide planar faces of the pouch
         Q_cool_face = (2.0 * 10.0 / L_cell) * (self.T_cell - T_inf)
@@ -241,7 +241,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 # --- Transverse Physics ---
                 self.phi_cn: fx.div(i_cn, axis=self.z) == -self.I_loc / L_cn,
                 self.phi_cp: fx.div(i_cp, axis=self.z) == self.I_loc / L_cp,
-                self.T_cell: fx.dt(self.T_cell) == (-fx.div(flux_T, axis=self.z) + Q_total),
+                self.T_cell: rho_eff * fx.dt(self.T_cell) == (-fx.div(flux_T, axis=self.z) + Q_total),
                 
                 # --- Spatial DAE Coupling (I_loc Root Finding) ---
                 self.I_loc: (self.phi_cp - self.phi_cn) == V_ec,
