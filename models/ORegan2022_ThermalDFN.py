@@ -356,11 +356,6 @@ def run_parallel_processes():
 if __name__ == "__main__":
     results = run_parallel_processes()
 
-    # =========================================================================
-    # Visualizations & Post-Processing Analysis
-    # =========================================================================
-    
-    # Identify indices for 10%, 50%, and 90% Depth of Discharge for the 2C rate
     res_2c = results["2C"]
     t_2c = res_2c["Time [s]"].data
     mask_discharge = res_2c["i_app"].data > 0.1
@@ -373,94 +368,73 @@ if __name__ == "__main__":
     dod_labels = ["10% DoD", "50% DoD", "90% DoD"]
     colors = ["tab:blue", "tab:orange", "tab:red"]
 
-
     # =========================================================================
-    # --- FIGURE 1: Original Terminal Replication ---
+    # FIGURE 1: Macro Validation (Voltage & Temperature)
     # =========================================================================
-
-    fig1, (ax_v, ax_t) = plt.subplots(1, 2, figsize=(14, 6))
+    fig1, axs1 = plt.subplots(1, 2, figsize=(14, 5))
+    fig1.suptitle("O'Regan et al. (2022) - Thermal DFN: Macro Validation (LG M50)", fontsize=14, fontweight="bold")
+    
     for name, res in results.items():
         t_sec = res["Time [s]"].data
-        v_cell = res["V_cell"].data
-        t_cel = res["T_cell"].data - 273.15
         c = {"0.5C": "tab:blue", "1C": "tab:orange", "2C": "tab:green"}[name]
         
-        ax_v.plot(t_sec, v_cell, label=name, color=c, linewidth=2)
-        ax_t.plot(t_sec, t_cel, label=name, color=c, linewidth=2)
+        axs1[0].plot(t_sec, res["V_cell"].data, label=name, color=c, linewidth=2)
+        axs1[1].plot(t_sec, res["T_cell"].data - 273.15, label=name, color=c, linewidth=2)
 
-    ax_v.set(title="LG M50 Voltage Profiles", xlabel="Time (s)", ylabel="Voltage (V)")
-    ax_t.set(title="LG M50 Temperature Profiles", xlabel="Time (s)", ylabel="Temperature (°C)")
-    ax_v.legend(); ax_t.legend(); ax_v.grid(True, alpha=0.5); ax_t.grid(True, alpha=0.5)
-
+    axs1[0].set(title="Terminal Voltage Profiles", xlabel="Time [s]", ylabel="Voltage [V]")
+    axs1[1].set(title="Lumped Temperature Profiles", xlabel="Time [s]", ylabel="Temperature [°C]")
+    for ax in axs1:
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.legend()
+    fig1.tight_layout()
 
     # =========================================================================
-    # --- FIGURE 2: Electrolyte Polarization (Salt Starvation) ---
+    # FIGURE 2: Internal Spatial Diagnostics (2C Discharge)
     # =========================================================================
+    fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10))
+    fig2.suptitle("O'Regan et al. (2022) - Thermal DFN: Spatial Diagnostics at 2C", fontsize=14, fontweight="bold")
 
-    fig2, ax2 = plt.subplots(figsize=(8, 5))
-    
-    # Extract dynamic grid variables from MeshConfig to ensure future-proof plotting
     x_cell = np.linspace(0, MeshConfig.L_cell * 1e6, MeshConfig.res_cell)
-    c_e_history = res_2c["c_e"].data
+    x_anode = np.linspace(0, MeshConfig.L_n * 1e6, MeshConfig.res_n)
+    x_cathode = np.linspace((MeshConfig.L_n + MeshConfig.L_s) * 1e6, MeshConfig.L_cell * 1e6, MeshConfig.res_p)
+    r_p_arr = np.linspace(0, MeshConfig.R_p * 1e6, MeshConfig.res_r_p)
 
-    for idx, label, color in zip(dod_indices, dod_labels, colors):
-        ax2.plot(x_cell, c_e_history[idx], color=color, linewidth=2, label=label)
-        
     sep_start = MeshConfig.L_n * 1e6
     sep_end = (MeshConfig.L_n + MeshConfig.L_s) * 1e6
-    ax2.axvline(sep_start, color='k', linestyle='--', alpha=0.5, label="Separator Interfaces")
-    ax2.axvline(sep_end, color='k', linestyle='--', alpha=0.5)
-    
-    ax2.set(title="Electrolyte Starvation at 2C", xlabel="Distance from Anode Collector (µm)", ylabel="Concentration (mol/m³)")
-    ax2.legend(); ax2.grid(True, alpha=0.5)
-    ax2.annotate("Deep depletion near Cathode interface\nincreases localized ohmic resistance.", 
-                 xy=(100, 300), xytext=(100, 600), arrowprops=dict(facecolor='black', width=1, headwidth=5))
 
-
-    # =========================================================================
-    # --- FIGURE 3: Solid-Phase Core-Shell Starvation (Cathode) ---
-    # =========================================================================
-
-    fig3, ax3 = plt.subplots(figsize=(8, 5))
-    
-    # The cathode has `MeshConfig.res_p` macro nodes. The node touching the separator is index 0.
-    # Micro grid resolution is `MeshConfig.res_r_p`. Reshape to (res_p, res_r_p).
+    c_e_history = res_2c["c_e"].data
     c_s_p_history = res_2c["c_s_p"].data
-    r_p_arr = np.linspace(0, MeshConfig.R_p * 1e6, MeshConfig.res_r_p)
-    
-    for idx, label, color in zip(dod_indices, dod_labels, colors):
-        # We un-flatten the memory layout natively
-        c_s_p_2d = c_s_p_history[idx].reshape((MeshConfig.res_p, MeshConfig.res_r_p))
-        c_radial = c_s_p_2d[0, :] # Extract the particle precisely at the separator interface
-        ax3.plot(r_p_arr, c_radial, color=color, linewidth=2, label=label)
-
-    c_max_p = 51765.0
-    ax3.axhline(c_max_p, color='k', linestyle=':', label="Saturation Limit ($c_{max}$)")
-    ax3.set(title="Cathode Particle Saturation (Separator Interface, 2C)", xlabel="Radial Distance (µm)", ylabel="Concentration (mol/m³)")
-    ax3.legend(); ax3.grid(True, alpha=0.5)
-    ax3.annotate("Severe diffusion bottleneck forces\nsurface to saturate prematurely.", 
-                 xy=(5.0, 50000), xytext=(2.0, 45000), arrowprops=dict(facecolor='black', width=1, headwidth=5))
-
-
-    # =========================================================================
-    # --- FIGURE 4: Spatiotemporal Reaction Heterogeneity ---
-    # =========================================================================
-
-    fig4, (ax4a, ax4b) = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
-    
-    x_anode = np.linspace(0, MeshConfig.L_n * 1e6, MeshConfig.res_n)
-    x_cathode = np.linspace(sep_end, MeshConfig.L_cell * 1e6, MeshConfig.res_p)
-    
     j_n_history = res_2c["J_n_obs"].data
     j_p_history = res_2c["J_p_obs"].data
-    
-    for idx, label, color in zip(dod_indices, dod_labels, colors):
-        ax4a.plot(x_anode, j_n_history[idx] / 1e6, color=color, linewidth=2, label=label)
-        ax4b.plot(x_cathode, abs(j_p_history[idx]) / 1e6, color=color, linewidth=2, label=label)
 
-    ax4a.set(title="Anode Volumetric Current", xlabel="Distance (µm)", ylabel="Reaction Current (A/cm³)")
-    ax4b.set(title="Cathode Volumetric Current (Absolute)", xlabel="Distance (µm)")
-    ax4a.legend(); ax4a.grid(True, alpha=0.5); ax4b.grid(True, alpha=0.5)
+    for idx, label, color in zip(dod_indices, dod_labels, colors):
+        # [0, 0] Electrolyte Polarization
+        axs2[0, 0].plot(x_cell, c_e_history[idx], color=color, linewidth=2, label=label)
+        
+        # [0, 1] Cathode Particle Saturation
+        c_radial = c_s_p_history[idx].reshape((MeshConfig.res_p, MeshConfig.res_r_p))[0, :]
+        axs2[0, 1].plot(r_p_arr, c_radial, color=color, linewidth=2, label=label)
+
+        # [1, 0] Anode Volumetric Current
+        axs2[1, 0].plot(x_anode, j_n_history[idx] / 1e6, color=color, linewidth=2, label=label)
+        
+        # [1, 1] Cathode Volumetric Current (Absolute)
+        axs2[1, 1].plot(x_cathode, abs(j_p_history[idx]) / 1e6, color=color, linewidth=2, label=label)
+
+    # Styling Row 0
+    axs2[0, 0].set(title="Electrolyte Starvation", xlabel="Distance from Anode [µm]", ylabel="Concentration [mol/m³]")
+    axs2[0, 0].axvline(sep_start, color='k', linestyle='--', alpha=0.5, label="Separator")
+    axs2[0, 0].axvline(sep_end, color='k', linestyle='--', alpha=0.5)
+    axs2[0, 1].set(title="Cathode Particle Saturation (Separator Interface)", xlabel="Radial Distance [µm]", ylabel="Concentration [mol/m³]")
+    axs2[0, 1].axhline(51765.0, color='k', linestyle=':', label="Saturation Limit ($c_{max}$)")
     
-    plt.tight_layout()
+    # Styling Row 1
+    axs2[1, 0].set(title="Anode Volumetric Current", xlabel="Distance [µm]", ylabel="Reaction Current [A/cm³]")
+    axs2[1, 1].set(title="Cathode Volumetric Current (Absolute)", xlabel="Distance [µm]", ylabel="Reaction Current [A/cm³]")
+
+    for ax in axs2.flat:
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.legend(loc="best", fontsize=9)
+
+    fig2.tight_layout()
     plt.show()

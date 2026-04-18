@@ -282,14 +282,10 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         }
 
 if __name__ == "__main__":
-    
     print("Compiling 1+1D Thermally-Coupled SPMe to Native Machine Code...")
-    # Utilizing the native Faer Sparse LU solver optimized for 1+1D implicit matrix structures
     model = Marquis1Plus1D_SPMe()
     engine = fx.Engine(model=model, target="cpu", solver_backend="native")
     
-    # Executing the exact 3C High-Current Discharge Protocol mentioned in Section 4.6
-    # 3C for a nominal 5Ah cell is ~15 Amps.
     protocol = Sequence([
         CC(rate=2.043, until=model.V_term <= 3.0, time=3600),
         Rest(time=600)
@@ -297,83 +293,55 @@ if __name__ == "__main__":
     
     print("\nExecuting 3C Discharge Protocol with Tab Cooling...")
     res = engine.solve(protocol=protocol)
-    
-    print(f"Simulation Complete. Final Terminal Voltage: {res['V_term'].data[-1]:.3f} V")
 
     # =========================================================================
-    # Advanced Diagnostics & Figure Replication
+    # FIGURE 1: Full Cell 1+1D Diagnostics
     # =========================================================================
-    t_mask = res["I_app"].data > 1.0 # Isolate the active discharge phase
+    t_mask = res["I_app"].data > 1.0 
     t_eval = res["Time [s]"].data[t_mask]
     capacity_ah = (t_eval * 2.043) / 3600.0
-    
-    z_coords = np.linspace(0, 137, 15)   # z in mm
-    x_coords = np.linspace(0, 225, 25)   # x in um
+    z_coords = np.linspace(0, 137, 15)
+    x_coords = np.linspace(0, 225, 25)
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Marquis et al. (2020) - 1+1D SPMe: Transverse Tab Diagnostics (3C)", fontsize=14, fontweight="bold")
 
-    # --- FIGURE A: Terminal Voltage & Cell Temperature (Replicating Fig 2a & 6a) ---
+    # [0, 0] Terminal Voltage & Cell Temperature (Rep Fig 2a/6a)
     ax_v = axs[0, 0]
     ax_t = ax_v.twinx()
-    
     ax_v.plot(capacity_ah, res["V_term"].data[t_mask], 'tab:blue', linewidth=2, label="Terminal Voltage")
-    
-    # Extract the average temperature across the z-axis
     T_avg = np.mean(res["T_cell"].data[t_mask], axis=1) - 273.15
     ax_t.plot(capacity_ah, T_avg, 'tab:red', linewidth=2, label="Avg Temperature")
-    
-    ax_v.set_xlabel("Discharge Capacity [Ah]")
-    ax_v.set_ylabel("Voltage [V]", color='tab:blue')
+    ax_v.set(title="Cell Output Dynamics (Rep. Fig 2a/6a)", xlabel="Discharge Capacity [Ah]", ylabel="Voltage [V]")
     ax_t.set_ylabel("Temperature [°C]", color='tab:red')
-    ax_v.set_title("Cell Output Dynamics (3C)")
     ax_v.grid(True, linestyle="--", alpha=0.6)
 
-    # --- FIGURE B: Through-Cell Current Density Spatial Mapping (Replicating Fig 4) ---
+    # [0, 1] Through-Cell Current Density (Rep Fig 4)
     ax_i = axs[0, 1]
     I_loc_history = res["I_loc"].data[t_mask]
-    
-    # Plot the current distribution across the z-axis at 10%, 50%, and 90% Depth of Discharge
     for pct in [0.1, 0.5, 0.9]:
         idx = int(len(I_loc_history) * pct)
         ax_i.plot(z_coords, I_loc_history[idx], linewidth=2, label=f"{int(pct*100)}% DoD")
-        
-    ax_i.set_xlabel("Distance from Tab, z [mm]")
-    ax_i.set_ylabel(r"Local Current Density, $\mathcal{I}$ [A/m$^2$]")
-    ax_i.set_title("Transverse Current Distribution")
-    ax_i.legend()
-    ax_i.grid(True, linestyle="--", alpha=0.6)
+    ax_i.set(title="Transverse Current Distribution (Rep. Fig 4)", xlabel="Distance from Tab, z [mm]", ylabel=r"Local Current Density, $\mathcal{I}$ [A/m$^2$]")
+    ax_i.legend(); ax_i.grid(True, linestyle="--", alpha=0.6)
 
-    # --- FIGURE C: Electrolyte Concentration Pseudo-3D Mapping ---
+    # [1, 0] Electrolyte Concentration Variance
     ax_ce = axs[1, 0]
-    
-    # Reshape the flattened 2D C-array into its hierarchical dimensions (z_res x x_res)
     c_e_final = res["c_e"].data[t_mask][-1].reshape((15, 25))
-    
-    # Plot the through-cell electrolyte concentration near the tab (z=0) vs the bottom (z=137)
     ax_ce.plot(x_coords, c_e_final[0, :], 'tab:purple', linewidth=2, label="Top (Near Tab)")
     ax_ce.plot(x_coords, c_e_final[-1, :], 'tab:orange', linewidth=2, label="Bottom (Away from Tab)")
-    
     ax_ce.axvline(100, color='k', linestyle=':', alpha=0.5, label="Separator Interfaces")
     ax_ce.axvline(125, color='k', linestyle=':', alpha=0.5)
-    
-    ax_ce.set_xlabel("Through-Cell Distance, x [um]")
-    ax_ce.set_ylabel(r"Electrolyte Conc. [mol/m$^3$]")
-    ax_ce.set_title("Electrolyte Polarization Variance along Transverse Z-Axis")
-    ax_ce.legend()
-    ax_ce.grid(True, linestyle="--", alpha=0.6)
+    ax_ce.set(title="Electrolyte Polarization Variance (Transverse Z-Axis)", xlabel="Through-Cell Distance, x [um]", ylabel=r"Electrolyte Conc. [mol/m$^3$]")
+    ax_ce.legend(); ax_ce.grid(True, linestyle="--", alpha=0.6)
 
-    # --- FIGURE D: Transverse Potential Drop (Replicating Fig 5) ---
+    # [1, 1] Transverse Potential Drop (Rep Fig 5)
     ax_phi = axs[1, 1]
-    
-    # Plot the negative current collector potential at 50% DoD
     idx_50 = int(len(t_eval) * 0.5)
     phi_cn_50 = res["phi_cn"].data[t_mask][idx_50] * 1000.0 # Convert to mV
-    
     ax_phi.plot(z_coords, phi_cn_50, 'k-', linewidth=2)
-    ax_phi.set_xlabel("Distance from Tab, z [mm]")
-    ax_phi.set_ylabel(r"Negative Current Collector Potential, $\phi_{s,cn}$ [mV]")
-    ax_phi.set_title("Ohmic Drop in Transverse Current Collectors")
+    ax_phi.set(title="Ohmic Drop in Negative Current Collector (Rep. Fig 5)", xlabel="Distance from Tab, z [mm]", ylabel=r"Potential, $\phi_{s,cn}$ [mV]")
     ax_phi.grid(True, linestyle="--", alpha=0.6)
 
-    plt.tight_layout()
+    fig.tight_layout()
     plt.show()

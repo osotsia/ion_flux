@@ -253,163 +253,110 @@ if __name__ == "__main__":
     engine = fx.Engine(model=ExactTSPMe(), target="cpu:serial", solver_backend="native")
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
-    tuned_Dn = {"0.5C": 0.9e-14, "1C": 2.0e-14, "2C": 6.0e-14}  # <-- ADDED (from Table 4)
+    tuned_Dn = {"0.5C": 0.9e-14, "1C": 2.0e-14, "2C": 6.0e-14}
     results = {}
     
     for name, current in rates.items():
         print(f"Simulating {name} discharge + 2-hour rest...")
-        # Discharge to 2.5V, followed by 7200s (2-hour) relaxation
         protocol = Sequence([
             CC(rate=current, until=engine.model.V_cell <= 2.5, time=15000),
             Rest(time=7200)
         ])
-        
-        # <-- UPDATED: Inject the tuned parameter
         results[name] = engine.solve(protocol=protocol, parameters={"Ds_n": tuned_Dn[name]})
 
-
     # =========================================================================
-    # FIGURE 1: Replication of Paper Figure 5
-    # (Voltage and Temperature vs Capacity during Discharge Phase)
+    # FIGURE 1: Macro Validation (Voltage & Temperature)
     # =========================================================================
-    fig1, axs1 = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig1, axs1 = plt.subplots(2, 2, figsize=(14, 10))
+    fig1.suptitle("Brosa Planella et al. (2021) - TSPMe: Macro Validation (LG M50)", fontsize=14, fontweight="bold")
     colors = {"0.5C": "tab:blue", "1C": "tab:orange", "2C": "tab:green"}
     
     for name, res in results.items():
-        # Strictly mask the active CC discharge phase (ignoring the Rest step)
+        # Mask strictly to the active discharge phase for Capacity plots
         discharge_mask = res["i_app"].data > 0.1
         t_discharge = res["Time [s]"].data[discharge_mask]
-        
-        # Calculate capacity mapped strictly to the discharge segment
         capacity_ah = (t_discharge * rates[name]) / 3600.0
-        v_cell = res["V_cell"].data[discharge_mask]
-        t_celsius = res["T_cell"].data[discharge_mask] - 273.15
+        v_cell_dis = res["V_cell"].data[discharge_mask]
+        t_cel_dis = res["T_cell"].data[discharge_mask] - 273.15
         
-        axs1[0].plot(capacity_ah, v_cell, label=f"{name}", color=colors[name], linewidth=2)
-        axs1[1].plot(capacity_ah, t_celsius, label=f"{name}", color=colors[name], linewidth=2)
+        # Full protocol time arrays
+        t_full = res["Time [s]"].data
+        v_cell_full = res["V_cell"].data
+        t_cel_full = res["T_cell"].data - 273.15
+        
+        # Replicating Fig 5 (Discharge vs Capacity)
+        axs1[0, 0].plot(capacity_ah, v_cell_dis, label=name, color=colors[name], linewidth=2)
+        axs1[0, 1].plot(capacity_ah, t_cel_dis, label=name, color=colors[name], linewidth=2)
+        
+        # Replicating Fig 8 (Full Protocol vs Time)
+        axs1[1, 0].plot(t_full, v_cell_full, label=name, color=colors[name], linewidth=2, linestyle="--")
+        axs1[1, 1].plot(t_full, t_cel_full, label=name, color=colors[name], linewidth=2, linestyle="--")
 
-    axs1[0].set_title("TSPMe Validation: LG M50 at 25°C (Replicating Fig. 5)", fontsize=14, fontweight="bold")
-    axs1[0].set_ylabel("Terminal Voltage [V]", fontsize=12)
-    axs1[0].grid(True, linestyle="--", alpha=0.7)
-    axs1[0].legend(fontsize=11)
+    axs1[0, 0].set(title="Voltage vs Capacity (Rep. Fig 5a)", ylabel="Terminal Voltage [V]", xlabel="Discharge Capacity [Ah]")
+    axs1[0, 1].set(title="Temperature vs Capacity (Rep. Fig 5b)", ylabel="Cell Temp [°C]", xlabel="Discharge Capacity [Ah]")
+    axs1[1, 0].set(title="Voltage vs Time (Rep. Fig 8a)", ylabel="Terminal Voltage [V]", xlabel="Time [s]")
+    axs1[1, 1].set(title="Temperature vs Time (Rep. Fig 8b)", ylabel="Cell Temp [°C]", xlabel="Time [s]")
     
-    axs1[1].set_ylabel("Cell Temperature [°C]", fontsize=12)
-    axs1[1].set_xlabel("Discharge Capacity [Ah]", fontsize=12)
-    axs1[1].grid(True, linestyle="--", alpha=0.7)
-    
-    plt.tight_layout()
-
+    for ax in axs1.flat:
+        ax.grid(True, linestyle="--", alpha=0.7)
+        ax.legend()
+        
+    fig1.tight_layout()
 
     # =========================================================================
-    # FIGURE 2: Replication of Paper Figure 8 Layout
-    # (Voltage and Cell Temperature vs Time over Full Discharge + Rest)
+    # FIGURE 2: Thermodynamics & Internal Diagnostics
     # =========================================================================
-    fig2, axs2 = plt.subplots(3, 2, figsize=(12, 10))
+    fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10))
+    fig2.suptitle("Brosa Planella et al. (2021) - TSPMe: Thermodynamics & Internal Diagnostics", fontsize=14, fontweight="bold")
     
-    for i, (name, current) in enumerate(rates.items()):
-        res = results[name]
-        t_seconds = res["Time [s]"].data
-        v_cell = res["V_cell"].data
-        t_celsius = res["T_cell"].data - 273.15
-        
-        # --- Left Column: Voltage ---
-        axs2[i, 0].plot(t_seconds, v_cell, label="TSPMe", color="black", linewidth=2)
-        axs2[i, 0].set_ylabel("Voltage (V)", fontsize=12)
-        axs2[i, 0].grid(True, linestyle="--", alpha=0.7)
-        axs2[i, 0].text(-0.15, 0.5, name, transform=axs2[i, 0].transAxes, 
-                       fontsize=14, fontweight="bold", va="center")
-        
-        # --- Right Column: Temperature ---
-        axs2[i, 1].plot(t_seconds, t_celsius, label="TSPMe", color="black", linewidth=2)
-        axs2[i, 1].set_ylabel("Cell temperature (°C)", fontsize=12)
-        axs2[i, 1].grid(True, linestyle="--", alpha=0.7)
-        
-        if i == 2:
-            axs2[i, 0].set_xlabel("Time (s)", fontsize=12)
-            axs2[i, 1].set_xlabel("Time (s)", fontsize=12)
+    # --- Top Row: Open-Circuit Potentials (Rep. Fig D.1) ---
+    stoich_p = np.linspace(0.25, 1.0, 100)
+    u_p = (-0.8090 * stoich_p + 4.4875 
+           - 0.0428 * np.tanh(18.5138 * (stoich_p - 0.5542)) 
+           - 17.7326 * np.tanh(15.7890 * (stoich_p - 0.3117)) 
+           + 17.5842 * np.tanh(15.9308 * (stoich_p - 0.3120)))
+           
+    stoich_n = np.linspace(0.0, 1.0, 100)
+    u_n = (1.9793 * np.exp(-39.3631 * stoich_n) + 0.2482 
+           - 0.0909 * np.tanh(29.8538 * (stoich_n - 0.1234)) 
+           - 0.04478 * np.tanh(14.9159 * (stoich_n - 0.2769)) 
+           - 0.0205 * np.tanh(30.4444 * (stoich_n - 0.6103)))
+           
+    axs2[0, 0].plot(stoich_p, u_p, color="tab:orange", linewidth=2)
+    axs2[0, 0].set(title="Positive Electrode OCP (Rep. Fig D.1)", xlabel="Stoichiometry", ylabel="Open Circuit Potential [V]")
+    
+    axs2[0, 1].plot(stoich_n, u_n, color="tab:orange", linewidth=2)
+    axs2[0, 1].set(title="Negative Electrode OCP (Rep. Fig D.1)", xlabel="Stoichiometry", ylabel="Open Circuit Potential [V]")
 
-    fig2.suptitle("TSPMe Validation: LG M50 at 25°C (Replicating Fig. 8 Layout)", fontsize=15, fontweight="bold")
+    # --- Bottom Row: 2C Diagnostics ---
+    res_2c = results["2C"]
+    mask = res_2c["i_app"].data > 0.1
+    cap = (res_2c["Time [s]"].data[mask] * rates["2C"]) / 3600.0
+    
+    u_eq, eta_r, eta_e = res_2c["U_eq"].data[mask], res_2c["eta_r"].data[mask], res_2c["eta_e"].data[mask]
+    dphi_e, dphi_s, v_cell = res_2c["dPhi_e"].data[mask], res_2c["dPhi_s"].data[mask], res_2c["V_cell"].data[mask]
+    l1, l2, l3, l4, l5 = u_eq, u_eq + eta_r, u_eq + eta_r + eta_e, u_eq + eta_r + eta_e + dphi_e, v_cell
+    
+    ax_v = axs2[1, 0]
+    ax_v.plot(cap, l1, 'k--', linewidth=2, label="Thermodynamic $U_{eq}$")
+    ax_v.plot(cap, v_cell, 'k-', linewidth=2, label="Terminal $V_{cell}$")
+    ax_v.fill_between(cap, l1, l2, color="tab:red", alpha=0.5, label="Reaction ($\eta_r$)")
+    ax_v.fill_between(cap, l2, l3, color="tab:orange", alpha=0.5, label="Electrolyte Trans. ($\eta_e$)")
+    ax_v.fill_between(cap, l3, l4, color="tab:blue", alpha=0.5, label="Electrolyte Ohmic ($\Delta\Phi_e$)")
+    ax_v.fill_between(cap, l4, l5, color="tab:gray", alpha=0.5, label="Solid Ohmic ($\Delta\Phi_s$)")
+    ax_v.set(title="Voltage Penalty Breakdown (2C)", ylabel="Voltage [V]", xlabel="Discharge Capacity [Ah]")
+    ax_v.legend(loc="best", fontsize=9)
+    
+    q_s, q_e, q_irr = res_2c["Q_s"].data[mask], res_2c["Q_e"].data[mask], res_2c["Q_irr"].data[mask]
+    
+    ax_q = axs2[1, 1]
+    ax_q.stackplot(cap, q_s, q_e, q_irr, labels=["Solid Ohmic ($Q_s$)", "Electrolyte Ohmic ($Q_e$)", "Irreversible Rxn ($Q_{irr}$)"],
+                   colors=["tab:gray", "tab:blue", "tab:red"], alpha=0.7)
+    ax_q.set(title="Heat Source Apportionment (2C)", ylabel="Volumetric Heat Gen [$W/m^3$]", xlabel="Discharge Capacity [Ah]")
+    ax_q.legend(loc="best", fontsize=9)
+    
+    for ax in axs2.flat:
+        ax.grid(True, linestyle="--", alpha=0.7)
+        
     fig2.tight_layout()
-    fig2.subplots_adjust(top=0.92, left=0.12)
-
-
-    # =========================================================================
-    # FIGURE 3: Anatomy of the Voltage Cliff (Deconstruction)
-    # =========================================================================
-    print("Generating Voltage Deconstruction analysis...")
-    fig3, axs3 = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-    
-    for i, rate in enumerate(["0.5C", "2C"]):
-        res = results[rate]
-        
-        # Mask strictly to the discharge phase
-        mask = res["i_app"].data > 0.1
-        cap = (res["Time [s]"].data[mask] * rates[rate]) / 3600.0
-        
-        # Extract telemetry
-        u_eq = res["U_eq"].data[mask]
-        eta_r = res["eta_r"].data[mask]
-        eta_e = res["eta_e"].data[mask]
-        dphi_e = res["dPhi_e"].data[mask]
-        dphi_s = res["dPhi_s"].data[mask]
-        v_cell = res["V_cell"].data[mask]
-        
-        ax = axs3[i]
-        
-        # Calculate sequential drop layers
-        l1 = u_eq
-        l2 = l1 + eta_r
-        l3 = l2 + eta_e
-        l4 = l3 + dphi_e
-        l5 = l4 + dphi_s # Matches v_cell
-        
-        ax.plot(cap, l1, color='k', linestyle='--', linewidth=2, label="Thermodynamic $U_{eq}$")
-        ax.plot(cap, v_cell, color='k', linewidth=2, label="Terminal $V_{cell}$")
-        
-        ax.fill_between(cap, l1, l2, color="tab:red", alpha=0.5, label="Reaction Kinetics ($\eta_r$)")
-        ax.fill_between(cap, l2, l3, color="tab:orange", alpha=0.5, label="Electrolyte Transport ($\eta_e$)")
-        ax.fill_between(cap, l3, l4, color="tab:blue", alpha=0.5, label="Electrolyte Ohmic Drop ($\Delta\Phi_e$)")
-        ax.fill_between(cap, l4, l5, color="tab:gray", alpha=0.5, label="Solid Ohmic Drop ($\Delta\Phi_s$)")
-        
-        ax.set_title(f"Voltage Penalty Breakdown at {rate}", fontsize=13, fontweight="bold")
-        ax.set_xlabel("Discharge Capacity [Ah]", fontsize=12)
-        if i == 0:
-            ax.set_ylabel("Voltage [V]", fontsize=12)
-            ax.legend(loc="lower left", fontsize=10)
-        ax.grid(True, linestyle="--", alpha=0.7)
-
-    fig3.tight_layout()
-
-
-    # =========================================================================
-    # FIGURE 4: The Thermal Engine (Heat Apportionment)
-    # =========================================================================
-    print("Generating Heat Apportionment analysis...")
-    fig4, axs4 = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-    
-    for i, rate in enumerate(["0.5C", "2C"]):
-        res = results[rate]
-        
-        mask = res["i_app"].data > 0.1
-        cap = (res["Time [s]"].data[mask] * rates[rate]) / 3600.0
-        
-        q_s = res["Q_s"].data[mask]
-        q_e = res["Q_e"].data[mask]
-        q_irr = res["Q_irr"].data[mask]
-        
-        ax = axs4[i]
-        
-        ax.stackplot(cap, q_s, q_e, q_irr, 
-                     labels=["Solid Ohmic ($Q_s$)", "Electrolyte Ohmic ($Q_e$)", "Irreversible Rxn ($Q_{irr}$)"],
-                     colors=["tab:gray", "tab:blue", "tab:red"], alpha=0.7)
-        
-        ax.set_title(f"Heat Source Apportionment at {rate}", fontsize=13, fontweight="bold")
-        ax.set_xlabel("Discharge Capacity [Ah]", fontsize=12)
-        if i == 0:
-            ax.set_ylabel("Volumetric Heat Gen [$W/m^3$]", fontsize=12)
-            ax.legend(loc="upper left", fontsize=10)
-        ax.grid(True, linestyle="--", alpha=0.7)
-
-    fig4.tight_layout()
-    
     plt.show()
