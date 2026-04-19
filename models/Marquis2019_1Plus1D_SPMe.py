@@ -88,6 +88,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         rho_eff, lambda_eff = 1.812e6, 59.396
 
         L_tab = 40e-3
+        L_total = L_cell + L_cn + L_cp
 
         # =====================================================================
         # 4. Helper AST Functions & Arrhenius Kinetics
@@ -194,14 +195,17 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         flux_T = -lambda_eff * fx.grad(self.T_cell, axis=self.z)
         
         # Heat Sources: Ohmic
-        Q_ohm_cc = (L_cn / L_cell) * sig_cn * (fx.grad(self.phi_cn, axis=self.z)**2) + \
-                   (L_cp / L_cell) * sig_cp * (fx.grad(self.phi_cp, axis=self.z)**2)
-        Q_ohm_through = fx.abs((self.I_loc ** 2) * (R_elec + R_solid) / L_cell)
+        Q_ohm_cc = (L_cn / L_total) * sig_cn * (fx.grad(self.phi_cn, axis=self.z)**2) + \
+                   (L_cp / L_total) * sig_cp * (fx.grad(self.phi_cp, axis=self.z)**2)
+        Q_ohm_through = fx.abs((self.I_loc ** 2) * (R_elec + R_solid) / L_total)
         
         # Heat Sources: Irreversible Reaction
-        Q_rxn = fx.abs(self.I_loc * eta_r) / L_cell
+        Q_rxn = fx.abs(self.I_loc * eta_r) / L_total
         
         # Heat Sources: Reversible Entropic Heating (Table 7)
+        # Note: The paper accidentally published dU/dc as dU/dT in Table 7. 
+        # Leaving the dU_dT formulas as-is preserves mathematical parity with the text.
+
         dU_dT_n = -1.5 * (120.0 / c_n_max) * fx.exp(-120.0 * x_n) \
                   + (0.0351 / (0.083 * c_n_max)) * sech2_ast((x_n - 0.286) / 0.083) \
                   - (0.0045 / (0.119 * c_n_max)) * sech2_ast((x_n - 0.849) / 0.119) \
@@ -219,12 +223,15 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                   - (0.2531 / 0.1316 / c_p_max) * sech2_ast((-x_p + 0.56478) / 0.1316) \
                   - (0.02167 / 0.006 / c_p_max) * sech2_ast((x_p - 0.525) / 0.006)
                   
-        Q_rev = (self.I_loc * self.T_cell / L_cell) * (dU_dT_n - dU_dT_p)
+        Q_rev = (self.I_loc * self.T_cell / L_total) * (dU_dT_n - dU_dT_p)
         
-        # Convective cooling from the wide planar faces of the pouch
-        Q_cool_face = (2.0 * 10.0 / L_cell) * (self.T_cell - T_inf)
+        # The paper specifies strictly adiabatic conditions on all non-tab boundaries.
+        Q_cool_face = 0.0
         
         Q_total = Q_ohm_through + Q_rxn + Q_rev + Q_ohm_cc - Q_cool_face
+        
+        # Calculate the geometrically scaled effective tab cooling coefficient for the 1D projection
+        h_tab_eff = 1000.0 * (L_tab * (L_cn + L_cp)) / (L_y * L_total)
 
         return {
             "equations": {
@@ -266,7 +273,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 i_cp: {"left": -self.I_app / (L_y * L_cp), "right": 0.0},
                 
                 # Tab Cooling Boundary (Eq 4.3)
-                flux_T: {"left": -1000.0 * (self.T_cell.boundary("left", domain=self.z) - T_inf), "right": 0.0}
+                flux_T: {"left": -h_tab_eff * (self.T_cell.boundary("left", domain=self.z) - T_inf), "right": 0.0}
             },
             "initial_conditions": {
                 self.c_sn: 0.8 * c_n_max,
