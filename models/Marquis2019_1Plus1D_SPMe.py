@@ -79,7 +79,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         eps_n, eps_s, eps_p = 0.3, 1.0, 0.3
         b_brug = 1.5
         a_n, a_p = 0.18e6, 0.15e6
-        c_n_max, c_p_max = 2.498e4, 5.122e4
+        c_n_max, c_p_max = 24983.2619938437, 51217.9257309275
         
         sig_n, sig_p = 100.0, 10.0
         sig_cn, sig_cp = 5.96e7, 3.55e7
@@ -124,6 +124,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
 
         x_n = c_sn_surf / c_n_max
         x_p = c_sp_surf / c_p_max
+        x_p_str = 1.062 * x_p
 
         # Open Circuit Potentials (Exact from Table 7)
         U_n = 0.194 + 1.5 * fx.exp(-120.0 * x_n) \
@@ -136,12 +137,12 @@ class Marquis1Plus1D_SPMe(fx.PDE):
               - 0.011 * tanh_ast((x_n - 0.124) / 0.0226) \
               + 0.0155 * tanh_ast((x_n - 0.105) / 0.029)
               
-        U_p = 2.16216 + 0.07645 * tanh_ast(30.834 - 54.4806 * x_p) \
-              + 2.1581 * tanh_ast(52.294 - 50.294 * x_p) \
-              - 0.14169 * tanh_ast(11.0923 - 19.8543 * x_p) \
-              + 0.2051 * tanh_ast(1.4684 - 5.4888 * x_p) \
-              + 0.2531 * tanh_ast((-x_p + 0.56478) / 0.1316) \
-              - 0.02167 * tanh_ast((x_p - 0.525) / 0.006)
+        U_p = 2.16216 + 0.07645 * tanh_ast(30.834 - 54.4806 * x_p_str) \
+              + 2.1581 * tanh_ast(52.294 - 50.294 * x_p_str) \
+              - 0.14169 * tanh_ast(11.0923 - 19.8543 * x_p_str) \
+              + 0.2051 * tanh_ast(1.4684 - 5.4888 * x_p_str) \
+              + 0.2531 * tanh_ast((-x_p_str + 0.56478) / 0.1316) \
+              - 0.02167 * tanh_ast((x_p_str - 0.525) / 0.006)
 
         # Exchange Current Densities with Arrhenius Thermal Feedback (Eq 3.23 / 3.24)
         j0_n = 2e-5 * arrh(3.748e4) * (ce_avg_n * c_sn_surf * (c_n_max - c_sn_surf)) ** 0.5
@@ -153,7 +154,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         eta_r = eta_p - eta_n
         
         # Eq 3.25: Non-Linear Electrolyte Concentration Overpotential
-        eta_c = 2.0 * (1.0 - t_plus) * (R_g * self.T_cell / F) * fx.log(ce_xL / ce_x0)
+        eta_c = 2.0 * (1.0 - t_plus) * (R_g * self.T_cell / F) * fx.log(ce_avg_p / ce_avg_n)
         
         # Exact Non-Linear Electrolyte Conductivity (Table 7)
         ce_m = ce_avg_cell * 1e-3
@@ -173,7 +174,8 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         # 6. Transport Physics
         # =====================================================================
         # 1. Solid Fickian Diffusion
-        D_sn, D_sp = 3.9e-14, 1e-13
+        D_sn = 3.9e-14 * arrh(4.277e4)
+        D_sp = 1e-13 * arrh(1.855e4)
         flux_sn = -D_sn * fx.grad(self.c_sn, axis=self.r_n)
         flux_sp = -D_sp * fx.grad(self.c_sp, axis=self.r_p)
 
@@ -216,12 +218,12 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                   - (0.011 / (0.0226 * c_n_max)) * sech2_ast((x_n - 0.124) / 0.0226) \
                   + (0.0155 / (0.029 * c_n_max)) * sech2_ast((x_n - 0.105) / 0.029)
                   
-        dU_dT_p = 0.07645 * (-54.4806 / c_p_max) * sech2_ast(30.834 - 54.4806 * x_p) \
-                  + 2.1581 * (-50.294 / c_p_max) * sech2_ast(52.294 - 50.294 * x_p) \
-                  + 0.14169 * (19.854 / c_p_max) * sech2_ast(11.0923 - 19.8543 * x_p) \
-                  - 0.2051 * (5.4888 / c_p_max) * sech2_ast(1.4684 - 5.4888 * x_p) \
-                  - (0.2531 / 0.1316 / c_p_max) * sech2_ast((-x_p + 0.56478) / 0.1316) \
-                  - (0.02167 / 0.006 / c_p_max) * sech2_ast((x_p - 0.525) / 0.006)
+        dU_dT_p = 0.07645 * (-54.4806 / c_p_max) * sech2_ast(30.834 - 54.4806 * x_p_str) \
+                  + 2.1581 * (-50.294 / c_p_max) * sech2_ast(52.294 - 50.294 * x_p_str) \
+                  + 0.14169 * (19.854 / c_p_max) * sech2_ast(11.0923 - 19.8543 * x_p_str) \
+                  - 0.2051 * (5.4888 / c_p_max) * sech2_ast(1.4684 - 5.4888 * x_p_str) \
+                  - (0.2531 / 0.1316 / c_p_max) * sech2_ast((-x_p_str + 0.56478) / 0.1316) \
+                  - (0.02167 / 0.006 / c_p_max) * sech2_ast((x_p_str - 0.525) / 0.006)
                   
         Q_rev = (self.I_loc * self.T_cell / L_total) * (dU_dT_n - dU_dT_p)
         
@@ -254,7 +256,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 self.I_loc: (self.phi_cp - self.phi_cn) == V_ec,
                 
                 # --- Global Terminal Definition ---
-                self.V_term: self.V_term == self.phi_cp.boundary("left", domain=self.z) - self.phi_cn.boundary("left", domain=self.z)
+                self.V_term: self.V_term == self.phi_cp.boundary("right", domain=self.z) - self.phi_cn.boundary("right", domain=self.z)
             },
             "boundaries": {
                 # Solid Particle Fluxes (Eq 3.10)
@@ -265,25 +267,25 @@ class Marquis1Plus1D_SPMe(fx.PDE):
                 flux_en: {"left": 0.0},
                 flux_ep: {"right": 0.0},
                 
-                # Current Collector Tabs (Placed at Top, z=0)
-                self.phi_cn: {"left": fx.Dirichlet(0.0)},
-                i_cn: {"right": 0.0},
+                # Current Collector Tabs (Placed at Top, z=0.137)
+                self.phi_cn: {"right": fx.Dirichlet(0.0)},
+                i_cn: {"left": 0.0},
                 
-                # Geometric current density flowing INTO the tab cross-section
-                i_cp: {"left": -self.I_app / (L_y * L_cp), "right": 0.0},
+                # Geometric current density flowing OUT of the tab cross-section
+                i_cp: {"left": 0.0, "right": self.I_app / (L_y * L_cp)},
                 
                 # Tab Cooling Boundary (Eq 4.3)
-                flux_T: {"left": -h_tab_eff * (self.T_cell.boundary("left", domain=self.z) - T_inf), "right": 0.0}
+                flux_T: {"left": 0.0, "right": h_tab_eff * (self.T_cell.boundary("right", domain=self.z) - T_inf)}
             },
             "initial_conditions": {
-                self.c_sn: 0.8 * c_n_max,
-                self.c_sp: 0.6 * c_p_max,
+                self.c_sn: 19986.609595075,
+                self.c_sp: 30730.7554385565,
                 self.c_e: 1000.0,
                 self.phi_cn: 0.0,
-                self.phi_cp: 4.15,
+                self.phi_cp: 4.1,
                 self.T_cell: T_inf,
                 self.I_loc: 1e-6, #to push it off the flat gradient plateau at t=0
-                self.V_term: 4.15,
+                self.V_term: 4.1,
                 self.I_app: 0.0
             }
         }
@@ -294,7 +296,7 @@ if __name__ == "__main__":
     engine = fx.Engine(model=model, target="cpu", solver_backend="native")
     
     protocol = Sequence([
-        CC(rate=2.043, until=model.V_term <= 3.0, time=3600),
+        CC(rate=2.041848, until=model.V_term <= 3.0, time=3600),
         Rest(time=600)
     ])
     
@@ -306,7 +308,7 @@ if __name__ == "__main__":
     # =========================================================================
     t_mask = res["I_app"].data > 1.0 
     t_eval = res["Time [s]"].data[t_mask]
-    capacity_ah = (t_eval * 2.043) / 3600.0
+    capacity_ah = (t_eval * 2.041848) / 3600.0
     z_coords = np.linspace(0, 137, 15)
     x_coords = np.linspace(0, 225, 25)
 
@@ -317,37 +319,38 @@ if __name__ == "__main__":
     ax_v = axs[0, 0]
     ax_t = ax_v.twinx()
     ax_v.plot(capacity_ah, res["V_term"].data[t_mask], 'tab:blue', linewidth=2, label="Terminal Voltage")
-    T_avg = np.mean(res["T_cell"].data[t_mask], axis=1) - 273.15
+    T_avg = np.mean(res["T_cell"].data[t_mask], axis=1)
     ax_t.plot(capacity_ah, T_avg, 'tab:red', linewidth=2, label="Avg Temperature")
     ax_v.set(title="Cell Output Dynamics (Rep. Fig 2a/6a)", xlabel="Discharge Capacity [Ah]", ylabel="Voltage [V]")
-    ax_t.set_ylabel("Temperature [°C]", color='tab:red')
+    ax_t.set_ylabel("Temperature [K]", color='tab:red')
     ax_v.grid(True, linestyle="--", alpha=0.6)
 
-    # [0, 1] Through-Cell Current Density (Rep Fig 4)
+    # [0, 1] Through-Cell Current Density (Rep Fig 10b)
     ax_i = axs[0, 1]
     I_loc_history = res["I_loc"].data[t_mask]
     for pct in [0.1, 0.5, 0.9]:
         idx = int(len(I_loc_history) * pct)
         ax_i.plot(z_coords, I_loc_history[idx], linewidth=2, label=f"{int(pct*100)}% DoD")
-    ax_i.set(title="Transverse Current Distribution (Rep. Fig 4)", xlabel="Distance from Tab, z [mm]", ylabel=r"Local Current Density, $\mathcal{I}$ [A/m$^2$]")
+    ax_i.set(title="Transverse Current Distribution (Rep. Fig 10b)", xlabel="z [mm]", ylabel=r"Local Current Density, $\mathcal{I}$ [A/m$^2$]")
     ax_i.legend(); ax_i.grid(True, linestyle="--", alpha=0.6)
 
     # [1, 0] Electrolyte Concentration Variance
     ax_ce = axs[1, 0]
     c_e_final = res["c_e"].data[t_mask][-1].reshape((15, 25))
-    ax_ce.plot(x_coords, c_e_final[0, :], 'tab:purple', linewidth=2, label="Top (Near Tab)")
-    ax_ce.plot(x_coords, c_e_final[-1, :], 'tab:orange', linewidth=2, label="Bottom (Away from Tab)")
+    # Tab is now physically located at z=137mm (index -1)
+    ax_ce.plot(x_coords, c_e_final[-1, :], 'tab:purple', linewidth=2, label="Top (Near Tab)")
+    ax_ce.plot(x_coords, c_e_final[0, :], 'tab:orange', linewidth=2, label="Bottom (Away from Tab)")
     ax_ce.axvline(100, color='k', linestyle=':', alpha=0.5, label="Separator Interfaces")
     ax_ce.axvline(125, color='k', linestyle=':', alpha=0.5)
     ax_ce.set(title="Electrolyte Polarization Variance (Transverse Z-Axis)", xlabel="Through-Cell Distance, x [um]", ylabel=r"Electrolyte Conc. [mol/m$^3$]")
     ax_ce.legend(); ax_ce.grid(True, linestyle="--", alpha=0.6)
 
-    # [1, 1] Transverse Potential Drop (Rep Fig 5)
+    # [1, 1] Transverse Potential Drop (Rep Fig 5b)
     ax_phi = axs[1, 1]
     idx_50 = int(len(t_eval) * 0.5)
     phi_cn_50 = res["phi_cn"].data[t_mask][idx_50] * 1000.0 # Convert to mV
     ax_phi.plot(z_coords, phi_cn_50, 'k-', linewidth=2)
-    ax_phi.set(title="Ohmic Drop in Negative Current Collector (Rep. Fig 5)", xlabel="Distance from Tab, z [mm]", ylabel=r"Potential, $\phi_{s,cn}$ [mV]")
+    ax_phi.set(title="Ohmic Drop in Negative Current Collector (Rep. Fig 5b)", xlabel="z [mm]", ylabel=r"Potential, $\phi_{s,cn}$ [mV]")
     ax_phi.grid(True, linestyle="--", alpha=0.6)
 
     fig.tight_layout()
