@@ -294,6 +294,7 @@ class Engine:
                 if op == "cos": return math.cos(c)
                 if op == "exp": return math.exp(c)
                 if op == "log": return math.log(c) if c > 0 else 0.0
+                if op == "sqrt": return math.sqrt(c) if c > 0 else 0.0
                 if op == "abs": return abs(c)
             return 0.0
         

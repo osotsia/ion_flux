@@ -291,67 +291,90 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         }
 
 if __name__ == "__main__":
-    print("Compiling 1+1D Thermally-Coupled SPMe to Native Machine Code...")
-    model = Marquis1Plus1D_SPMe()
-    engine = fx.Engine(model=model, target="cpu", solver_backend="native")
-    
-    protocol = Sequence([
-        CC(rate=2.041848, until=model.V_term <= 3.0, time=3600),
-        Rest(time=600)
-    ])
-    
-    print("\nExecuting 3C Discharge Protocol with Tab Cooling...")
-    res = engine.solve(protocol=protocol)
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    c_rates = [1, 2, 3]
+    base_current = 0.681  # 1C current in Amperes, derived from Table 6
+    results = {}
+
+    print("Simulating 1C, 2C, and 3C Discharge Protocols...")
+    for c in c_rates:
+        print(f"Executing {c}C Discharge Protocol...")
+        model = Marquis1Plus1D_SPMe()
+        engine = fx.Engine(model=model, target="cpu", solver_backend="native")
+        
+        current = base_current * c
+        protocol = Sequence([
+            CC(rate=current, until=model.V_term <= 3.0, time=3600),
+            Rest(time=600)
+        ])
+        results[c] = engine.solve(protocol=protocol)
 
     # =========================================================================
-    # FIGURE 1: Full Cell 1+1D Diagnostics
+    # 3x3 Layout Plotting
     # =========================================================================
-    t_mask = res["I_app"].data > 1.0 
-    t_eval = res["Time [s]"].data[t_mask]
-    capacity_ah = (t_eval * 2.041848) / 3600.0
-    z_coords = np.linspace(0, 137, 15)
-    x_coords = np.linspace(0, 225, 25)
+    # We remove shared y-axes here to prevent flattening the lower C-rate 
+    # curves, ensuring the visual shapes of the distributions remain clear.
+    fig, axs = plt.subplots(3, 3, figsize=(15, 12))
+    fig.suptitle("1+1D SPMe Output: 1 C, 2 C, and 3 C Discharge Profiles", fontsize=16, fontweight="bold")
 
-    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("Marquis et al. (2020) - 1+1D SPMe: Transverse Tab Diagnostics (3C)", fontsize=14, fontweight="bold")
+    for i, c in enumerate(c_rates):
+        res = results[c]
+        t_mask = res["I_app"].data > 0.1
+        t_eval = res["Time [s]"].data[t_mask]
+        capacity_ah = (t_eval * base_current * c) / 3600.0
+        
+        # ---------------------------------------------------------------------
+        # Row 1: Terminal Voltage (Matches Fig 2a)
+        # ---------------------------------------------------------------------
+        ax_v = axs[0, i]
+        ax_v.plot(capacity_ah, res["V_term"].data[t_mask], color='#1f77b4', linewidth=2)
+        ax_v.set_title(f"{c} C Discharge")
+        ax_v.grid(True, linestyle="--", alpha=0.6)
+        
+        if i == 0:
+            ax_v.set_ylabel("Voltage [V]")
+        if c == 1:
+            ax_v.text(0.05, 0.08, 'Rep: Fig 2(a)', transform=ax_v.transAxes, 
+                      fontsize=11, fontweight='bold', bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'))
 
-    # [0, 0] Terminal Voltage & Cell Temperature (Rep Fig 2a/6a)
-    ax_v = axs[0, 0]
-    ax_t = ax_v.twinx()
-    ax_v.plot(capacity_ah, res["V_term"].data[t_mask], 'tab:blue', linewidth=2, label="Terminal Voltage")
-    T_avg = np.mean(res["T_cell"].data[t_mask], axis=1)
-    ax_t.plot(capacity_ah, T_avg, 'tab:red', linewidth=2, label="Avg Temperature")
-    ax_v.set(title="Cell Output Dynamics (Rep. Fig 2a/6a)", xlabel="Discharge Capacity [Ah]", ylabel="Voltage [V]")
-    ax_t.set_ylabel("Temperature [K]", color='tab:red')
-    ax_v.grid(True, linestyle="--", alpha=0.6)
+        # ---------------------------------------------------------------------
+        # Row 2: Average Temperature (Matches Fig 6a)
+        # ---------------------------------------------------------------------
+        ax_t = axs[1, i]
+        T_avg = np.mean(res["T_cell"].data[t_mask], axis=1)
+        ax_t.plot(capacity_ah, T_avg, color='#d62728', linewidth=2)
+        ax_t.set_xlabel("Discharge Capacity [Ah]")
+        ax_t.grid(True, linestyle="--", alpha=0.6)
+        
+        if i == 0:
+            ax_t.set_ylabel("Avg Temperature [K]")
+        if c == 3:
+            ax_t.text(0.05, 0.85, 'Rep: Fig 6(a)', transform=ax_t.transAxes, 
+                      fontsize=11, fontweight='bold', bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'))
 
-    # [0, 1] Through-Cell Current Density (Rep Fig 10b)
-    ax_i = axs[0, 1]
-    I_loc_history = res["I_loc"].data[t_mask]
-    for pct in [0.1, 0.5, 0.9]:
-        idx = int(len(I_loc_history) * pct)
-        ax_i.plot(z_coords, I_loc_history[idx], linewidth=2, label=f"{int(pct*100)}% DoD")
-    ax_i.set(title="Transverse Current Distribution (Rep. Fig 10b)", xlabel="z [mm]", ylabel=r"Local Current Density, $\mathcal{I}$ [A/m$^2$]")
-    ax_i.legend(); ax_i.grid(True, linestyle="--", alpha=0.6)
+        # ---------------------------------------------------------------------
+        # Row 3: Transverse Current Distribution (Matches Fig 10b)
+        # ---------------------------------------------------------------------
+        ax_i = axs[2, i]
+        z_coords = np.linspace(0, 137, 15)
+        I_loc_history = res["I_loc"].data[t_mask]
+        
+        colors = ['#2ca02c', '#ff7f0e', '#9467bd']
+        for j, pct in enumerate([0.1, 0.5, 0.9]):
+            idx = int(len(I_loc_history) * pct)
+            ax_i.plot(z_coords, I_loc_history[idx], color=colors[j], linewidth=2, label=f"{int(pct*100)}% DoD")
+            
+        ax_i.set_xlabel("Transverse Distance, z [mm]")
+        ax_i.grid(True, linestyle="--", alpha=0.6)
+        
+        if i == 0:
+            ax_i.set_ylabel(r"Local Current [A/m$^2$]")
+            ax_i.legend(loc='best')
+        if c == 3:
+            ax_i.text(0.05, 0.08, 'Rep: Fig 10(b)', transform=ax_i.transAxes, 
+                      fontsize=11, fontweight='bold', bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'))
 
-    # [1, 0] Electrolyte Concentration Variance
-    ax_ce = axs[1, 0]
-    c_e_final = res["c_e"].data[t_mask][-1].reshape((15, 25))
-    # Tab is now physically located at z=137mm (index -1)
-    ax_ce.plot(x_coords, c_e_final[-1, :], 'tab:purple', linewidth=2, label="Top (Near Tab)")
-    ax_ce.plot(x_coords, c_e_final[0, :], 'tab:orange', linewidth=2, label="Bottom (Away from Tab)")
-    ax_ce.axvline(100, color='k', linestyle=':', alpha=0.5, label="Separator Interfaces")
-    ax_ce.axvline(125, color='k', linestyle=':', alpha=0.5)
-    ax_ce.set(title="Electrolyte Polarization Variance (Transverse Z-Axis)", xlabel="Through-Cell Distance, x [um]", ylabel=r"Electrolyte Conc. [mol/m$^3$]")
-    ax_ce.legend(); ax_ce.grid(True, linestyle="--", alpha=0.6)
-
-    # [1, 1] Transverse Potential Drop (Rep Fig 5b)
-    ax_phi = axs[1, 1]
-    idx_50 = int(len(t_eval) * 0.5)
-    phi_cn_50 = res["phi_cn"].data[t_mask][idx_50] * 1000.0 # Convert to mV
-    ax_phi.plot(z_coords, phi_cn_50, 'k-', linewidth=2)
-    ax_phi.set(title="Ohmic Drop in Negative Current Collector (Rep. Fig 5b)", xlabel="z [mm]", ylabel=r"Potential, $\phi_{s,cn}$ [mV]")
-    ax_phi.grid(True, linestyle="--", alpha=0.6)
-
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.98])
     plt.show()

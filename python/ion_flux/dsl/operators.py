@@ -22,6 +22,7 @@ def integral(expr: Node, over: Optional[Domain] = None) -> UnaryOp:
 def abs_val(expr: Node) -> UnaryOp: return UnaryOp("abs", _wrap(expr))
 def exp(expr: Node) -> UnaryOp: return UnaryOp("exp", _wrap(expr))
 def log(expr: Node) -> UnaryOp: return UnaryOp("log", _wrap(expr))
+def sqrt(expr: Node) -> UnaryOp: return UnaryOp("sqrt", _wrap(expr))
 def sin(expr: Node) -> UnaryOp: return UnaryOp("sin", _wrap(expr))
 def cos(expr: Node) -> UnaryOp: return UnaryOp("cos", _wrap(expr))
 

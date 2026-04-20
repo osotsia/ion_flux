@@ -50,7 +50,7 @@ class SpatialLoweringVisitor:
     _BIN_SYM = {"add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "std::pow",
                 "gt": ">", "lt": "<", "ge": ">=", "le": "<=", "eq": "==", "ne": "!="}
     _UNARY_SYM = {"neg": "-", "abs": "std::abs", "exp": "std::exp", "log": "std::log", 
-                  "sin": "std::sin", "cos": "std::cos"}
+                  "sin": "std::sin", "cos": "std::cos", "sqrt": "std::sqrt"}
 
     def __init__(self, layout, state_map, semantic_ctx, topo, target):
         self.layout = layout
