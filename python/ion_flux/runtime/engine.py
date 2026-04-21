@@ -67,12 +67,8 @@ class Engine:
             self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, observables, bandwidth=self.jacobian_bandwidth, target=self.target)
             self.runtime = None
             if not self.mock_execution:
-                try:
-                    compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
-                    self.runtime = compiler.compile(self.cpp_source, self.layout.n_states)
-                except RuntimeError as e:
-                    logging.warning(f"Compilation failed, falling back to mock execution: {e}")
-                    self.mock_execution = True
+                compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
+                self.runtime = compiler.compile(self.cpp_source, self.layout.n_states)
         else:
             self.runtime = None
             
