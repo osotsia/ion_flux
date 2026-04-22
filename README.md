@@ -53,8 +53,6 @@ python models/Chen2020_DFN.py
 
 ## 🔬 For Researchers: Declarative Physics & Infinite Modularity
 
-Legacy frameworks often force researchers to manually track sparse matrix indices, flatten hierarchical geometries, or fight numerical instability. `ion_flux` eradicates this boilerplate. 
-
 ### 1. Topology-Agnostic Operators
 Mathematical operators like `fx.grad` and `fx.div` dynamically adapt to their domain. The exact same Python syntax compiles to a tridiagonal banded matrix on a 1D line, a spherical finite-volume stencil, or a massive unstructured 3D CSR graph traversal.
 
@@ -122,8 +120,6 @@ Want to build a Doyle-Fuller-Newman (DFN) model? Just multiply domains together 
 ---
 
 ## ⚙️ For Engineers: Cloud Scale, Adjoints, & Co-Simulation
-
-Traditional symbolic graph frameworks (like JAX or CasADi) break down in production due to massive Python memory footprints, Just-In-Time (JIT) cold-starts, and the Python Global Interpreter Lock (GIL). 
 
 Because `ion_flux` relies on **Ahead-of-Time (AOT) C++ binaries** and strictly scopes execution in **Rust**, it brings systems-level performance to battery math.
 

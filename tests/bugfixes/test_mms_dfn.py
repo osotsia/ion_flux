@@ -239,5 +239,130 @@ def test_oracle_butler_volmer_equilibrium_drift():
     
     assert drift < 1e-12, f"Thermodynamic drift detected! System lost equilibrium (Drift: {drift:.3e})."
 
+
+# ==============================================================================
+# ORACLE 4: The Integrated Hierarchical DFN Crucible
+# ==============================================================================
+
+class HierarchicalDFNCrucibleOracle(fx.PDE):
+    """
+    Manufactured Solution testing the fully integrated DFN architecture.
+    
+    Let x_dom = [0, 2]. Define X = x_dom.coords + 1.0 (ranges 1.0 to 3.0).
+    Manufactured Truth:
+      c_s(X, r, t) = t + X^2 * r^2
+      phi_e(X, t) = t * X
+      c_e(X, t) = t + X
+    """
+    cell = fx.Domain(bounds=(0, 2.0), resolution=20, name="cell")
+    x_n = cell.region(bounds=(0, 1.0), resolution=10, name="x_n")
+    x_p = cell.region(bounds=(1.0, 2.0), resolution=10, name="x_p")
+    
+    r = fx.Domain(bounds=(0, 1.0), resolution=5, coord_sys="spherical", name="r")
+    
+    c_s = fx.State(domain=cell * r, name="c_s")
+    phi_e = fx.State(domain=cell, name="phi_e")
+    c_e = fx.State(domain=cell, name="c_e")
+    t_var = fx.State(domain=None, name="t_var")
+
+    def math(self):
+        # Spatially varying field to stress test the IndexManager's context routing
+        X = self.cell.coords + 1.0
+        
+        flux_cs = fx.grad(self.c_s, axis=self.r)
+        flux_phi = fx.grad(self.phi_e)
+        flux_ce = fx.grad(self.c_e)
+        
+        c_surf = self.c_s.boundary("right", domain=self.r)
+        
+        return {
+            "equations": {
+                self.t_var: fx.dt(self.t_var) == 1.0,
+                
+                # dt(c_s) = 1.0. div_r(grad_r) = 6 * X^2.
+                self.c_s: fx.dt(self.c_s) == fx.div(flux_cs, axis=self.r) + 1.0 - 6.0 * (X**2),
+                
+                # 0 = div_x(grad_x) + phi_e / X - (c_surf - X^2)
+                # Evaluates analytically to: 0 = 0 + (t*X)/X - (t + X^2 - X^2) = t - t = 0.
+                self.phi_e: 0.0 == fx.div(flux_phi) + self.phi_e / X - (c_surf - X**2),
+                
+                # Piecewise testing concurrent with spatial DAEs
+                self.c_e: fx.Piecewise({
+                    self.x_n: 2.0 * fx.dt(self.c_e) == fx.div(flux_ce) + 2.0,
+                    self.x_p: 3.0 * fx.dt(self.c_e) == fx.div(flux_ce) + 3.0
+                })
+            },
+            "boundaries": {
+                # grad_r(t + X^2 r^2) at r=1.0 is 2*X^2
+                flux_cs: {"left": 0.0, "right": 2.0 * (X**2)},
+                
+                # phi_e = t*X. At x=0 (X=1.0), phi_e = t.
+                self.phi_e: {"left": fx.Dirichlet(self.t_var)},
+                
+                # grad_x(t*X) = t.
+                flux_phi: {"right": self.t_var},
+                
+                # grad_x(t + X) = 1.0
+                flux_ce: {"left": 1.0, "right": 1.0}
+            },
+            "initial_conditions": {
+                self.t_var: 0.0,
+                self.c_s: (X**2) * (self.r.coords**2),
+                self.phi_e: 0.0,
+                self.c_e: X
+            }
+        }
+
+@REQUIRES_RUNTIME
+def test_oracle_integrated_hierarchical_dfn():
+    """
+    PROBE: Proves the compiler correctly merges piecewise logic, hierarchical boundaries, 
+    spatial DAEs, and spherical geometric dilution into a stable native execution graph.
+    """
+    engine = Engine(model=HierarchicalDFNCrucibleOracle(), target="cpu", mock_execution=False)
+    
+    # Assert analytical exactness over a 1.0 second integration window
+    # We pass "dummy" bc the engine only populates the res.trajectory metadata dictionary 
+    # (which contains the raw, flattened C-arrays like _y_raw) when an adjoint pass is anticipated
+    res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]), requires_grad=["dummy"])
+    
+    # Compute exact analytical fields at t=1.0
+    dx_cell = 2.0 / 19.0
+    X_coords = np.linspace(0, 2.0, 20) + 1.0
+    
+    dx_r = 1.0 / 4.0
+    r_coords = np.linspace(0, 1.0, 5)
+    
+    phi_e_exact = 1.0 * X_coords
+    c_e_exact = 1.0 + X_coords
+    
+    # Broadcast X^2 and r^2 to formulate the flattened 2D expected array
+    c_s_exact = 1.0 + (X_coords[:, None]**2) * (r_coords[None, :]**2)
+    c_s_exact = c_s_exact.flatten()
+    
+    np.testing.assert_allclose(
+        res["phi_e"].data[-1], phi_e_exact, rtol=1e-3, atol=1e-5,
+        err_msg="Spatial DAE failed to correctly extract and couple to the hierarchical micro-surface boundary."
+    )
+    
+    np.testing.assert_allclose(
+        res["c_e"].data[-1], c_e_exact, rtol=1e-3, atol=1e-5,
+        err_msg="Piecewise equation diverged under the presence of a spatial DAE in the same macroscopic domain."
+    )
+    
+    np.testing.assert_allclose(
+        res["c_s"].data[-1], c_s_exact, rtol=1e-3, atol=1e-5,
+        err_msg="Spherical hierarchy failed to integrate non-linear coordinates injected from the outer domain."
+    )
+
+    # Validate that Enzyme perfectly constructed the non-linear Dense Jacobian
+    y_final = res.trajectory["_y_raw"][-1]
+    ydot_final = np.zeros_like(y_final)
+    J = np.array(engine.evaluate_jacobian(y_final.tolist(), ydot_final.tolist(), c_j=1.0, parameters={}))
+    
+    assert np.isfinite(J).all(), "Enzyme LLVM AD generated NaNs evaluating the coupled Jacobian."
+    assert np.linalg.matrix_rank(J) == engine.layout.n_states, "Jacobian contains structurally singular rows."
+
+    
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])
