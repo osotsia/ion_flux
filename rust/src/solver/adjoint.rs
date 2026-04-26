@@ -58,7 +58,7 @@ pub fn discrete_adjoint_native<'py>(
             let mut jac_t = vec![0.0; n * n];
             for r in 0..n { for c in 0..n { jac_t[r * n + c] = jac[c * n + r]; } }
             
-            solver.factorize(&jac_t, &mut diag).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            solver.factorize_from_dense(&jac_t, &mut diag).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             solver.solve(&mut rhs, &mut diag).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         }
         

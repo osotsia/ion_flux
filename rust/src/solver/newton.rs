@@ -106,12 +106,37 @@ pub fn solve_nonlinear_system(
             } else {
                 if lu_solver.is_stale {
                     let start = Instant::now();
-                    unsafe { jac_fn(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, jac_buffer.as_mut_ptr()) };
-                    diag.jacobian_assembly_time_us += start.elapsed().as_micros();
-                    diag.jacobian_evaluations += 1;
                     
-                    if let Err(e) = lu_solver.factorize(jac_buffer, diag) {
-                        return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
+                    if let Some(coloring) = &lu_solver.coloring {
+                        let jvp = jvp_fn.expect("evaluate_jvp missing.");
+                        lu_solver.triplets.clear();
+                        let mut jvp_out = vec![0.0; n];
+                        
+                        for color in 0..coloring.num_colors {
+                            unsafe { jvp(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, coloring.color_vectors[color].as_ptr(), jvp_out.as_mut_ptr()); }
+                            for r in 0..n {
+                                let c = coloring.row_color_to_col[color][r];
+                                if c != usize::MAX {
+                                    lu_solver.triplets.push((r, c, jvp_out[r]));
+                                }
+                            }
+                        }
+                        
+                        diag.jacobian_assembly_time_us += start.elapsed().as_micros();
+                        diag.jacobian_evaluations += coloring.num_colors;
+                        
+                        if let Err(e) = lu_solver.factorize_from_triplets(diag) {
+                            return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
+                        }
+                    } else {
+                        // Fallback to legacy C++ Dense Jacobian loop
+                        unsafe { jac_fn(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, jac_buffer.as_mut_ptr()) };
+                        diag.jacobian_assembly_time_us += start.elapsed().as_micros();
+                        diag.jacobian_evaluations += 1;
+                        
+                        if let Err(e) = lu_solver.factorize_from_dense(jac_buffer, diag) {
+                            return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
+                        }
                     }
                     *c_j_last_setup = c_j;
                     cj_ratio = 1.0;

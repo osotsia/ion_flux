@@ -45,11 +45,22 @@ impl SolverHandle {
         
         let history = BdfHistory::new(n);
 
+        let mut diag = Diagnostics::default();
+        let mut lu_solver = NativeSparseLuSolver::new(n, bw);
+        
+        // Dynamically analyze the AST structural sparsity to generate O(1) colored JVP sweeps.
+        // This fully bypasses the Python `bandwidth` block-sequential bottleneck!
+        if bw != -1 && jvp_fn.is_some() {
+            let coloring = super::linalg::JacobianColoring::new(n, jac_fn, &y0, &ydot0, &p, &m);
+            diag.max_chromatic_number = coloring.num_colors;
+            lu_solver.coloring = Some(coloring);
+        }
+
         let mut handle = SolverHandle { 
             _lib: lib, res_fn, obs_fn, jac_fn, jvp_fn, set_threads_fn, n, bw, n_obs,
             t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag, max_steps,
-            history, lu_solver: NativeSparseLuSolver::new(n, bw), jac_buffer: vec![0.0; n * n],
-            config: SolverConfig::default(), diag: Diagnostics::default(),
+            history, lu_solver, jac_buffer: vec![0.0; n * n],
+            config: SolverConfig::default(), diag,
         };
         
         handle.calc_algebraic_roots()?;
@@ -73,7 +84,19 @@ impl SolverHandle {
             if max_res < 1e-8 { break; }
 
             let mut jac = vec![0.0; self.n * self.n];
-            unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+            if self.bw != -1 && self.lu_solver.coloring.is_some() {
+                let coloring = self.lu_solver.coloring.as_ref().unwrap();
+                let mut jvp_out = vec![0.0; self.n];
+                for color in 0..coloring.num_colors {
+                    unsafe { (self.jvp_fn.unwrap())(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, coloring.color_vectors[color].as_ptr(), jvp_out.as_mut_ptr()); }
+                    for r in 0..self.n {
+                        let c = coloring.row_color_to_col[color][r];
+                        if c != usize::MAX { jac[c * self.n + r] = jvp_out[r]; }
+                    }
+                }
+            } else {
+                unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+            }
 
             if self.bw == -1 {
                 // Fallback under-relaxation for Matrix-Free GMRES initialization
@@ -103,7 +126,7 @@ impl SolverHandle {
                 let mut dy = res.clone();
                 for i in 0..self.n { dy[i] = -dy[i]; }
 
-                if let Err(_) = self.lu_solver.factorize(&jac, &mut self.diag) { break; }
+                if let Err(_) = self.lu_solver.factorize_from_dense(&jac, &mut self.diag) { break; }
                 if let Err(_) = self.lu_solver.solve(&mut dy, &mut self.diag) { break; }
 
                 let mut max_step = 0.0;
