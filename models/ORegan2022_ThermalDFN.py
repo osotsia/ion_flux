@@ -331,7 +331,9 @@ class ThermalDFN(fx.PDE):
 def run_parallel_processes():
     print("Compiling DFN Math to Native C++ Binary...")
     # NOTE: Set solver_backend to 'sundials' to utilize the robust IDA solver
-    compiler_engine = fx.Engine(model=ThermalDFN(), target="cpu:serial", solver_backend="sundials")
+    start_time = time.perf_counter()
+    compiler_engine = fx.Engine(model=ThermalDFN(), target="cpu:serial", solver_backend="native")
+    print(f"\nCompilation completed in {time.perf_counter() - start_time:.2f}s")
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
     params_list = []
