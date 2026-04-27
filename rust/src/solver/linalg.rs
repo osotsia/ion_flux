@@ -1,104 +1,12 @@
 use std::time::Instant;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use super::{Diagnostics, NativeJacFn, NativeJvpFn};
+use super::Diagnostics;
 use faer::sparse::linalg::solvers::{SymbolicLu, Lu};
 use faer::sparse::SparseColMat;
 use faer::col::from_slice_mut;
 use faer::prelude::SpSolver;
 use std::fs::File;
 use std::io::Write;
-
-pub struct JacobianColoring {
-    pub num_colors: usize,
-    pub color_vectors: Vec<Vec<f64>>,
-    pub row_color_to_col: Vec<Vec<usize>>,
-}
-
-impl JacobianColoring {
-    pub fn new(n: usize, jac_fn: NativeJacFn, y: &[f64], ydot: &[f64], p: &[f64], m: &[f64]) -> Self {
-        let mut sparsity = vec![vec![false; n]; n];
-        let mut jac_dense = vec![0.0; n * n];
-
-        // Probe 1: Exact initial state
-        unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), 1.0, jac_dense.as_mut_ptr()); }
-        for c in 0..n {
-            for r in 0..n {
-                if jac_dense[c * n + r].abs() > 1e-14 { sparsity[r][c] = true; }
-            }
-        }
-
-        // Probe 2: Jittered parameters to expose inactive protocol/mode branches
-        let mut p_jit = p.to_vec();
-        for x in &mut p_jit { *x += 0.11; }
-        unsafe { jac_fn(y.as_ptr(), ydot.as_ptr(), p_jit.as_ptr(), m.as_ptr(), 1.0, jac_dense.as_mut_ptr()); }
-        for c in 0..n {
-            for r in 0..n {
-                if jac_dense[c * n + r].abs() > 1e-14 { sparsity[r][c] = true; }
-            }
-        }
-
-        // Probe 3: Jittered state to break out of min/max clamps
-        let mut y_jit = y.to_vec();
-        for (i, x) in y_jit.iter_mut().enumerate() { *x += 0.5 + (i as f64 * 0.1).fract(); }
-        unsafe { jac_fn(y_jit.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), 1.0, jac_dense.as_mut_ptr()); }
-        for c in 0..n {
-            for r in 0..n {
-                if jac_dense[c * n + r].abs() > 1e-14 { sparsity[r][c] = true; }
-            }
-        }
-
-        // Always protect the diagonal against structurally singular patterns
-        for i in 0..n { sparsity[i][i] = true; }
-
-        // Build column intersection graph
-        let mut col_conflicts = vec![vec![false; n]; n];
-        for r in 0..n {
-            let mut cols_in_row = Vec::with_capacity(10);
-            for c in 0..n {
-                if sparsity[r][c] { cols_in_row.push(c); }
-            }
-            for i in 0..cols_in_row.len() {
-                for j in (i+1)..cols_in_row.len() {
-                    col_conflicts[cols_in_row[i]][cols_in_row[j]] = true;
-                    col_conflicts[cols_in_row[j]][cols_in_row[i]] = true;
-                }
-            }
-        }
-
-        // Greedy graph coloring
-        let mut col_colors = vec![usize::MAX; n];
-        let mut num_colors = 0;
-        for c in 0..n {
-            let mut available = vec![true; num_colors + 1];
-            for neighbor in 0..n {
-                if col_conflicts[c][neighbor] {
-                    let c_color = col_colors[neighbor];
-                    if c_color != usize::MAX && c_color < available.len() {
-                        available[c_color] = false;
-                    }
-                }
-            }
-            let mut chosen = 0;
-            while chosen < available.len() && !available[chosen] { chosen += 1; }
-            col_colors[c] = chosen;
-            if chosen >= num_colors { num_colors = chosen + 1; }
-        }
-
-        // Map colors to isolated JVP evaluation vectors
-        let mut color_vectors = vec![vec![0.0; n]; num_colors];
-        let mut row_color_to_col = vec![vec![usize::MAX; n]; num_colors];
-
-        for c in 0..n {
-            let color = col_colors[c];
-            color_vectors[color][c] = 1.0;
-            for r in 0..n {
-                if sparsity[r][c] { row_color_to_col[color][r] = c; }
-            }
-        }
-
-        Self { num_colors, color_vectors, row_color_to_col }
-    }
-}
 
 pub struct NativeSparseLuSolver {
     pub is_stale: bool,
@@ -109,7 +17,6 @@ pub struct NativeSparseLuSolver {
     pub triplets: Vec<(usize, usize, f64)>,
     cached_pattern: Vec<(usize, usize)>,
     pub row_scales: Vec<f64>,
-    pub coloring: Option<JacobianColoring>,
 }
 
 impl NativeSparseLuSolver {
@@ -120,12 +27,10 @@ impl NativeSparseLuSolver {
             Err(_) => return,
         };
         
-        // MTX Header
         writeln!(file, "%%MatrixMarket matrix coordinate real general").unwrap();
         writeln!(file, "% Dumped during native solver panic").unwrap();
         writeln!(file, "{} {} {}", self.n, self.n, self.triplets.len()).unwrap();
         
-        // 1-based indexing for MTX format
         for &(r, c, val) in &self.triplets {
             writeln!(file, "{} {} {:.16e}", r + 1, c + 1, val).unwrap();
         }
@@ -139,35 +44,7 @@ impl NativeSparseLuSolver {
             triplets: Vec::with_capacity(estimated_nnz),
             cached_pattern: Vec::with_capacity(estimated_nnz),
             row_scales: vec![1.0; n],
-            coloring: None,
         }
-    }
-
-    pub fn factorize_from_dense(&mut self, jac_dense: &[f64], diag: &mut Diagnostics) -> Result<(), String> {
-        let n = self.n;
-        self.triplets.clear();
-        for r in 0..n {
-            let mut max_val = 0.0_f64;
-            for c in 0..n {
-                let val = jac_dense[c * n + r].abs();
-                if val.is_nan() { return Err("NaN detected in Jacobian".to_string()); }
-                if val > max_val { max_val = val; }
-            }
-            self.row_scales[r] = if max_val > 0.0 { 1.0 / max_val } else { 1.0 };
-        }
-
-        for c in 0..n {
-            let mut has_diag = false;
-            for r in 0..n {
-                let unscaled = jac_dense[c * n + r];
-                if unscaled != 0.0 {
-                    self.triplets.push((r, c, unscaled * self.row_scales[r]));
-                    if r == c { has_diag = true; }
-                }
-            }
-            if !has_diag { self.triplets.push((c, c, 1e-14)); }
-        }
-        self.factorize_internal(diag)
     }
 
     pub fn factorize_from_triplets(&mut self, diag: &mut Diagnostics) -> Result<(), String> {

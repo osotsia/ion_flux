@@ -1,15 +1,16 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
-use super::{NativeResFn, NativeObsFn, NativeJacFn, NativeJvpFn, NativeSetThreadsFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeObsFn, NativeJacSparseFn, NativeJvpFn, NativeSetThreadsFn, SolverConfig, Diagnostics};
 use super::integrator::{step_bdf_vsvo, BdfHistory};
 use super::linalg::NativeSparseLuSolver;
+use std::os::raw::{c_double, c_int};
 
 #[pyclass(unsendable)]
 pub struct SolverHandle {
     _lib: libloading::Library,
     res_fn: NativeResFn,
     obs_fn: Option<NativeObsFn>,
-    jac_fn: NativeJacFn,
+    jac_sparse_fn: NativeJacSparseFn,
     jvp_fn: Option<NativeJvpFn>,
     set_threads_fn: Option<NativeSetThreadsFn>,
     pub n: usize,
@@ -25,9 +26,12 @@ pub struct SolverHandle {
     pub spatial_diag: Vec<f64>,
     pub max_steps: Vec<f64>,
     
+    pub jac_rows_buf: Vec<i32>,
+    pub jac_cols_buf: Vec<i32>,
+    pub jac_vals_buf: Vec<f64>,
+    
     history: BdfHistory,
     lu_solver: NativeSparseLuSolver,
-    jac_buffer: Vec<f64>,
     config: SolverConfig,
     diag: Diagnostics,
 }
@@ -39,27 +43,20 @@ impl SolverHandle {
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let res_fn: NativeResFn = unsafe { *lib.get(b"evaluate_residual\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let obs_fn: Option<NativeObsFn> = unsafe { lib.get(b"evaluate_observables\0").map(|s| *s).ok() };
-        let jac_fn: NativeJacFn = unsafe { *lib.get(b"evaluate_jacobian\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
+        let jac_sparse_fn: NativeJacSparseFn = unsafe { *lib.get(b"evaluate_jacobian_sparse\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let jvp_fn: Option<NativeJvpFn> = unsafe { lib.get(b"evaluate_jvp\0").map(|s| *s).ok() };
         let set_threads_fn: Option<NativeSetThreadsFn> = unsafe { lib.get(b"set_spatial_threads\0").map(|s| *s).ok() };
         
         let history = BdfHistory::new(n);
 
-        let mut diag = Diagnostics::default();
-        let mut lu_solver = NativeSparseLuSolver::new(n, bw);
+        let diag = Diagnostics::default();
+        let lu_solver = NativeSparseLuSolver::new(n, bw);
         
-        // Dynamically analyze the AST structural sparsity to generate O(1) colored JVP sweeps.
-        // This fully bypasses the Python `bandwidth` block-sequential bottleneck!
-        if bw != -1 && jvp_fn.is_some() {
-            let coloring = super::linalg::JacobianColoring::new(n, jac_fn, &y0, &ydot0, &p, &m);
-            diag.max_chromatic_number = coloring.num_colors;
-            lu_solver.coloring = Some(coloring);
-        }
-
         let mut handle = SolverHandle { 
-            _lib: lib, res_fn, obs_fn, jac_fn, jvp_fn, set_threads_fn, n, bw, n_obs,
+            _lib: lib, res_fn, obs_fn, jac_sparse_fn, jvp_fn, set_threads_fn, n, bw, n_obs,
             t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag, max_steps,
-            history, lu_solver, jac_buffer: vec![0.0; n * n],
+            jac_rows_buf: vec![0; n * 50], jac_cols_buf: vec![0; n * 50], jac_vals_buf: vec![0.0; n * 50],
+            history, lu_solver,
             config: SolverConfig::default(), diag,
         };
         
@@ -83,50 +80,43 @@ impl SolverHandle {
             }
             if max_res < 1e-8 { break; }
 
-            let mut jac = vec![0.0; self.n * self.n];
-            if self.bw != -1 && self.lu_solver.coloring.is_some() {
-                let coloring = self.lu_solver.coloring.as_ref().unwrap();
-                let mut jvp_out = vec![0.0; self.n];
-                for color in 0..coloring.num_colors {
-                    unsafe { (self.jvp_fn.unwrap())(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, coloring.color_vectors[color].as_ptr(), jvp_out.as_mut_ptr()); }
-                    for r in 0..self.n {
-                        let c = coloring.row_color_to_col[color][r];
-                        if c != usize::MAX { jac[c * self.n + r] = jvp_out[r]; }
-                    }
-                }
-            } else {
-                unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
-            }
+            let mut nnz: c_int = 0;
+            unsafe { (self.jac_sparse_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), 0.0, self.jac_rows_buf.as_mut_ptr(), self.jac_cols_buf.as_mut_ptr(), self.jac_vals_buf.as_mut_ptr(), &mut nnz); }
 
             if self.bw == -1 {
                 // Fallback under-relaxation for Matrix-Free GMRES initialization
-                for i in 0..self.n {
-                    if self.id[i] < 0.5 { 
-                        let diag = jac[i * self.n + i];
-                        if diag.abs() > 1e-12 {
-                            let mut step = -res[i] / diag;
-                            if self.max_steps[i] > 0.0 && step.abs() > self.max_steps[i] {
-                                step = step.signum() * self.max_steps[i];
+                for i in 0..nnz as usize {
+                    if self.jac_rows_buf[i] == self.jac_cols_buf[i] {
+                        let r = self.jac_rows_buf[i] as usize;
+                        if self.id[r] < 0.5 { 
+                            let diag = self.jac_vals_buf[i];
+                            if diag.abs() > 1e-12 {
+                                let mut step = -res[r] / diag;
+                                if self.max_steps[r] > 0.0 && step.abs() > self.max_steps[r] {
+                                    step = step.signum() * self.max_steps[r];
+                                }
+                                self.y[r] += step * 0.8; 
                             }
-                            self.y[i] += step * 0.5; 
                         }
                     }
                 }
             } else {
                 // Exact Sparse LU fully coupled resolution
+                self.lu_solver.triplets.clear();
+                for i in 0..nnz as usize {
+                    self.lu_solver.triplets.push((self.jac_rows_buf[i] as usize, self.jac_cols_buf[i] as usize, self.jac_vals_buf[i]));
+                }
                 for i in 0..self.n {
                     if self.id[i] > 0.5 {
                         res[i] = 0.0;
-                        for j in 0..self.n {
-                            jac[j * self.n + i] = if i == j { 1.0 } else { 0.0 };
-                        }
+                        self.lu_solver.triplets.push((i, i, 1.0));
                     }
                 }
 
                 let mut dy = res.clone();
                 for i in 0..self.n { dy[i] = -dy[i]; }
 
-                if let Err(_) = self.lu_solver.factorize_from_dense(&jac, &mut self.diag) { break; }
+                if let Err(_) = self.lu_solver.factorize_from_triplets(&mut self.diag) { break; }
                 if let Err(_) = self.lu_solver.solve(&mut dy, &mut self.diag) { break; }
 
                 let mut max_step = 0.0;
@@ -136,11 +126,13 @@ impl SolverHandle {
                         if self.max_steps[i] > 0.0 && step.abs() > self.max_steps[i] {
                             step = step.signum() * self.max_steps[i];
                         }
-                        self.y[i] += step;
+                        // 0.8 damping factor to prevent explosive non-linear overshoot 
+                        // when snapping to a new algebraic state during a protocol switch.
+                        self.y[i] += step * 0.8; 
                         if step.abs() > max_step { max_step = step.abs(); }
                     }
                 }
-                if max_step < 1e-14 { break; } // Stalled
+                if max_step < 1e-14 { break; } 
             }
         }
         
@@ -148,7 +140,7 @@ impl SolverHandle {
         self.history.k_used = 0;
         self.history.ns = 0;
         self.lu_solver.mark_stale();
-        self.diag.accepted_steps = 0; // Force safe BDF cold start
+        self.diag.accepted_steps = 0; 
         
         Ok(())
     }
@@ -180,18 +172,22 @@ impl SolverHandle {
         self.y = y;
         self.ydot = ydot;
         self.lu_solver.mark_stale();
-        self.diag.accepted_steps = 0; // Force a safe BDF cold start to rebuild history phi polynomials!
-        self.history.order = 1;       // Flush corrupted VSVO polynomial predictions
+        
+        self.diag.accepted_steps = 0; 
+        self.history.order = 1;       
         self.history.k_used = 0;
         self.history.ns = 0;
+        
+        // Fix: Strictly flush tracking history and momentum scalars to prevent overshooting
+        self.history.h = 0.0;
+        self.history.h_used = 0.0;
+        self.history.c_j = 0.0;
+        self.history.c_j_old = 0.0;
+        for j in 0..6 {
+            self.history.phi[j].fill(0.0);
+        }
+        
         Ok(())
-    }
-
-    pub fn get_jacobian<'py>(&mut self, py: Python<'py>, c_j: f64) -> PyResult<Bound<'py, numpy::PyArray2<f64>>> {
-        unsafe { (self.jac_fn)(self.y.as_ptr(), self.ydot.as_ptr(), self.p.as_ptr(), self.m.as_ptr(), c_j, self.jac_buffer.as_mut_ptr()) };
-        let jac_2d = numpy::ndarray::Array2::from_shape_vec((self.n, self.n), self.jac_buffer.clone())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(jac_2d.to_pyarray(py))
     }
 }
 
@@ -205,8 +201,8 @@ impl SolverHandle {
         step_bdf_vsvo(
             self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.m, &self.id, &self.constraints, &self.spatial_diag, &self.max_steps,
             dt, &mut self.history,
-            self.res_fn, self.jac_fn, self.jvp_fn,
-            &mut self.lu_solver, &mut self.jac_buffer, &self.config, &mut self.diag, hist, self.t
+            self.res_fn, self.jac_sparse_fn, self.jvp_fn,
+            &mut self.lu_solver, &mut self.jac_rows_buf, &mut self.jac_cols_buf, &mut self.jac_vals_buf, &self.config, &mut self.diag, hist, self.t
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         
         self.t += dt;

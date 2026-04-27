@@ -138,8 +138,6 @@ pub fn solve_batch_native<'py>(
                 let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), m_list.clone(), spatial_diag.clone(), max_steps.clone(), n_obs, debug.clone())
                     .map_err(|e| e.to_string())?;
                     
-                // CRITICAL FIX: Prevent Rayon + OpenMP thread oversubscription.
-                // Explicitly clamp OpenMP to 1 thread strictly within this Rayon worker context.
                 handle.set_spatial_threads(1);
 
                 let step_list = if let Some(ref protos) = protocol_steps {
@@ -152,7 +150,6 @@ pub fn solve_batch_native<'py>(
                 let mut step_obs = vec![0.0; n_obs];
                 
                 if has_protocol {
-                    // --- NATIVE STATE MACHINE EXECUTION ---
                     let mut out_t = vec![0.0];
                     let mut out_traj = handle.y.clone();
                     if n_obs > 0 { handle.get_observables(&mut step_obs).unwrap_or(()); }
@@ -231,14 +228,13 @@ pub fn solve_batch_native<'py>(
                                 if n_obs > 0 { handle.get_observables(&mut step_obs).unwrap_or(()); }
                                 out_obs.extend_from_slice(&step_obs);
                                 
-                                // Cap off the step with a finalized 100% bar and a clean newline
                                 if show_progress {
                                     let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
                                     let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
                                     print!("\r▶ {} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", step_name, handle.t, v_str);
                                     std::io::stdout().flush().unwrap();
                                 }
-                                break; // Trigger met, advance
+                                break; 
                             }
                             
                             if step_res.is_err() { break; }
@@ -249,7 +245,6 @@ pub fn solve_batch_native<'py>(
                             if n_obs > 0 { handle.get_observables(&mut step_obs).unwrap_or(()); }
                             out_obs.extend_from_slice(&step_obs);
                             
-                            // Render the live, ticking progress bar 
                             if show_progress {
                                 let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
                                 let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
@@ -265,7 +260,6 @@ pub fn solve_batch_native<'py>(
                             }
                         }
                         
-                        // Finalize step if it completed via max time rather than trigger asymptote
                         if show_progress && t_elapsed >= t_limit && t_limit != std::f64::INFINITY {
                             let step_name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
                             let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle.y[v_idx as usize]) } else { String::new() };
@@ -285,7 +279,6 @@ pub fn solve_batch_native<'py>(
                     
                     Ok((out_t, out_traj, out_obs))
                 } else {
-                    // --- CONTINUOUS EVALUATION BLOCK (No Protocol) ---
                     let out_t = t_eval.clone();
                     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
                     let mut out_obs = vec![0.0; t_eval.len() * n_obs];

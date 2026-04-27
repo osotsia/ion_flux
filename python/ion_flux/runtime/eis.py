@@ -14,15 +14,15 @@ def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str)
     else:
         N = session.engine.layout.n_states
         
+        y = session.handle.get_state()
+        ydot = np.zeros_like(y)
+        
         # EXACT MASS MATRIX EXTRACTION
         # Because J(c_j) = dF/dy + c_j * dF/dydot, evaluating J at c_j=1.0 and 
         # subtracting the steady-state J(0.0) extracts exactly dF/dydot (The Mass Matrix).
-        J_steady = session.handle.get_jacobian(0.0)
-        J_1 = session.handle.get_jacobian(1.0)
+        J_steady = np.array(session.engine.evaluate_jacobian(y.tolist(), ydot.tolist(), 0.0, session.parameters))
+        J_1 = np.array(session.engine.evaluate_jacobian(y.tolist(), ydot.tolist(), 1.0, session.parameters))
         M = J_1 - J_steady
-        
-        y = session.handle.get_state()
-        ydot = np.zeros_like(y)
         
         # Pack both standard mathematical parameters and structural mesh constants
         p_list = session.engine._pack_parameters(session.parameters)

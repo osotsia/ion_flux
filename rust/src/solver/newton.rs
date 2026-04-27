@@ -1,17 +1,6 @@
-/* -----------------------------------------------------------------
- * This file is a Rust port of the IDAS solver from the SUNDIALS library.
- * 
- * Original SUNDIALS Copyright Start
- * Copyright (c) 2002-2026, Lawrence Livermore National Security, 
- * University of Maryland Baltimore County, Southern Methodist University, 
- * and the SUNDIALS contributors. All rights reserved.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- * SUNDIALS Copyright End
- * -----------------------------------------------------------------*/
- 
 use std::time::Instant;
-use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
+use std::os::raw::c_int;
+use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::linalg::{NativeSparseLuSolver, solve_gmres};
 
 pub enum NewtonFailure {
@@ -28,196 +17,156 @@ pub enum NewtonResult {
     DivergedFatal(NewtonFailure),    
 }
 
-/// SUNDIALS Inexact Newton-Raphson implementation
 pub fn solve_nonlinear_system(
     n: usize, bw: isize,
     y: &mut[f64], ydot: &mut [f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     c_j: f64, c_j_last_setup: &mut f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
-    res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
-    lu_solver: &mut NativeSparseLuSolver, jac_buffer: &mut [f64],
+    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>,
+    lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
     config: &SolverConfig, diag: &mut Diagnostics,
 ) -> NewtonResult {
     
-    // 1. The 25% Staleness Rule
     let mut cj_ratio = if *c_j_last_setup == 0.0 { 1.0 } else { c_j / *c_j_last_setup };
     let cj_changed = cj_ratio < 0.6 || cj_ratio > 1.6666666666666667;
     
-    let mut is_stale_at_start = lu_solver.is_stale;
     if cj_changed {
         lu_solver.mark_stale();
-        is_stale_at_start = true;
     }
 
-    let mut ee = vec![0.0; n];  // Accumulated Newton Correction
+    let mut ee = vec![0.0; n];
     let mut res = vec![0.0; n];
     let mut dy = vec![0.0; n];
     
-    diag.recent_newton_norms.clear(); // Reset trace for the new step
+    diag.recent_newton_norms.clear();
 
-    // Inner loop allows the solver to flush a stale Jacobian and try again 
-    // WITHOUT collapsing the integration step size `dt`.
-    loop {
-        let mut old_fnorm = 0.0;
-        let mut retry = false;
+    let mut old_fnorm = 0.0;
 
-        for iter in 0..config.max_newton_iters {
-            diag.newton_iterations += 1;
+    for iter in 0..config.max_newton_iters {
+        diag.newton_iterations += 1;
 
-            // Evaluate Residual: F(y_pred + ee, ydot_pred + c_j*ee)
-            for i in 0..n {
-                y[i] = y_pred[i] + ee[i];
-                ydot[i] = ydot_pred[i] + c_j * ee[i];
+        for i in 0..n {
+            y[i] = y_pred[i] + ee[i];
+            ydot[i] = ydot_pred[i] + c_j * ee[i];
+        }
+
+        let t_res = Instant::now();
+        unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), res.as_mut_ptr()) };
+        diag.residual_time_us += t_res.elapsed().as_micros();
+        
+        diag.last_res = res.clone();
+
+        let f_norm = wrms_norm_all(&res, weights);
+        if !f_norm.is_finite() {
+            return NewtonResult::DivergedFatal(NewtonFailure::NonFiniteResidual);
+        }
+
+        for i in 0..n { dy[i] = -res[i]; }
+
+        if bw == -1 {
+            let jvp = jvp_fn.expect("evaluate_jvp missing.");
+            let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p.as_ptr(); let m_ptr = m.as_ptr();
+            let jvp_closure = |v: &[f64], out: &mut [f64]| {
+                unsafe { jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
+            };
+            let precond = |v: &[f64], out: &mut [f64]| {
+                for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
+            };
+            if let Err(e) = solve_gmres(n, &mut dy, jvp_closure, precond) {
+                return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
             }
-
-            let t_res = Instant::now();
-            unsafe { res_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), res.as_mut_ptr()) };
-            diag.residual_time_us += t_res.elapsed().as_micros();
-            
-            diag.last_res = res.clone();
-
-            // Newton convergence is measured against ALL variables (no algebraic suppression)
-            let f_norm = wrms_norm_all(&res, weights);
-            if !f_norm.is_finite() {
-                let fail = NewtonFailure::NonFiniteResidual;
-                if is_stale_at_start && bw != -1 {
-                    retry = true;
-                    break;
+            cj_ratio = 1.0;
+        } else {
+            if lu_solver.is_stale {
+                let start = Instant::now();
+                let mut nnz: c_int = 0;
+                unsafe {
+                    jac_sparse_fn(
+                        y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j,
+                        jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(),
+                        &mut nnz
+                    );
                 }
-                return NewtonResult::DivergedFatal(fail);
-            }
-
-            for i in 0..n { dy[i] = -res[i]; }
-
-            // Linear Solve
-            if bw == -1 {
-                let jvp = jvp_fn.expect("evaluate_jvp missing.");
-                let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p.as_ptr(); let m_ptr = m.as_ptr();
-                let jvp_closure = |v: &[f64], out: &mut [f64]| {
-                    unsafe { jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) };
-                };
-                let precond = |v: &[f64], out: &mut [f64]| {
-                    for i in 0..n { out[i] = v[i] / (c_j * id[i] + spatial_diag[i] + 1.0); }
-                };
-                if let Err(e) = solve_gmres(n, &mut dy, jvp_closure, precond) {
-                    return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
+                
+                lu_solver.triplets.clear();
+                for i in 0..(nnz as usize) {
+                    lu_solver.triplets.push((jac_rows_buf[i] as usize, jac_cols_buf[i] as usize, jac_vals_buf[i]));
                 }
+                
+                diag.jacobian_assembly_time_us += start.elapsed().as_micros();
+                diag.jacobian_evaluations += 1;
+                
+                if let Err(e) = lu_solver.factorize_from_triplets(diag) {
+                    return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
+                }
+                
+                *c_j_last_setup = c_j;
                 cj_ratio = 1.0;
-            } else {
-                if lu_solver.is_stale {
-                    let start = Instant::now();
-                    
-                    if let Some(coloring) = &lu_solver.coloring {
-                        let jvp = jvp_fn.expect("evaluate_jvp missing.");
-                        lu_solver.triplets.clear();
-                        let mut jvp_out = vec![0.0; n];
-                        
-                        for color in 0..coloring.num_colors {
-                            unsafe { jvp(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, coloring.color_vectors[color].as_ptr(), jvp_out.as_mut_ptr()); }
-                            for r in 0..n {
-                                let c = coloring.row_color_to_col[color][r];
-                                if c != usize::MAX {
-                                    lu_solver.triplets.push((r, c, jvp_out[r]));
-                                }
-                            }
-                        }
-                        
-                        diag.jacobian_assembly_time_us += start.elapsed().as_micros();
-                        diag.jacobian_evaluations += coloring.num_colors;
-                        
-                        if let Err(e) = lu_solver.factorize_from_triplets(diag) {
-                            return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
-                        }
-                    } else {
-                        // Fallback to legacy C++ Dense Jacobian loop
-                        unsafe { jac_fn(y_pred.as_ptr(), ydot_pred.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, jac_buffer.as_mut_ptr()) };
-                        diag.jacobian_assembly_time_us += start.elapsed().as_micros();
-                        diag.jacobian_evaluations += 1;
-                        
-                        if let Err(e) = lu_solver.factorize_from_dense(jac_buffer, diag) {
-                            return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); 
-                        }
-                    }
-                    *c_j_last_setup = c_j;
-                    cj_ratio = 1.0;
-                }
-                if let Err(e) = lu_solver.solve(&mut dy, diag) {
-                    return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
-                }
+                lu_solver.is_stale = false;
             }
-
-            // 2. Linear Solution Scaling (Ensures step is valid when c_j changes but Jacobian is retained)
-            if bw != -1 && cj_ratio != 1.0 {
-                let scale = 2.0 / (1.0 + cj_ratio);
-                for i in 0..n { dy[i] *= scale; }
-            }
-
-            // --- Component-Wise Damping (Newton Step Clamping) ---
-            let mut is_clamped = false;
-            for i in 0..n {
-                if max_steps[i] > 0.0 && dy[i].abs() > max_steps[i] {
-                    dy[i] = dy[i].signum() * max_steps[i];
-                    is_clamped = true;
-                }
-                ee[i] += dy[i];
-            }
-            // -------------------------------------------------------
-
-            let dy_norm = wrms_norm_all(&dy, weights);
-            diag.last_dy = dy.clone();
-            diag.last_weights = weights.to_vec();
-
-            if diag.recent_newton_norms.len() >= 5 { diag.recent_newton_norms.pop_front(); }
-            diag.recent_newton_norms.push_back((iter + 1, f_norm, dy_norm));
-
-            // 3. Stringent SUNDIALS Convergence Criteria
-            if iter == 0 {
-                // Trap initialization balance errors
-                if diag.accepted_steps == 0 {
-                    let mut max_r = 0.0;
-                    let mut max_idx = 0;
-                    for i in 0..n {
-                        if res[i].abs() > max_r { max_r = res[i].abs(); max_idx = i; }
-                    }
-                    diag.t0_max_res = max_r;
-                    diag.t0_max_res_idx = max_idx;
-                }
-                old_fnorm = dy_norm;
-                if dy_norm <= 1e-8 * config.eps_newt {
-                    return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
-                }
-            } else {
-                let rate = (dy_norm / old_fnorm).powf(1.0 / iter as f64);
-                diag.last_rho = rate;
-                
-                // 4. Early Divergence Detection (Thrashing)
-                // Bypass thrashing false-positives if the step was artificially clamped
-                if rate > config.max_rho && !is_clamped {
-                    let fail = NewtonFailure::ContractionThrashing(rate);
-                    if is_stale_at_start && bw != -1 {
-                        retry = true;
-                        break;
-                    }
-                    return NewtonResult::DivergedFatal(fail);
-                }
-                
-                let ss = rate / (1.0 - rate);
-                if ss * dy_norm <= config.eps_newt {
-                    return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
-                }
+            if let Err(e) = lu_solver.solve(&mut dy, diag) {
+                return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e));
             }
         }
-        
-        // If we reach here, we either hit max iterations or broke out to retry.
-        if retry || (is_stale_at_start && bw != -1) {
-            is_stale_at_start = false;
-            lu_solver.mark_stale();
-            ee.fill(0.0);
-            continue; // Retry outer loop with a fresh Jacobian
+
+        if bw != -1 && cj_ratio != 1.0 {
+            let scale = 2.0 / (1.0 + cj_ratio);
+            for i in 0..n { dy[i] *= scale; }
         }
-        
-        return NewtonResult::DivergedFatal(NewtonFailure::MaxItersReached);
+
+        let mut is_clamped = false;
+        for i in 0..n {
+            if max_steps[i] > 0.0 && dy[i].abs() > max_steps[i] {
+                dy[i] = dy[i].signum() * max_steps[i];
+                is_clamped = true;
+            }
+            ee[i] += dy[i];
+        }
+
+        let dy_norm = wrms_norm_all(&dy, weights);
+        diag.last_dy = dy.clone();
+        diag.last_weights = weights.to_vec();
+
+        if diag.recent_newton_norms.len() >= 5 { diag.recent_newton_norms.pop_front(); }
+        diag.recent_newton_norms.push_back((iter + 1, f_norm, dy_norm));
+
+        if iter == 0 {
+            if diag.accepted_steps == 0 {
+                let mut max_r = 0.0;
+                let mut max_idx = 0;
+                for i in 0..n {
+                    if res[i].abs() > max_r { max_r = res[i].abs(); max_idx = i; }
+                }
+                diag.t0_max_res = max_r;
+                diag.t0_max_res_idx = max_idx;
+            }
+            old_fnorm = dy_norm;
+            if dy_norm <= 1e-8 * config.eps_newt {
+                return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
+            }
+        } else {
+            let rate = (dy_norm / old_fnorm).powf(1.0 / iter as f64);
+            diag.last_rho = rate;
+            
+            if rate > config.max_rho && !is_clamped {
+                if !lu_solver.is_stale {
+                    lu_solver.mark_stale();
+                    // By continuing WITHOUT resetting `ee`, we are executing a true 
+                    // Newton-Raphson update: re-assembling the Jacobian at the *current*
+                    // non-linear iterate, rather than tossing out our progress.
+                    continue;
+                }
+                return NewtonResult::DivergedFatal(NewtonFailure::ContractionThrashing(rate));
+            }
+            
+            let ss = rate / (1.0 - rate);
+            if ss * dy_norm <= config.eps_newt {
+                return evaluate_constraints_and_return(n, y, &ee, phi_0, constraints, iter);
+            }
+        }
     }
+    
+    NewtonResult::DivergedFatal(NewtonFailure::MaxItersReached)
 }
 
 fn evaluate_constraints_and_return(n: usize, y: &[f64], ee: &[f64], phi_0: &[f64], constraints: &[f64], iter: usize) -> NewtonResult {

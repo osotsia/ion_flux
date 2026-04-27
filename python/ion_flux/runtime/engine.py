@@ -387,10 +387,31 @@ class Engine:
         return self.runtime.evaluate_observables(y, ydot, p_list, m_list, self.layout.n_obs)
 
     def evaluate_jacobian(self, y: List[float], ydot: List[float], c_j: float, parameters: Optional[Dict[str, float]] = None) -> List[List[float]]:
+        """Dynamically proxies the C++ analytical Sparse representation back to dense Python matrices for Oracle tests."""
         if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
+        import ctypes
+        
         p_list = self._pack_parameters(parameters or {})
         m_list = self.layout.get_mesh_data()
-        return self.runtime.evaluate_jacobian(y, ydot, p_list, m_list, c_j)
+        
+        N = self.layout.n_states
+        rows = (ctypes.c_int * (N * 50))()
+        cols = (ctypes.c_int * (N * 50))()
+        vals = (ctypes.c_double * (N * 50))()
+        nnz = ctypes.c_int(0)
+        
+        y_arr = (ctypes.c_double * N)(*y)
+        ydot_arr = (ctypes.c_double * N)(*ydot)
+        p_arr = (ctypes.c_double * len(p_list))(*p_list)
+        m_arr = (ctypes.c_double * len(m_list))(*m_list)
+        
+        self.runtime.dll.evaluate_jacobian_sparse(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), rows, cols, vals, ctypes.byref(nnz))
+        
+        jac_2d = [[0.0] * N for _ in range(N)]
+        for i in range(nnz.value):
+            jac_2d[rows[i]][cols[i]] = vals[i]
+            
+        return jac_2d
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
                 t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:

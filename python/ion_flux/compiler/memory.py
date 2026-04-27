@@ -34,29 +34,38 @@ class MemoryLayout:
         self.mesh_offsets = {}
         self.mesh_cache = {}
         
-        # Isolate geometry/mesh arrays into a separate constant block
-        for s in sorted_states:
-            if s.domain and getattr(s.domain, "csr_data", None):
-                d = s.domain
-                if d.name not in self.mesh_offsets:
-                    csr = d.csr_data
-                    offsets = {}
-                    
-                    for key in ["weights", "row_ptr", "col_ind", "volumes"]:
-                        if key in csr:
-                            offsets[key] = self.m_length
-                            for v in csr[key]:
+        def _get_domains(d):
+            if d is None: return []
+            if getattr(d, "type", None) == "composite" or type(d).__name__ == "CompositeDomain":
+                res = []
+                for sub in getattr(d, "domains", []):
+                    res.extend(_get_domains(sub))
+                return res
+            return [d]
+
+        # Deeply walk all domain boundaries/multi-scale dependencies to extract CSR graph matrices
+        for s in sorted_states + (observables or []):
+            for d in _get_domains(getattr(s, "domain", None)):
+                if getattr(d, "csr_data", None):
+                    if d.name not in self.mesh_offsets:
+                        csr = d.csr_data
+                        offsets = {}
+                        
+                        for key in ["weights", "row_ptr", "col_ind", "volumes"]:
+                            if key in csr:
+                                offsets[key] = self.m_length
+                                for v in csr[key]:
+                                    self.mesh_cache[self.m_length] = float(v)
+                                    self.m_length += 1
+                                
+                        offsets["surfaces"] = {}
+                        for tag, mask in csr.get("surface_masks", {}).items():
+                            offsets["surfaces"][tag] = self.m_length
+                            for v in mask:
                                 self.mesh_cache[self.m_length] = float(v)
                                 self.m_length += 1
-                            
-                    offsets["surfaces"] = {}
-                    for tag, mask in csr.get("surface_masks", {}).items():
-                        offsets["surfaces"][tag] = self.m_length
-                        for v in mask:
-                            self.mesh_cache[self.m_length] = float(v)
-                            self.m_length += 1
-                            
-                    self.mesh_offsets[d.name] = offsets
+                                
+                        self.mesh_offsets[d.name] = offsets
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MemoryLayout":

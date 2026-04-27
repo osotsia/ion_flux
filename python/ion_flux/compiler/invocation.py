@@ -23,12 +23,10 @@ class NativeRuntime:
         except OSError as e:
             raise RuntimeError(f"Failed to load compiled binary at {lib_path}: {e}")
 
-        # Bind OpenMP thread control if emitted
         if hasattr(self.dll, "set_spatial_threads"):
             self.dll.set_spatial_threads.argtypes = [ctypes.c_int]
             self.dll.set_spatial_threads.restype = None
 
-        # Signature: void evaluate_residual(y, ydot, p, res)
         self.dll.evaluate_residual.argtypes = [
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
@@ -44,13 +42,13 @@ class NativeRuntime:
             ]
             self.dll.evaluate_observables.restype = None
 
-        # Signature: void evaluate_jacobian(y, ydot, p, c_j, jac_out)
-        self.dll.evaluate_jacobian.argtypes = [
+        self.dll.evaluate_jacobian_sparse.argtypes = [
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
-            ctypes.c_double, ctypes.POINTER(ctypes.c_double),
+            ctypes.c_double, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int)
         ]
-        self.dll.evaluate_jacobian.restype = None
+        self.dll.evaluate_jacobian_sparse.restype = None
 
         self.dll.evaluate_vjp.argtypes = [
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
@@ -98,25 +96,6 @@ class NativeRuntime:
         if hasattr(self.dll, "evaluate_observables"):
             self.dll.evaluate_observables(y_arr, ydot_arr, p_arr, m_arr, obs_arr)
         return list(obs_arr)
-
-    def evaluate_jacobian(self, y: List[float], ydot: List[float], p: List[float], m: List[float], c_j: float) -> List[List[float]]:
-        y_arr = (ctypes.c_double * self.n_states)(*y)
-        ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
-        p_arr = (ctypes.c_double * len(p))(*p)
-        m_arr = (ctypes.c_double * len(m))(*m)
-        jac_arr = (ctypes.c_double * (self.n_states * self.n_states))()
-        
-        self.dll.evaluate_jacobian(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), jac_arr)
-        
-        jac_2d = []
-        for row in range(self.n_states):
-            row_vals = []
-            for col in range(self.n_states):
-                row_vals.append(jac_arr[col * self.n_states + row])
-            jac_2d.append(row_vals)
-            
-        return jac_2d
-
 
 class NativeCompiler:
     """Manages the Clang/LLVM toolchain invocation and caching of emitted C++ strings."""
@@ -220,7 +199,6 @@ class NativeCompiler:
 
         success = attempt_compile(self.compiler_cmd, self.enzyme_plugin)
 
-        # Cleanup
         if os.path.exists(source_path):
             os.remove(source_path)
         if os.path.exists(tmp_lib_path):

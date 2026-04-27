@@ -44,7 +44,13 @@ class Loss:
             s_base.reach_steady_state()
             
             y_ss = s_base.handle.get_state() if s_base.handle else s_base._mock_y
-            J_ss = s_base.handle.get_jacobian(0.0) if s_base.handle else np.eye(len(y_ss))
+            
+            # BUGFIX: Align the Adjoint backprop execution pathway with the EIS analytical engine method signature
+            if s_base.handle:
+                ydot_ss = np.zeros_like(y_ss)
+                J_ss = np.array(self._engine.evaluate_jacobian(y_ss.tolist(), ydot_ss.tolist(), 0.0, self._parameters))
+            else:
+                J_ss = np.eye(len(y_ss))
             
             # Pre-factor the Jacobian for O(N^2) sensitivity solve
             # Transpose solves are required strictly for Adjoint formulation (J^T * lambda = C)

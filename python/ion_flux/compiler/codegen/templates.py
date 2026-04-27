@@ -1,6 +1,5 @@
 import jinja2
 
-# Robust Jinja2 template handling C++ scope safely and natively supporting macros.
 TEMPLATE = """
 #include <cmath>
 #include <cstdlib>
@@ -16,6 +15,7 @@ TEMPLATE = """
 #ifdef ENZYME_ACTIVE
 int enzyme_dup = 1;
 int enzyme_const = 2;
+int enzyme_dupnoneed = 3;
 extern void __enzyme_fwddiff(void*, ...);
 extern void __enzyme_autodiff(void*, ...);
 #endif
@@ -36,53 +36,18 @@ void evaluate_observables(const double* y, const double* ydot, const double* p, 
 {{ obs_body | indent(4) }}
 }
 
-void evaluate_jacobian(const double* y, const double* ydot, const double* p, const double* m, double c_j, double* jac_out) {
+{{ jac_block_funcs }}
+
+void evaluate_jacobian_sparse(const double* y, const double* ydot, const double* p, const double* m, double c_j, int* out_rows, int* out_cols, double* out_vals, int* out_nnz) {
     int N = {{ n_states }};
     std::vector<double> dy(N, 0.0);
     std::vector<double> dydot(N, 0.0);
-    std::vector<double> res_dummy(N, 0.0);
-    std::vector<double> dres(N, 0.0);
+    int nnz = 0;
+    int max_nnz = N * 50;
 
-{% if bandwidth > 0 %}
-    int bw = {{ bandwidth }};
-    int stride = 2 * bw + 1;
-    for (int color = 0; color < stride; ++color) {
-        for (int i = 0; i < N; ++i) {
-            bool active = ((i % stride) == color);
-            dy[i] = active ? 1.0 : 0.0;
-            dydot[i] = active ? c_j : 0.0;
-            dres[i] = 0.0;
-        }
-#ifdef ENZYME_ACTIVE
-        __enzyme_fwddiff((void*)evaluate_residual, enzyme_dup, y, dy.data(), enzyme_dup, ydot, dydot.data(), enzyme_const, p, enzyme_const, m, enzyme_dup, res_dummy.data(), dres.data());
-#endif
-        for (int row = 0; row < N; ++row) {
-            int col_base = row - (row % stride) + color;
-            int actual_col = -1;
-            if (std::abs(row - col_base) <= bw) actual_col = col_base;
-            else if (std::abs(row - (col_base - stride)) <= bw) actual_col = col_base - stride;
-            else if (std::abs(row - (col_base + stride)) <= bw) actual_col = col_base + stride;
+{{ jac_assembly_body | indent(4) }}
 
-            if (actual_col >= 0 && actual_col < N) {
-                jac_out[actual_col * N + row] = dres[row];
-            }
-        }
-    }
-{% else %}
-    for (int col = 0; col < N; ++col) {
-        for (int i = 0; i < N; ++i) {
-            dy[i] = (i == col) ? 1.0 : 0.0;
-            dydot[i] = (i == col) ? c_j : 0.0;
-            dres[i] = 0.0;
-        }
-#ifdef ENZYME_ACTIVE
-        __enzyme_fwddiff((void*)evaluate_residual, enzyme_dup, y, dy.data(), enzyme_dup, ydot, dydot.data(), enzyme_const, p, enzyme_const, m, enzyme_dup, res_dummy.data(), dres.data());
-#endif
-        for (int row = 0; row < N; ++row) {
-            jac_out[col * N + row] = dres[row];
-        }
-    }
-{% endif %}
+    *out_nnz = nnz;
 }
 
 void evaluate_jvp(const double* y, const double* ydot, const double* p, const double* m, double c_j, const double* v, double* jvp_out) {
@@ -103,7 +68,7 @@ void evaluate_jvp(const double* y, const double* ydot, const double* p, const do
         enzyme_dup, ydot, dydot.data(), 
         enzyme_const, p, 
         enzyme_const, m,
-        enzyme_dup, res_dummy.data(), jvp_out);
+        enzyme_dupnoneed, res_dummy.data(), jvp_out);
 #endif
 }
 
@@ -121,13 +86,13 @@ void evaluate_vjp(const double* y, const double* ydot, const double* p, const do
         enzyme_dup, ydot, dydot_out, 
         enzyme_dup, p, dp_out, 
         enzyme_const, m,
-        enzyme_dup, res_dummy.data(), (double*)lambda_vec);
+        enzyme_dupnoneed, res_dummy.data(), (double*)lambda_vec);
 #endif
 }
 } // extern "C"
 """
 
-def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, bandwidth: int) -> str:
+def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, jac_block_funcs: str, jac_assembly_body: str) -> str:
     env = jinja2.Environment()
     template = env.from_string(TEMPLATE)
     return template.render(
@@ -136,5 +101,6 @@ def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, o
         n_obs=n_obs,
         body=body,
         obs_body=obs_body,
-        bandwidth=bandwidth
+        jac_block_funcs=jac_block_funcs,
+        jac_assembly_body=jac_assembly_body
     )

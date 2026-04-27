@@ -89,6 +89,9 @@ class SpatialLoweringVisitor:
         if t == "dirichlet_bnd": return self.lower(node["node"], idx_mgr) 
         raise ValueError(f"Unknown IR Node: {t}")
 
+    def _array_access(self, arr: str, index: Expr) -> Expr:
+        return ArrayAccess(arr, index)
+
     def _lower_state(self, node: Dict[str, Any], idx_mgr: IndexManager, face: Optional[str]) -> Expr:
         state_name = node["name"]
         offset = self.layout.state_offsets[state_name][0]
@@ -97,7 +100,7 @@ class SpatialLoweringVisitor:
         
         flat_idx = idx_mgr.get_flat_index(d_name)
         arr = "ydot" if self.use_ydot else "y"
-        base_access = ArrayAccess(arr, BinaryOp("+", Literal(offset), flat_idx))
+        base_access = self._array_access(arr, BinaryOp("+", Literal(offset), flat_idx))
         
         if face and self.current_axis:
             b_axis = self.topo.get_base_axis(self.current_axis)
@@ -109,7 +112,7 @@ class SpatialLoweringVisitor:
             idx_shifted.register(b_axis, BinaryOp("+", idx_mgr.get_local(b_axis), Literal(shift)))
             
             neighbor_idx = idx_shifted.get_flat_index(d_name)
-            neighbor_access = ArrayAccess(arr, BinaryOp("+", Literal(offset), neighbor_idx))
+            neighbor_access = self._array_access(arr, BinaryOp("+", Literal(offset), neighbor_idx))
             interpolated_access = BinaryOp("*", Literal(0.5), BinaryOp("+", base_access, neighbor_access))
             
             dirichlet_bcs = self.ctx.get_dirichlet_bc(state_name)
@@ -234,7 +237,7 @@ class SpatialLoweringVisitor:
         cpp_code = "[&]() {\n    double sum = 0.0;\n"
         for axis in axes:
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
-            cpp_code += f"    for(int i_{int_id}_{axis} = 0; i_{int_id}_{axis} < {res}; ++i_{int_id}_{axis}) {{\n"
+            cpp_code += f"    #pragma clang loop unroll(full)\n    for(int i_{int_id}_{axis} = 0; i_{int_id}_{axis} < {res}; ++i_{int_id}_{axis}) {{\n"
             
         cpp_code += "        double vol = 1.0;\n" + geom_code
         cpp_code += f"        sum += {child_expr.to_cpp()} * vol;\n"
@@ -277,7 +280,6 @@ class SpatialLoweringVisitor:
         
         idx_expr = BinaryOp("-", idx_mgr.get_local(b_axis), Literal(start))
         
-        # Determine the physical geometry for the cell faces
         res = self.topo.domains.get(axis, {}).get("resolution", 1)
         c_left_bnd = BinaryOp("==", idx_expr, Literal(0))
         c_right_bnd = BinaryOp("==", idx_expr, Literal(res - 1))
@@ -341,7 +343,7 @@ class SpatialLoweringVisitor:
                 L_dot = self.lower(binding["rhs"], idx_mgr)
                 self.use_ydot = False
                 
-                y_curr = ArrayAccess("y", BinaryOp("+", Literal(self.layout.state_offsets[state_name][0]), idx_mgr.get_flat_index(d_name)))
+                y_curr = self._array_access("y", BinaryOp("+", Literal(self.layout.state_offsets[state_name][0]), idx_mgr.get_flat_index(d_name)))
                 
                 dim_mult = Discretizer.ale_dimension_multiplier(getattr(domain, "coord_sys", ""))
                 div_v = BinaryOp("*", Literal(dim_mult), BinaryOp("/", L_dot, FuncCall("std::max", [Literal(1e-12), L])))

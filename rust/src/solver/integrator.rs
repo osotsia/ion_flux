@@ -1,22 +1,9 @@
-/* -----------------------------------------------------------------
- * This file is a Rust port of the IDAS solver from the SUNDIALS library.
- * 
- * Original SUNDIALS Copyright Start
- * Copyright (c) 2002-2026, Lawrence Livermore National Security, 
- * University of Maryland Baltimore County, Southern Methodist University, 
- * and the SUNDIALS contributors. All rights reserved.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- * SUNDIALS Copyright End
- * -----------------------------------------------------------------*/
- 
 use std::fs::File;
 use std::io::Write;
-use super::{NativeResFn, NativeJacFn, NativeJvpFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, SolverConfig, Diagnostics};
 use super::linalg::NativeSparseLuSolver;
 use super::newton::{solve_nonlinear_system, NewtonResult, NewtonFailure, wrms_norm_mask};
 
-/// SUNDIALS Modified Divided Difference Array Structure (VSVO BDF)
 #[derive(Clone)]
 pub struct BdfHistory {
     pub order: usize,
@@ -116,7 +103,6 @@ impl BdfHistory {
         }
     }
 
-    /// Cascading Phi Update & Order Evaluation (Matches IDACompleteStep)
     pub fn complete_step(&mut self, err_k: f64, err_km1: f64, err_km2: f64, err_kp1: f64, ee: &[f64], min_dt: f64, max_dt: f64) {
         let n = ee.len();
         let kdiff = self.order as isize - self.k_used as isize;
@@ -131,10 +117,9 @@ impl BdfHistory {
             if self.order < self.max_order { self.order += 1; }
             self.h = (self.h * 2.0).clamp(min_dt, max_dt); 
         } else {
-            let action; // 0=Maintain, 1=Raise, -1=Lower
+            let action;
             let mut err_knew = err_k;
             let terr_k = (self.order as f64 + 1.0) * err_k;
-
             let terr_kp1 = (self.order as f64 + 2.0) * err_kp1;
 
             if self.order + 1 >= self.ns || kdiff == 1 { action = 0; }
@@ -163,13 +148,10 @@ impl BdfHistory {
             self.h = (self.h * eta).clamp(min_dt, max_dt);
         }
 
-        // Save ee for possible order increase on next step
         if self.k_used < self.max_order {
             self.phi[self.k_used + 1].copy_from_slice(ee);
         }
 
-        // Descending loop order ensures we cascade the NEW values of phi downwards, 
-        // exactly matching SUNDIALS simultaneous X += Z array behavior.
         for i in 0..n {
             self.phi[self.k_used][i] += ee[i];
         }
@@ -186,18 +168,17 @@ pub fn step_bdf_vsvo(
     y: &mut[f64], ydot: &mut[f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     target_dt: f64,
     history: &mut BdfHistory,
-    res_fn: NativeResFn, jac_fn: NativeJacFn, jvp_fn: Option<NativeJvpFn>,
-    lu_solver: &mut NativeSparseLuSolver, jac_buffer: &mut[f64],
+    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>,
+    lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
     config: &SolverConfig, diag: &mut Diagnostics,
     mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
     abs_t: f64,
 ) -> Result<(), String> {
     
     let mut t_local = 0.0;
-    let mut error_fails = 0; // State machine for consecutive LTE failures
+    let mut error_fails = 0;
 
     if diag.accepted_steps == 0 {
-        // Initial Step Size Calculation (Matches IDASolve logic)
         let mut weights = vec![0.0; n];
         for i in 0..n { weights[i] = 1.0 / (config.rel_tol * y[i].abs() + config.abs_tol); }
         let ypnorm = wrms_norm_mask(ydot, &weights, id, config.suppress_alg);
@@ -225,22 +206,19 @@ pub fn step_bdf_vsvo(
         let mut ydot_pred = vec![0.0; n];
         history.predict(&mut y_pred, &mut ydot_pred);
 
-        // Calculate weights using history.phi[0] (accepted state), 
-        // eliminating predictor feedback loops that caused false-positive success.
         let mut weights = vec![0.0; n];
         for i in 0..n { weights[i] = 1.0 / (config.rel_tol * history.phi[0][i].abs() + config.abs_tol); }
 
         let newton_res = solve_nonlinear_system(
             n, bw, y, ydot, p, m, id, constraints, spatial_diag, max_steps,
             history.c_j, &mut history.c_j_old, &history.phi[0],
-            &y_pred, &ydot_pred, &weights, res_fn, jac_fn, jvp_fn,
-            lu_solver, jac_buffer, config, diag
+            &y_pred, &ydot_pred, &weights, res_fn, jac_sparse_fn, jvp_fn,
+            lu_solver, jac_rows_buf, jac_cols_buf, jac_vals_buf, config, diag
         );
 
         match newton_res {
             NewtonResult::Converged(iters, ee) => {
                 
-                // 1. SUNDIALS Local Truncation Error Test (IDATestError)
                 let enorm_k = wrms_norm_mask(&ee, &weights, id, config.suppress_alg);
                 let err_k = history.sigma[history.order] * enorm_k;
 
@@ -260,7 +238,7 @@ pub fn step_bdf_vsvo(
                     }
                 }
 
-                if ck * enorm_k > 1.0 { // Error test failed
+                if ck * enorm_k > 1.0 {
                     error_fails += 1;
                     diag.rejected_steps += 1;
                     history.restore();
@@ -284,7 +262,6 @@ pub fn step_bdf_vsvo(
                         let eta = (0.9 * (2.0 * err_knew + 0.0001).powf(-1.0 / (history.order as f64 + 1.0))).clamp(0.25, 0.9);
                         history.h *= eta;
                     } else {
-                        // Hard backoff on consecutive LTE failures
                         history.h *= 0.25;
                         history.order = 1;
                     }
@@ -296,10 +273,8 @@ pub fn step_bdf_vsvo(
                     continue;
                 }
 
-                // Success! Reset error_fails counter.
                 error_fails = 0;
                 
-                // Evaluate Truncation Error at Order K+1
                 let mut err_kp1 = 0.0;
                 if history.order < history.max_order {
                     let mut delta = vec![0.0; n];
@@ -325,7 +300,7 @@ pub fn step_bdf_vsvo(
             NewtonResult::DivergedStaleJac(_) | NewtonResult::DivergedFatal(NewtonFailure::NonFiniteResidual) | NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(_)) | NewtonResult::DivergedFatal(NewtonFailure::ContractionThrashing(_)) | NewtonResult::DivergedFatal(NewtonFailure::MaxItersReached) => {
                 diag.rejected_steps += 1;
                 history.restore();
-                history.h *= 0.25; // Standard SUNDIALS back-off ratio for Newton Failures
+                history.h *= 0.25;
                 lu_solver.mark_stale();
 
                 if history.h <= config.min_dt {

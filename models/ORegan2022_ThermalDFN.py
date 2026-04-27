@@ -35,14 +35,16 @@ class MeshConfig:
     R_p = 5.22e-6
 
     # Macro-Scale Resolutions (Number of spatial nodes)
-    res_n = 42
-    res_s = 6
-    res_p = 38
+    # STRICTLY ALIGNED to physical lengths to prevent mismatched `dx` scales 
+    # between regional states (phi_s) and global states (c_e).
+    res_n = 71
+    res_s = 10
+    res_p = 63
     res_cell = res_n + res_s + res_p
 
     # Micro-Scale Resolutions (Radial nodes inside each particle)
-    res_r_n = 20
-    res_r_p = 20
+    res_r_n = 15
+    res_r_p = 15
 
 
 class ThermalDFN(fx.PDE):
@@ -369,31 +371,23 @@ if __name__ == "__main__":
     colors = ["tab:blue", "tab:orange", "tab:red"]
 
     # =========================================================================
-    # FIGURE 1: Macro Validation (Voltage & Temperature)
+    # COMBINED FIGURE: Macro Validation & Internal Spatial Diagnostics
     # =========================================================================
-    fig1, axs1 = plt.subplots(1, 2, figsize=(14, 5))
-    fig1.suptitle("O'Regan et al. (2022) - Thermal DFN: Macro Validation (LG M50)", fontsize=14, fontweight="bold")
-    
+    fig, axs = plt.subplots(3, 2, figsize=(14, 15))
+    fig.suptitle("O'Regan et al. (2022) - Thermal DFN Simulation Diagnostics", fontsize=16, fontweight="bold")
+
+    # --- ROW 0: Macro Validation (Voltage & Temperature) ---
     for name, res in results.items():
         t_sec = res["Time [s]"].data
         c = {"0.5C": "tab:blue", "1C": "tab:orange", "2C": "tab:green"}[name]
         
-        axs1[0].plot(t_sec, res["V_cell"].data, label=name, color=c, linewidth=2)
-        axs1[1].plot(t_sec, res["T_cell"].data - 273.15, label=name, color=c, linewidth=2)
+        axs[0, 0].plot(t_sec, res["V_cell"].data, label=name, color=c, linewidth=2)
+        axs[0, 1].plot(t_sec, res["T_cell"].data - 273.15, label=name, color=c, linewidth=2)
 
-    axs1[0].set(title="Terminal Voltage Profiles", xlabel="Time [s]", ylabel="Voltage [V]")
-    axs1[1].set(title="Lumped Temperature Profiles", xlabel="Time [s]", ylabel="Temperature [°C]")
-    for ax in axs1:
-        ax.grid(True, linestyle="--", alpha=0.6)
-        ax.legend()
-    fig1.tight_layout()
+    axs[0, 0].set(title="Terminal Voltage Profiles", xlabel="Time [s]", ylabel="Voltage [V]")
+    axs[0, 1].set(title="Lumped Temperature Profiles", xlabel="Time [s]", ylabel="Temperature [°C]")
 
-    # =========================================================================
-    # FIGURE 2: Internal Spatial Diagnostics (2C Discharge)
-    # =========================================================================
-    fig2, axs2 = plt.subplots(2, 2, figsize=(14, 10))
-    fig2.suptitle("O'Regan et al. (2022) - Thermal DFN: Spatial Diagnostics at 2C", fontsize=14, fontweight="bold")
-
+    # --- ROW 1 & 2 Setup: Spatial Diagnostics (2C Discharge) ---
     x_cell = np.linspace(0, MeshConfig.L_cell * 1e6, MeshConfig.res_cell)
     x_anode = np.linspace(0, MeshConfig.L_n * 1e6, MeshConfig.res_n)
     x_cathode = np.linspace((MeshConfig.L_n + MeshConfig.L_s) * 1e6, MeshConfig.L_cell * 1e6, MeshConfig.res_p)
@@ -408,33 +402,34 @@ if __name__ == "__main__":
     j_p_history = res_2c["J_p_obs"].data
 
     for idx, label, color in zip(dod_indices, dod_labels, colors):
-        # [0, 0] Electrolyte Polarization
-        axs2[0, 0].plot(x_cell, c_e_history[idx], color=color, linewidth=2, label=label)
+        # [1, 0] Electrolyte Polarization
+        axs[1, 0].plot(x_cell, c_e_history[idx], color=color, linewidth=2, label=label)
         
-        # [0, 1] Cathode Particle Saturation
+        # [1, 1] Cathode Particle Saturation
         c_radial = c_s_p_history[idx].reshape((MeshConfig.res_p, MeshConfig.res_r_p))[0, :]
-        axs2[0, 1].plot(r_p_arr, c_radial, color=color, linewidth=2, label=label)
+        axs[1, 1].plot(r_p_arr, c_radial, color=color, linewidth=2, label=label)
 
-        # [1, 0] Anode Volumetric Current
-        axs2[1, 0].plot(x_anode, j_n_history[idx] / 1e6, color=color, linewidth=2, label=label)
+        # [2, 0] Anode Volumetric Current
+        axs[2, 0].plot(x_anode, j_n_history[idx] / 1e6, color=color, linewidth=2, label=label)
         
-        # [1, 1] Cathode Volumetric Current (Absolute)
-        axs2[1, 1].plot(x_cathode, abs(j_p_history[idx]) / 1e6, color=color, linewidth=2, label=label)
+        # [2, 1] Cathode Volumetric Current (Absolute)
+        axs[2, 1].plot(x_cathode, abs(j_p_history[idx]) / 1e6, color=color, linewidth=2, label=label)
 
-    # Styling Row 0
-    axs2[0, 0].set(title="Electrolyte Starvation", xlabel="Distance from Anode [µm]", ylabel="Concentration [mol/m³]")
-    axs2[0, 0].axvline(sep_start, color='k', linestyle='--', alpha=0.5, label="Separator")
-    axs2[0, 0].axvline(sep_end, color='k', linestyle='--', alpha=0.5)
-    axs2[0, 1].set(title="Cathode Particle Saturation (Separator Interface)", xlabel="Radial Distance [µm]", ylabel="Concentration [mol/m³]")
-    axs2[0, 1].axhline(51765.0, color='k', linestyle=':', label="Saturation Limit ($c_{max}$)")
-    
     # Styling Row 1
-    axs2[1, 0].set(title="Anode Volumetric Current", xlabel="Distance [µm]", ylabel="Reaction Current [A/cm³]")
-    axs2[1, 1].set(title="Cathode Volumetric Current (Absolute)", xlabel="Distance [µm]", ylabel="Reaction Current [A/cm³]")
+    axs[1, 0].set(title="Electrolyte Starvation", xlabel="Distance from Anode [µm]", ylabel="Concentration [mol/m³]")
+    axs[1, 0].axvline(sep_start, color='k', linestyle='--', alpha=0.5, label="Separator")
+    axs[1, 0].axvline(sep_end, color='k', linestyle='--', alpha=0.5)
+    axs[1, 1].set(title="Cathode Particle Saturation (Separator Interface)", xlabel="Radial Distance [µm]", ylabel="Concentration [mol/m³]")
+    axs[1, 1].axhline(51765.0, color='k', linestyle=':', label="Saturation Limit ($c_{max}$)")
+    
+    # Styling Row 2
+    axs[2, 0].set(title="Anode Volumetric Current", xlabel="Distance [µm]", ylabel="Reaction Current [A/cm³]")
+    axs[2, 1].set(title="Cathode Volumetric Current (Absolute)", xlabel="Distance [µm]", ylabel="Reaction Current [A/cm³]")
 
-    for ax in axs2.flat:
+    # Apply generic styling to all 6 subplots
+    for ax in axs.flat:
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.legend(loc="best", fontsize=9)
 
-    fig2.tight_layout()
+    fig.tight_layout()
     plt.show()

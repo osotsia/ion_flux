@@ -4,7 +4,7 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
 use std::os::raw::{c_char, c_double, c_int, c_long, c_void};
-use super::{NativeResFn, NativeJacFn, NativeObsFn};
+use super::{NativeResFn, NativeJacSparseFn, NativeObsFn};
 
 pub type SunRealType = c_double;
 pub type SunIndexType = c_long; 
@@ -58,13 +58,16 @@ extern "C" {
 
 pub struct SundialsUserData {
     pub res_fn: NativeResFn,
-    pub jac_fn: NativeJacFn,
+    pub jac_sparse_fn: NativeJacSparseFn,
     pub obs_fn: Option<NativeObsFn>,
     pub p: Vec<f64>,
     pub m: Vec<f64>,
-    pub jac_buffer: Vec<f64>,
+    pub jac_rows_buf: Vec<c_int>,
+    pub jac_cols_buf: Vec<c_int>,
+    pub jac_vals_buf: Vec<f64>,
     pub is_banded: bool,
     pub sun_bw: isize,
+    pub n: usize,
 }
 
 unsafe extern "C" fn ida_res_callback(_t: c_double, y: N_Vector, yp: N_Vector, res: N_Vector, user_data: *mut c_void) -> c_int {
@@ -75,27 +78,41 @@ unsafe extern "C" fn ida_res_callback(_t: c_double, y: N_Vector, yp: N_Vector, r
 
 unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, yp: N_Vector, _r: N_Vector, jac: SUNMatrix, user_data: *mut c_void, _t1: N_Vector, _t2: N_Vector, _t3: N_Vector) -> c_int {
     let ud = &mut *(user_data as *mut SundialsUserData);
-    let n = (ud.jac_buffer.len() as f64).sqrt() as usize;
+    let n = ud.n;
 
-    (ud.jac_fn)(N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), c_j, ud.jac_buffer.as_mut_ptr());
+    let mut nnz: c_int = 0;
+    (ud.jac_sparse_fn)(
+        N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), c_j, 
+        ud.jac_rows_buf.as_mut_ptr(), ud.jac_cols_buf.as_mut_ptr(), ud.jac_vals_buf.as_mut_ptr(), &mut nnz
+    );
 
     if ud.is_banded {
         let a_data = SUNBandMatrix_Data(jac);
         let ldim = SUNBandMatrix_LDim(jac) as usize;
         let mu = SUNBandMatrix_UpperBandwidth(jac) as isize;
 
-        for c in 0..n {
-            let start_r = (c as isize - ud.sun_bw).max(0) as usize;
-            let end_r = (c as isize + ud.sun_bw).min(n as isize - 1) as usize;
-            for r in start_r..=end_r {
-                let band_idx = (r as isize - c as isize + mu) as usize + c * ldim;
-                *a_data.add(band_idx) = ud.jac_buffer[c * n + r];
-            }
+        for i in 0..(ldim * n) {
+            *a_data.add(i) = 0.0;
+        }
+
+        for i in 0..(nnz as usize) {
+            let r = ud.jac_rows_buf[i] as usize;
+            let c = ud.jac_cols_buf[i] as usize;
+            let val = ud.jac_vals_buf[i];
+            
+            let band_idx = (r as isize - c as isize + mu) as usize + c * ldim;
+            *a_data.add(band_idx) = val;
         }
     } else {
         let a_data = SUNDenseMatrix_Data(jac);
         for i in 0..(n*n) {
-            *a_data.add(i) = ud.jac_buffer[i];
+            *a_data.add(i) = 0.0;
+        }
+        for i in 0..(nnz as usize) {
+            let r = ud.jac_rows_buf[i] as usize;
+            let c = ud.jac_cols_buf[i] as usize;
+            let val = ud.jac_vals_buf[i];
+            *a_data.add(c * n + r) = val;
         }
     }
     0
@@ -186,7 +203,7 @@ impl SundialsHandle {
     pub fn new(lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, p: Vec<f64>, m: Vec<f64>, n_obs: usize) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
-        let jac_fn: NativeJacFn = unsafe { *lib.get::<NativeJacFn>(b"evaluate_jacobian\0").unwrap() };
+        let jac_sparse_fn: NativeJacSparseFn = unsafe { *lib.get::<NativeJacSparseFn>(b"evaluate_jacobian_sparse\0").unwrap() };
         let obs_fn: Option<NativeObsFn> = unsafe { lib.get::<NativeObsFn>(b"evaluate_observables\0").map(|s| *s).ok() };
         
         let sunctx = unsafe { get_safe_sundials_context() };
@@ -197,33 +214,34 @@ impl SundialsHandle {
         
         let ida_mem = unsafe { IDACreate(sunctx) };
         
-        // Dynamically detect the physical bandwidth from the initial Jacobian
-        let mut jac_dense = vec![0.0; n * n];
-        unsafe { (jac_fn)(y0.as_ptr(), ydot0.as_ptr(), p.as_ptr(), m.as_ptr(), 1.0, jac_dense.as_mut_ptr()) };
+        let mut jac_rows_buf = vec![0_i32; n * 50];
+        let mut jac_cols_buf = vec![0_i32; n * 50];
+        let mut jac_vals_buf = vec![0.0_f64; n * 50];
+        let mut nnz: c_int = 0;
         
-        let mut actual_bw = 0;
-        for c in 0..n {
-            for r in 0..n {
-                if jac_dense[c * n + r].abs() > 1e-12 {
-                    let dist = (r as isize - c as isize).abs();
-                    if dist > actual_bw { actual_bw = dist; }
-                }
-            }
+        unsafe { (jac_sparse_fn)(y0.as_ptr(), ydot0.as_ptr(), p.as_ptr(), m.as_ptr(), 1.0, jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(), &mut nnz) };
+        
+        let mut actual_bw: isize = 0;
+        for i in 0..(nnz as usize) {
+            let r_idx = jac_rows_buf[i] as isize;
+            let c_idx = jac_cols_buf[i] as isize;
+            let dist: isize = (r_idx - c_idx).abs();
+            if dist > actual_bw { actual_bw = dist; }
         }
         
-        // Threshold heuristic: Use Band solver if bandwidth is less than half the total states
         let is_banded = actual_bw < (n as isize) / 2;
         let sun_bw = actual_bw;
         
         let user_data = Box::new(SundialsUserData { 
-            res_fn, jac_fn, obs_fn, p, m, 
-            jac_buffer: jac_dense, is_banded, sun_bw 
+            res_fn, jac_sparse_fn, obs_fn, p, m, 
+            jac_rows_buf, jac_cols_buf, jac_vals_buf,
+            is_banded, sun_bw, n
         });
         
         unsafe {
             IDAInit(ida_mem, Some(ida_res_callback), 0.0, y_vec, yp_vec);
             IDASStolerances(ida_mem, 1e-6, 1e-8);
-            IDASetSuppressAlg(ida_mem, 1); // CRITICAL: Prevent algebraic variables from dominating the truncation error step limiter
+            IDASetSuppressAlg(ida_mem, 1);
             IDASetUserData(ida_mem, &*user_data as *const _ as *mut c_void);
             IDASetId(ida_mem, id_vec);
             IDASetMaxNumSteps(ida_mem, 15000);
@@ -291,16 +309,19 @@ impl SundialsHandle {
             }
             if max_res < 1e-8 { break; }
 
-            let mut jac = vec![0.0; self.n * self.n];
-            unsafe { (self.user_data.jac_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, jac.as_mut_ptr()); }
+            let mut nnz: c_int = 0;
+            unsafe { (self.user_data.jac_sparse_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, self.user_data.jac_rows_buf.as_mut_ptr(), self.user_data.jac_cols_buf.as_mut_ptr(), self.user_data.jac_vals_buf.as_mut_ptr(), &mut nnz); }
 
-            for i in 0..self.n {
-                if self._id_data[i] < 0.5 { 
-                    let diag = jac[i * self.n + i];
-                    if diag.abs() > 1e-12 {
-                        let mut step = -res[i] / diag;
-                        if step.abs() > 0.1 { step = step.signum() * 0.1; } // Safety clamp
-                        self._y_data[i] += step * 0.5; // Under-relax diagonal step
+            for i in 0..(nnz as usize) {
+                if self.user_data.jac_rows_buf[i] == self.user_data.jac_cols_buf[i] {
+                    let r = self.user_data.jac_rows_buf[i] as usize;
+                    if self._id_data[r] < 0.5 { 
+                        let diag = self.user_data.jac_vals_buf[i];
+                        if diag.abs() > 1e-12 {
+                            let mut step: f64 = -res[r] / diag;
+                            if step.abs() > 0.1_f64 { step = step.signum() * 0.1_f64; } 
+                            self._y_data[r] += step * 0.5; 
+                        }
                     }
                 }
             }
@@ -328,7 +349,6 @@ impl SundialsHandle {
     }
 }
 
-// Internal Rust helpers
 impl SundialsHandle {
     pub fn get_observables(&mut self, obs: &mut [f64]) -> PyResult<()> {
         if let Some(f) = self.user_data.obs_fn {
