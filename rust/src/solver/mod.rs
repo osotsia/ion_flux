@@ -16,6 +16,15 @@ pub type NativeJvpFn = unsafe extern "C" fn(*const c_double, *const c_double, *c
 pub type NativeVjpFn = unsafe extern "C" fn(*const c_double, *const c_double, *const c_double, *const c_double, *const c_double, *mut c_double, *mut c_double, *mut c_double);
 pub type NativeSetThreadsFn = unsafe extern "C" fn(c_int);
 
+#[derive(Clone, Default)]
+pub struct CprData {
+    pub color_seeds: Vec<Vec<f64>>,
+    pub color_ptrs: Vec<usize>,
+    pub color_rows: Vec<usize>,
+    pub color_cols: Vec<usize>,
+    pub dense_rows: Vec<usize>,
+}
+
 #[derive(Clone, Copy)]
 pub struct SolverConfig {
     pub rel_tol: f64,

@@ -1,10 +1,21 @@
+"""
+CPR Exactness Oracle
+
+This suite proves that the Hybrid Graph Coloring (Phase 2) and the Forward/Reverse-Mode 
+AD evaluation (Phase 3) perfectly reconstruct the exact analytical Jacobian. 
+
+It explicitly compares the newly assembled CPR Jacobian against the legacy LLVM 
+block-wise Sparse Jacobian. If these matrices diverge by even 1e-10, the VJP/JVP 
+scaling or color maps are flawed.
+"""
+
 import pytest
 import numpy as np
+import ctypes
 import shutil
 import platform
-import ion_flux as fx
 from ion_flux.runtime.engine import Engine
-from ion_flux.compiler.sparsity import SparsityAnalyzer
+import ion_flux as fx
 import math
 
 class Chen2020_DFN(fx.PDE):
@@ -834,69 +845,64 @@ def _has_compiler() -> bool:
 
 REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires native C++ toolchain.")
 
-
-def get_missing_dependencies(model):
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+@REQUIRES_COMPILER
+def test_cpr_hybrid_jacobian_matches_legacy_llvm_jacobian():
+    """
+    PROBE: Reconstructs the Jacobian using the legacy LLVM `evaluate_jacobian_sparse`
+    and compares it to the new Python/Rust CPR hybrid `evaluate_jacobian`.
+    """
+    engine = Engine(model=ThermalDFN(), target="cpu", mock_execution=False)
     
-    # 1. Execute the Python AST sparsity pass
-    states = model.components(fx.State)
-    analyzer = SparsityAnalyzer(engine.ast_payload, engine.layout, states)
-    python_set = analyzer.sparse_triplets
-    
-    # 2. Reconstruct the actual dense C++ Jacobian via Native Evaluation
     N = engine.layout.n_states
     
-    # Randomize inputs to ensure no structural zero is accidentally 
-    # hidden by mathematical coincidences (e.g. 0.0 * gradient)
+    # Randomize states to ensure no structural zero is hidden by 0.0 derivatives
     np.random.seed(42)
-    y = np.random.uniform(0.1, 1.0, N)
-    ydot = np.random.uniform(0.1, 1.0, N)
+    y = np.random.uniform(0.1, 1.0, N).tolist()
+    ydot = np.random.uniform(0.1, 1.0, N).tolist()
+    c_j = 12.34 # Arbitrary implicit scaling factor
     
-    J_dense = np.array(engine.evaluate_jacobian(y.tolist(), ydot.tolist(), c_j=1.0, parameters={}))
+    p_list = engine._pack_parameters({})
+    m_list = engine.layout.get_mesh_data()
     
-    # 3. Extract exact numerical non-zero tuples
-    enzyme_rows, enzyme_cols = np.where(np.abs(J_dense) > 1e-12)
-    enzyme_set = set(zip(enzyme_rows, enzyme_cols))
+    # -------------------------------------------------------------------------
+    # 1. Legacy LLVM Sparse Jacobian (The Ground Truth)
+    # -------------------------------------------------------------------------
+    rows = (ctypes.c_int * (N * 50))()
+    cols = (ctypes.c_int * (N * 50))()
+    vals = (ctypes.c_double * (N * 50))()
+    nnz = ctypes.c_int(0)
     
-    # 4. Assert Python is a strict, safe superset of the numerical reality
-    return enzyme_set - python_set
-
-
-
-@REQUIRES_COMPILER
-def test_static_sparsity_analyzer_matches_enzyme_oracl_v1():
-    """
-    PROBE: Proves that the Python AST Tracing algorithm computes a safe structural 
-    superset of the Jacobian compared to the mathematically exact C++ Enzyme evaluation.
-    This guarantees no loss of mathematical coupling when the C++ code generator is gutted 
-    for CPR/Forward-Mode AD.
-    """
-    missing_dependencies = get_missing_dependencies(model=Chen2020_DFN())
-    assert not missing_dependencies, \
-        f"FATAL: Python analyzer failed to map physical dependencies! " \
-        f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
-
-
-
-@REQUIRES_COMPILER
-@pytest.mark.skip(reason="Passes, but takes a long time to run")
-def test_static_sparsity_analyzer_matches_enzyme_oracl_v2():
-
-    missing_dependencies = get_missing_dependencies(model=ThermalDFN())
-    assert not missing_dependencies, \
-        f"FATAL: Python analyzer failed to map physical dependencies! " \
-        f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
-
-
-
-@REQUIRES_COMPILER
-def test_static_sparsity_analyzer_matches_enzyme_oracl_v3():
-
-    missing_dependencies = get_missing_dependencies(model=Marquis1Plus1D_SPMe())
-    assert not missing_dependencies, \
-        f"FATAL: Python analyzer failed to map physical dependencies! " \
-        f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
-
+    y_arr = (ctypes.c_double * N)(*y)
+    ydot_arr = (ctypes.c_double * N)(*ydot)
+    p_arr = (ctypes.c_double * len(p_list))(*p_list)
+    m_arr = (ctypes.c_double * len(m_list))(*m_list)
+    
+    engine.runtime.dll.evaluate_jacobian_sparse(
+        y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), 
+        rows, cols, vals, ctypes.byref(nnz)
+    )
+    
+    J_legacy = np.zeros((N, N))
+    for i in range(nnz.value):
+        J_legacy[rows[i], cols[i]] = vals[i]
+        
+    # -------------------------------------------------------------------------
+    # 2. New CPR Hybrid Jacobian (JVP + VJP)
+    # -------------------------------------------------------------------------
+    # `engine.evaluate_jacobian` was updated in Phase 3 to execute the exact 
+    # CPR logic used by the Rust backend.
+    J_cpr = np.array(engine.evaluate_jacobian(y, ydot, c_j, parameters={}))
+    
+    # -------------------------------------------------------------------------
+    # 3. Assert Exactness
+    # -------------------------------------------------------------------------
+    # We verify that both matrices are mathematically identical.
+    np.testing.assert_allclose(
+        J_cpr, J_legacy, 
+        rtol=1e-10, atol=1e-12,
+        err_msg="FATAL: The CPR assembled Jacobian (JVP+VJP) diverges from the legacy LLVM Jacobian! "
+                "The Reverse-Mode VJP dense row extraction or Forward-Mode JVP color map is flawed."
+    )
 
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])

@@ -35,9 +35,11 @@ class Session:
                     y0, ydot0, id_arr, p_list, m_list, engine.layout.n_obs
                 )
             else:
+                c_seeds, c_ptrs, c_rows, c_cols, c_dense = engine._cpr_cache
                 self.handle = SolverHandle(
                     engine.runtime.lib_path, engine.layout.n_states, engine.jacobian_bandwidth,
-                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, max_steps, engine.layout.n_obs, self.debug
+                    y0, ydot0, id_arr, constraints, p_list, m_list, spatial_diag, max_steps, engine.layout.n_obs, self.debug,
+                    c_seeds, c_ptrs, c_rows, c_cols, c_dense
                 )
                 try:
                     self.handle.calc_algebraic_roots()

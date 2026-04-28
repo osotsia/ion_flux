@@ -7,15 +7,21 @@ use super::session::SolverHandle;
 use super::sundials::SundialsHandle;
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, record_history=false, debug=false, show_progress=true, v_idx=-1))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, record_history=false, debug=false, show_progress=true, v_idx=-1))]
 pub fn solve_ida_native<'py>(
     py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>,
-    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, record_history: bool, debug: bool, show_progress: bool, v_idx: i32
+    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, 
+    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+    record_history: bool, debug: bool, show_progress: bool, v_idx: i32
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     
     let constraints = vec![0.0; y0_py.len()];
     
-    let mut handle = SolverHandle::new(lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, constraints, p_list, m_list, spatial_diag, max_steps, n_obs, debug)?;
+    let mut handle = SolverHandle::new(
+        lib_path, y0_py.len(), bandwidth, y0_py.clone(), ydot0_py.clone(), id_py, 
+        constraints, p_list, m_list, spatial_diag, max_steps, n_obs, debug, 
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense
+    )?;
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     let mut out_obs = vec![0.0; t_eval.len() * n_obs];
     
@@ -117,10 +123,12 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, debug, max_workers=1, show_progress=true, protocol_steps=None, v_idx=-1))]
+#[pyo3(signature = (lib_path, y0, ydot0, id, p_batch, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, debug, max_workers=1, show_progress=true, protocol_steps=None, v_idx=-1))]
 pub fn solve_batch_native<'py>(
     py: Python<'py>, lib_path: String, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, p_batch: Vec<Vec<f64>>, m_list: Vec<f64>, 
-    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, debug: bool, max_workers: usize, show_progress: bool,
+    t_eval: Vec<f64>, bandwidth: isize, spatial_diag: Vec<f64>, max_steps: Vec<f64>, n_obs: usize, 
+    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+    debug: bool, max_workers: usize, show_progress: bool,
     protocol_steps: Option<Vec<Vec<(i32, f64, f64, (bool, usize, usize, bool, i32, f64), usize, usize, usize)>>>,
     v_idx: i32
 ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)>> {
@@ -135,8 +143,12 @@ pub fn solve_batch_native<'py>(
             p_batch.par_iter().enumerate().map(|(b_idx, p)| {
                 let constraints = vec![0.0; y0.len()]; 
                 
-                let mut handle = SolverHandle::new(lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), constraints, p.clone(), m_list.clone(), spatial_diag.clone(), max_steps.clone(), n_obs, debug.clone())
-                    .map_err(|e| e.to_string())?;
+                let mut handle = SolverHandle::new(
+                    lib_path.clone(), y0.len(), bandwidth, y0.clone(), ydot0.clone(), id.clone(), 
+                    constraints, p.clone(), m_list.clone(), spatial_diag.clone(), max_steps.clone(), 
+                    n_obs, debug.clone(), 
+                    cpr_seeds.clone(), cpr_ptrs.clone(), cpr_rows.clone(), cpr_cols.clone(), cpr_dense.clone()
+                ).map_err(|e| e.to_string())?;
                     
                 handle.set_spatial_threads(1);
 

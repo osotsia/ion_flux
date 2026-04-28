@@ -1,6 +1,6 @@
 use std::time::Instant;
 use std::os::raw::c_int;
-use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, NativeVjpFn, SolverConfig, Diagnostics};
 use super::linalg::{NativeSparseLuSolver, solve_gmres};
 
 pub enum NewtonFailure {
@@ -17,14 +17,71 @@ pub enum NewtonResult {
     DivergedFatal(NewtonFailure),    
 }
 
+pub fn assemble_jacobian_triplets(
+    n: usize, y: &[f64], ydot: &[f64], p: &[f64], m: &[f64], c_j: f64,
+    jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
+    lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
+    cpr: &super::CprData
+) {
+    lu_solver.triplets.clear();
+    
+    if !cpr.color_seeds.is_empty() {
+        if let Some(jvp) = jvp_fn {
+            for (c_idx, seed) in cpr.color_seeds.iter().enumerate() {
+                let mut jvp_out = vec![0.0; n];
+                unsafe { jvp(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, seed.as_ptr(), jvp_out.as_mut_ptr()); }
+                let start = cpr.color_ptrs[c_idx];
+                let end = cpr.color_ptrs[c_idx + 1];
+                for i in start..end {
+                    let r = cpr.color_rows[i];
+                    let c = cpr.color_cols[i];
+                    lu_solver.triplets.push((r, c, jvp_out[r]));
+                }
+            }
+        }
+        
+        if !cpr.dense_rows.is_empty() {
+            if let Some(vjp) = vjp_fn {
+                let mut dp_out = vec![0.0; p.len()];
+                let mut dy_out = vec![0.0; n];
+                let mut dydot_out = vec![0.0; n];
+                let mut lambda = vec![0.0; n];
+                for &r in &cpr.dense_rows {
+                    lambda[r] = 1.0;
+                    unsafe { vjp(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()); }
+                    lambda[r] = 0.0;
+                    for c in 0..n {
+                        let val = dy_out[c] + c_j * dydot_out[c];
+                        if val.abs() > 1e-16 {
+                            lu_solver.triplets.push((r, c, val));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut nnz: c_int = 0;
+        unsafe {
+            jac_sparse_fn(
+                y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j,
+                jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(),
+                &mut nnz
+            );
+        }
+        for i in 0..(nnz as usize) {
+            lu_solver.triplets.push((jac_rows_buf[i] as usize, jac_cols_buf[i] as usize, jac_vals_buf[i]));
+        }
+    }
+}
+
 pub fn solve_nonlinear_system(
     n: usize, bw: isize,
     y: &mut[f64], ydot: &mut [f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     c_j: f64, c_j_last_setup: &mut f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
-    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>,
+    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
     lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
-    config: &SolverConfig, diag: &mut Diagnostics,
+    config: &SolverConfig, diag: &mut Diagnostics, cpr: &super::CprData,
 ) -> NewtonResult {
     
     let mut cj_ratio = if *c_j_last_setup == 0.0 { 1.0 } else { c_j / *c_j_last_setup };
@@ -79,19 +136,12 @@ pub fn solve_nonlinear_system(
         } else {
             if lu_solver.is_stale {
                 let start = Instant::now();
-                let mut nnz: c_int = 0;
-                unsafe {
-                    jac_sparse_fn(
-                        y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j,
-                        jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(),
-                        &mut nnz
-                    );
-                }
                 
-                lu_solver.triplets.clear();
-                for i in 0..(nnz as usize) {
-                    lu_solver.triplets.push((jac_rows_buf[i] as usize, jac_cols_buf[i] as usize, jac_vals_buf[i]));
-                }
+                assemble_jacobian_triplets(
+                    n, y, ydot, p, m, c_j, 
+                    jac_sparse_fn, jvp_fn, vjp_fn, 
+                    lu_solver, jac_rows_buf, jac_cols_buf, jac_vals_buf, cpr
+                );
                 
                 diag.jacobian_assembly_time_us += start.elapsed().as_micros();
                 diag.jacobian_evaluations += 1;
@@ -151,9 +201,6 @@ pub fn solve_nonlinear_system(
             if rate > config.max_rho && !is_clamped {
                 if !lu_solver.is_stale {
                     lu_solver.mark_stale();
-                    // By continuing WITHOUT resetting `ee`, we are executing a true 
-                    // Newton-Raphson update: re-assembling the Jacobian at the *current*
-                    // non-linear iterate, rather than tossing out our progress.
                     continue;
                 }
                 return NewtonResult::DivergedFatal(NewtonFailure::ContractionThrashing(rate));

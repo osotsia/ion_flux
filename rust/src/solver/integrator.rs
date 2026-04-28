@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::Write;
-use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, NativeVjpFn, SolverConfig, Diagnostics};
 use super::linalg::NativeSparseLuSolver;
 use super::newton::{solve_nonlinear_system, NewtonResult, NewtonFailure, wrms_norm_mask};
 
@@ -168,9 +168,9 @@ pub fn step_bdf_vsvo(
     y: &mut[f64], ydot: &mut[f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     target_dt: f64,
     history: &mut BdfHistory,
-    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>,
+    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
     lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
-    config: &SolverConfig, diag: &mut Diagnostics,
+    config: &SolverConfig, diag: &mut Diagnostics, cpr: &super::CprData,
     mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
     abs_t: f64,
 ) -> Result<(), String> {
@@ -212,8 +212,8 @@ pub fn step_bdf_vsvo(
         let newton_res = solve_nonlinear_system(
             n, bw, y, ydot, p, m, id, constraints, spatial_diag, max_steps,
             history.c_j, &mut history.c_j_old, &history.phi[0],
-            &y_pred, &ydot_pred, &weights, res_fn, jac_sparse_fn, jvp_fn,
-            lu_solver, jac_rows_buf, jac_cols_buf, jac_vals_buf, config, diag
+            &y_pred, &ydot_pred, &weights, res_fn, jac_sparse_fn, jvp_fn, vjp_fn,
+            lu_solver, jac_rows_buf, jac_cols_buf, jac_vals_buf, config, diag, cpr
         );
 
         match newton_res {

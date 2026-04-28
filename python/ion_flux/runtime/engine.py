@@ -14,6 +14,8 @@ from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp, extract_state_name
 from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
 from ion_flux.compiler.passes.verification import verify_manifold, TopologicalError
+from ion_flux.compiler.sparsity import SparsityAnalyzer
+from ion_flux.compiler.coloring import HybridGraphColorer
 from ion_flux.runtime.session import Session
 
 try:
@@ -63,6 +65,8 @@ class Engine:
         else:
             self.jacobian_bandwidth = jacobian_bandwidth
         
+        self._cpr_cache = self._compute_cpr()
+        
         if hasattr(model, "ast"):
             self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, observables, bandwidth=self.jacobian_bandwidth, target=self.target)
             self.runtime = None
@@ -103,6 +107,29 @@ class Engine:
                 
         return max_bw if max_bw > 0 else 0
 
+    def _compute_cpr(self):
+        c_seeds, c_ptrs, c_rows, c_cols, c_dense = [], [], [], [], []
+        if self.jacobian_bandwidth != -1 and hasattr(self, "ast_payload") and self.ast_payload:
+            try:
+                states = self.model.components(State) if hasattr(self.model, "components") else [attr for attr in self.model.__dict__.values() if isinstance(attr, State)]
+                analyzer = SparsityAnalyzer(self.ast_payload, self.layout, states)
+                colorer = HybridGraphColorer(self.layout.n_states, analyzer.sparse_triplets, dense_threshold=20)
+                
+                c_seeds = colorer.color_seeds
+                c_ptrs = [0]
+                for c_idx in range(colorer.n_colors):
+                    count = 0
+                    for r, c in colorer.sparse_triplets:
+                        if colorer.color_map[c] == c_idx:
+                            c_rows.append(r)
+                            c_cols.append(c)
+                            count += 1
+                    c_ptrs.append(c_ptrs[-1] + count)
+                c_dense = colorer.dense_rows
+            except Exception as e:
+                logging.warning(f"CPR Graph Coloring failed: {e}. Falling back to block-wise AD.")
+        return (c_seeds, c_ptrs, c_rows, c_cols, c_dense)
+
     @classmethod
     def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native", debug: bool = False) -> "Engine":
         meta_path = binary_path + ".meta.json"
@@ -117,6 +144,7 @@ class Engine:
         engine.layout = MemoryLayout.from_dict(meta["layout"])
         engine.parameters = {name: _ParamHandle(name, val) for name, val in meta["parameters"].items()}
         engine.jacobian_bandwidth = meta.get("jacobian_bandwidth", 0)
+        engine._cpr_cache = meta.get("cpr_cache", ([], [], [], [], []))
         engine._metadata_cache = (
             meta["metadata_cache"]["y0"], meta["metadata_cache"]["ydot0"], meta["metadata_cache"]["id_arr"],
             meta["metadata_cache"].get("spatial_diag", [0.0] * engine.layout.n_states),
@@ -136,7 +164,8 @@ class Engine:
                 "p_length": self.layout.p_length, "m_length": self.layout.m_length, "mesh_offsets": self.layout.mesh_offsets, "mesh_cache": self.layout.mesh_cache
             },
             "parameters": {name: p.value for name, p in self.parameters.items()}, "jacobian_bandwidth": getattr(self, "jacobian_bandwidth", 0),
-            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr, "spatial_diag": spatial_diag, "max_steps": max_steps}
+            "metadata_cache": {"y0": y0, "ydot0": ydot0, "id_arr": id_arr, "spatial_diag": spatial_diag, "max_steps": max_steps},
+            "cpr_cache": self._cpr_cache
         }
         with open(export_path + ".meta.json", "w") as f: json.dump(meta, f)
         shutil.copy(self.runtime.lib_path, export_path)
@@ -387,31 +416,56 @@ class Engine:
         return self.runtime.evaluate_observables(y, ydot, p_list, m_list, self.layout.n_obs)
 
     def evaluate_jacobian(self, y: List[float], ydot: List[float], c_j: float, parameters: Optional[Dict[str, float]] = None) -> List[List[float]]:
-        """Dynamically proxies the C++ analytical Sparse representation back to dense Python matrices for Oracle tests."""
         if self.mock_execution or not self.runtime: raise RuntimeError("Requires native execution.")
-        import ctypes
         
+        c_seeds, c_ptrs, c_rows, c_cols, c_dense = self._cpr_cache
         p_list = self._pack_parameters(parameters or {})
         m_list = self.layout.get_mesh_data()
-        
         N = self.layout.n_states
-        rows = (ctypes.c_int * (N * 50))()
-        cols = (ctypes.c_int * (N * 50))()
-        vals = (ctypes.c_double * (N * 50))()
-        nnz = ctypes.c_int(0)
         
-        y_arr = (ctypes.c_double * N)(*y)
-        ydot_arr = (ctypes.c_double * N)(*ydot)
-        p_arr = (ctypes.c_double * len(p_list))(*p_list)
-        m_arr = (ctypes.c_double * len(m_list))(*m_list)
-        
-        self.runtime.dll.evaluate_jacobian_sparse(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), rows, cols, vals, ctypes.byref(nnz))
-        
-        jac_2d = [[0.0] * N for _ in range(N)]
-        for i in range(nnz.value):
-            jac_2d[rows[i]][cols[i]] = vals[i]
+        # Safe Fallback to Legacy Sparse Evaluator
+        if not c_seeds:
+            import ctypes
+            rows = (ctypes.c_int * (N * 50))()
+            cols = (ctypes.c_int * (N * 50))()
+            vals = (ctypes.c_double * (N * 50))()
+            nnz = ctypes.c_int(0)
             
-        return jac_2d
+            y_arr = (ctypes.c_double * N)(*y)
+            ydot_arr = (ctypes.c_double * N)(*ydot)
+            p_arr = (ctypes.c_double * len(p_list))(*p_list)
+            m_arr = (ctypes.c_double * len(m_list))(*m_list)
+            
+            self.runtime.dll.evaluate_jacobian_sparse(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), rows, cols, vals, ctypes.byref(nnz))
+            
+            jac_2d = [[0.0] * N for _ in range(N)]
+            for i in range(nnz.value):
+                jac_2d[rows[i]][cols[i]] = vals[i]
+            return jac_2d
+
+        # Forward-Mode CPR Evaluation
+        J = [[0.0] * N for _ in range(N)]
+        for c_idx, seed in enumerate(c_seeds):
+            jvp_out = self.runtime.evaluate_jvp(y, ydot, p_list, m_list, c_j, seed)
+            start = c_ptrs[c_idx]
+            end = c_ptrs[c_idx + 1]
+            for i in range(start, end):
+                r = c_rows[i]
+                c = c_cols[i]
+                J[r][c] = jvp_out[r]
+                
+        # Reverse-Mode Dense Row Evaluation
+        if c_dense:
+            for r in c_dense:
+                lam = [0.0] * N
+                lam[r] = 1.0
+                _, dy_out, dydot_out = self.runtime.evaluate_vjp(y, ydot, p_list, m_list, lam)
+                for c in range(N):
+                    val = dy_out[c] + c_j * dydot_out[c]
+                    if abs(val) > 1e-16:
+                        J[r][c] = val
+                        
+        return J
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
                 t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
@@ -529,6 +583,7 @@ class Engine:
         y0, ydot0, id_arr, spatial_diag, max_steps = self._extract_metadata()
         p_list = self._pack_parameters(parameters or {})
         m_list = self.layout.get_mesh_data()
+        c_seeds, c_ptrs, c_rows, c_cols, c_dense = self._cpr_cache
         
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
         record_history = requires_grad is not None
@@ -542,7 +597,9 @@ class Engine:
             else:
                 y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_native(
                     self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), 
-                    self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, record_history, self.debug, show_progress, v_idx
+                    self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs,
+                    c_seeds, c_ptrs, c_rows, c_cols, c_dense,
+                    record_history, self.debug, show_progress, v_idx
                 )
         except RuntimeError as e:
             self._handle_native_crash(e)
@@ -578,6 +635,7 @@ class Engine:
         t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
         p_batch = [self._pack_parameters(p) for p in parameters]
         m_list = self.layout.get_mesh_data()
+        c_seeds, c_ptrs, c_rows, c_cols, c_dense = self._cpr_cache
         
         protocol_payloads = None
         if protocols:
@@ -613,7 +671,12 @@ class Engine:
         v_idx = self.layout.state_offsets.get("V_cell", (-1, 0))[0]
         
         try:
-            y_res_batch = solve_batch_native(self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, t_eval_arr.tolist(), self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, self.debug, max_workers, show_progress, protocol_payloads, v_idx)
+            y_res_batch = solve_batch_native(
+                self.runtime.lib_path, y0, ydot0, id_arr, p_batch, m_list, t_eval_arr.tolist(), 
+                self.jacobian_bandwidth, spatial_diag, max_steps, self.layout.n_obs, 
+                c_seeds, c_ptrs, c_rows, c_cols, c_dense, 
+                self.debug, max_workers, show_progress, protocol_payloads, v_idx
+            )
         except RuntimeError as e:
             self._handle_native_crash(e)
             

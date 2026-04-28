@@ -50,6 +50,14 @@ class NativeRuntime:
         ]
         self.dll.evaluate_jacobian_sparse.restype = None
 
+        if hasattr(self.dll, "evaluate_jvp"):
+            self.dll.evaluate_jvp.argtypes = [
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+                ctypes.c_double, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)
+            ]
+            self.dll.evaluate_jvp.restype = None
+
         self.dll.evaluate_vjp.argtypes = [
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
@@ -61,6 +69,18 @@ class NativeRuntime:
     def set_spatial_threads(self, num_threads: int) -> None:
         if hasattr(self.dll, "set_spatial_threads"):
             self.dll.set_spatial_threads(num_threads)
+
+    def evaluate_jvp(self, y: List[float], ydot: List[float], p: List[float], m: List[float], c_j: float, v: List[float]) -> List[float]:
+        y_arr = (ctypes.c_double * self.n_states)(*y)
+        ydot_arr = (ctypes.c_double * self.n_states)(*ydot)
+        p_arr = (ctypes.c_double * len(p))(*p)
+        m_arr = (ctypes.c_double * len(m))(*m)
+        v_arr = (ctypes.c_double * self.n_states)(*v)
+        out_arr = (ctypes.c_double * self.n_states)()
+        
+        if hasattr(self.dll, "evaluate_jvp"):
+            self.dll.evaluate_jvp(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), v_arr, out_arr)
+        return list(out_arr)
 
     def evaluate_vjp(self, y: List[float], ydot: List[float], p: List[float], m: List[float], lambda_vec: List[float]) -> Tuple[List[float], List[float], List[float]]:
         y_arr = (ctypes.c_double * self.n_states)(*y)
