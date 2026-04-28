@@ -118,9 +118,12 @@ class Loss:
         y0, ydot0, id_arr, spatial_diag, _ = self._engine._extract_metadata()
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
         
+        c_seeds, c_ptrs, c_rows, c_cols, c_dense = self._engine._cpr_cache
+        
         p_grad = discrete_adjoint_native(
             self._engine.runtime.lib_path, y_traj.tolist(), ydot_traj.tolist(), 
-            t_eval.tolist(), id_arr, p_traj, m_list, dl_dy.tolist(), bw
+            t_eval.tolist(), id_arr, p_traj, m_list, dl_dy.tolist(), bw,
+            c_seeds, c_ptrs, c_rows, c_cols, c_dense
         )
         
         for p_name in req_grad:

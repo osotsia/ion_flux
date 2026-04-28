@@ -42,14 +42,6 @@ class NativeRuntime:
             ]
             self.dll.evaluate_observables.restype = None
 
-        self.dll.evaluate_jacobian_sparse.argtypes = [
-            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
-            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
-            ctypes.c_double, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int)
-        ]
-        self.dll.evaluate_jacobian_sparse.restype = None
-
         if hasattr(self.dll, "evaluate_jvp"):
             self.dll.evaluate_jvp.argtypes = [
                 ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),

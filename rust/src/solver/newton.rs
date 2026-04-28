@@ -1,6 +1,5 @@
 use std::time::Instant;
-use std::os::raw::c_int;
-use super::{NativeResFn, NativeJacSparseFn, NativeJvpFn, NativeVjpFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeJvpFn, NativeVjpFn, SolverConfig, Diagnostics};
 use super::linalg::{NativeSparseLuSolver, solve_gmres};
 
 pub enum NewtonFailure {
@@ -19,11 +18,11 @@ pub enum NewtonResult {
 
 pub fn assemble_jacobian_triplets(
     n: usize, y: &[f64], ydot: &[f64], p: &[f64], m: &[f64], c_j: f64,
-    jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
-    lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
+    jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
+    triplets: &mut Vec<(usize, usize, f64)>,
     cpr: &super::CprData
 ) {
-    lu_solver.triplets.clear();
+    triplets.clear();
     
     if !cpr.color_seeds.is_empty() {
         if let Some(jvp) = jvp_fn {
@@ -35,7 +34,7 @@ pub fn assemble_jacobian_triplets(
                 for i in start..end {
                     let r = cpr.color_rows[i];
                     let c = cpr.color_cols[i];
-                    lu_solver.triplets.push((r, c, jvp_out[r]));
+                    triplets.push((r, c, jvp_out[r]));
                 }
             }
         }
@@ -50,26 +49,14 @@ pub fn assemble_jacobian_triplets(
                     lambda[r] = 1.0;
                     unsafe { vjp(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()); }
                     lambda[r] = 0.0;
-                    for c in 0..n {
-                        let val = dy_out[c] + c_j * dydot_out[c];
+                    for c_idx in 0..n {
+                        let val = dy_out[c_idx] + c_j * dydot_out[c_idx];
                         if val.abs() > 1e-16 || val.is_nan() {
-                            lu_solver.triplets.push((r, c, val));
+                            triplets.push((r, c_idx, val));
                         }
                     }
                 }
             }
-        }
-    } else {
-        let mut nnz: c_int = 0;
-        unsafe {
-            jac_sparse_fn(
-                y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j,
-                jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(),
-                &mut nnz
-            );
-        }
-        for i in 0..(nnz as usize) {
-            lu_solver.triplets.push((jac_rows_buf[i] as usize, jac_cols_buf[i] as usize, jac_vals_buf[i]));
         }
     }
 }
@@ -79,8 +66,8 @@ pub fn solve_nonlinear_system(
     y: &mut[f64], ydot: &mut [f64], p: &[f64], m: &[f64], id: &[f64], constraints: &[f64], spatial_diag: &[f64], max_steps: &[f64],
     c_j: f64, c_j_last_setup: &mut f64, phi_0: &[f64],
     y_pred: &[f64], ydot_pred: &[f64], weights: &[f64],
-    res_fn: NativeResFn, jac_sparse_fn: NativeJacSparseFn, jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
-    lu_solver: &mut NativeSparseLuSolver, jac_rows_buf: &mut [i32], jac_cols_buf: &mut [i32], jac_vals_buf: &mut [f64],
+    res_fn: NativeResFn, jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
+    lu_solver: &mut NativeSparseLuSolver,
     config: &SolverConfig, diag: &mut Diagnostics, cpr: &super::CprData,
 ) -> NewtonResult {
     
@@ -139,8 +126,8 @@ pub fn solve_nonlinear_system(
                 
                 assemble_jacobian_triplets(
                     n, y, ydot, p, m, c_j, 
-                    jac_sparse_fn, jvp_fn, vjp_fn, 
-                    lu_solver, jac_rows_buf, jac_cols_buf, jac_vals_buf, cpr
+                    jvp_fn, vjp_fn, 
+                    &mut lu_solver.triplets, cpr
                 );
                 
                 diag.jacobian_assembly_time_us += start.elapsed().as_micros();

@@ -1,13 +1,13 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
-use std::os::raw::c_int;
-use super::{NativeJacSparseFn, NativeVjpFn, Diagnostics};
+use super::{NativeJvpFn, NativeVjpFn, Diagnostics};
 use super::linalg::{NativeSparseLuSolver, solve_gmres};
 
 #[pyfunction]
 pub fn discrete_adjoint_native<'py>(
     py: Python<'py>, lib_path: String, y_traj: Vec<Vec<f64>>, ydot_traj: Vec<Vec<f64>>,
     t_eval: Vec<f64>, id_arr: Vec<f64>, p_traj: Vec<Vec<f64>>, m_list: Vec<f64>, dl_dy: Vec<Vec<f64>>, bandwidth: isize,
+    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let n_steps = y_traj.len();
     let n = y_traj[0].len();
@@ -15,18 +15,18 @@ pub fn discrete_adjoint_native<'py>(
     let mut p_grad = vec![0.0; n_params];
 
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-    let jac_sparse_fn: Option<NativeJacSparseFn> = unsafe { lib.get::<NativeJacSparseFn>(b"evaluate_jacobian_sparse\0").map(|sym| *sym).ok() };
+    let jvp_fn: NativeJvpFn = unsafe { *lib.get::<NativeJvpFn>(b"evaluate_jvp\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
     let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
+
+    let cpr = super::CprData { 
+        color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense 
+    };
 
     let mut lambda = vec![0.0; n];
     let mut prev_dydot_vjp = vec![0.0; n];
     let mut prev_c_j = 0.0;
     let mut diag = Diagnostics::default();
     let mut solver = NativeSparseLuSolver::new(n, bandwidth);
-    
-    let mut jac_rows_buf = vec![0; n * 50];
-    let mut jac_cols_buf = vec![0; n * 50];
-    let mut jac_vals_buf = vec![0.0; n * 50];
     
     for step in (1..n_steps).rev() {
         let dt = t_eval[step] - t_eval[step - 1];
@@ -53,21 +53,41 @@ pub fn discrete_adjoint_native<'py>(
             let precond = |v: &[f64], out: &mut[f64]| { for i in 0..n { out[i] = v[i] / (c_j * id_arr[i] + 1.0); } };
             solve_gmres(n, &mut rhs, jvp_t, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         } else {
-            let jac_fn_ptr = jac_sparse_fn.expect("evaluate_jacobian_sparse required for Dense/Banded adjoints.");
-            
-            let mut nnz: c_int = 0;
-            unsafe {
-                jac_fn_ptr(
-                    y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), c_j,
-                    jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(), &mut nnz
-                );
-            }
-            
             solver.triplets.clear();
-            for i in 0..(nnz as usize) {
-                // To transpose the sparse matrix implicitly for the adjoint solve,
-                // we push (col, row, val) instead of (row, col, val)
-                solver.triplets.push((jac_cols_buf[i] as usize, jac_rows_buf[i] as usize, jac_vals_buf[i]));
+            
+            if !cpr.color_seeds.is_empty() {
+                for (c_idx, seed) in cpr.color_seeds.iter().enumerate() {
+                    let mut jvp_out = vec![0.0; n];
+                    unsafe { jvp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), c_j, seed.as_ptr(), jvp_out.as_mut_ptr()); }
+                    let start = cpr.color_ptrs[c_idx];
+                    let end = cpr.color_ptrs[c_idx + 1];
+                    for i in start..end {
+                        let r = cpr.color_rows[i];
+                        let c = cpr.color_cols[i];
+                        // Implicit sparse transposition for FAER adjoint (J^T * lambda = C)
+                        solver.triplets.push((c, r, jvp_out[r]));
+                    }
+                }
+                
+                if !cpr.dense_rows.is_empty() {
+                    let mut dp_out = vec![0.0; n_params];
+                    let mut dy_out = vec![0.0; n];
+                    let mut dydot_out = vec![0.0; n];
+                    let mut lambda_vjp = vec![0.0; n];
+                    for &r in &cpr.dense_rows {
+                        lambda_vjp[r] = 1.0;
+                        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), lambda_vjp.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()); }
+                        lambda_vjp[r] = 0.0;
+                        for col in 0..n {
+                            let val = dy_out[col] + c_j * dydot_out[col];
+                            if val.abs() > 1e-16 || val.is_nan() {
+                                solver.triplets.push((col, r, val));
+                            }
+                        }
+                    }
+                }
+            } else {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("CPR Data is empty but bandwidth != -1"));
             }
             
             solver.factorize_from_triplets(&mut diag).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;

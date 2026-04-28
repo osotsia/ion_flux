@@ -1,3 +1,4 @@
+// --- File: rust/src/solver/bindings.rs ---
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use rayon::prelude::*;
@@ -80,11 +81,18 @@ pub fn solve_ida_native<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, show_progress=true, v_idx=-1))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, show_progress=true, v_idx=-1))]
 pub fn solve_ida_sundials<'py>(
-    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, n_obs: usize, show_progress: bool, v_idx: i32
+    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, n_obs: usize, 
+    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+    show_progress: bool, v_idx: i32
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
-    let mut handle = SundialsHandle::new(lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list, n_obs)?;
+
+    let mut handle = SundialsHandle::new(
+        lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list, n_obs, 
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense
+    )?;
+    
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
     let mut out_obs = vec![0.0; t_eval.len() * n_obs];
     

@@ -36,20 +36,6 @@ void evaluate_observables(const double* y, const double* ydot, const double* p, 
 {{ obs_body | indent(4) }}
 }
 
-{{ jac_block_funcs }}
-
-void evaluate_jacobian_sparse(const double* y, const double* ydot, const double* p, const double* m, double c_j, int* out_rows, int* out_cols, double* out_vals, int* out_nnz) {
-    int N = {{ n_states }};
-    std::vector<double> dy(N, 0.0);
-    std::vector<double> dydot(N, 0.0);
-    int nnz = 0;
-    int max_nnz = N * 50;
-
-{{ jac_assembly_body | indent(4) }}
-
-    *out_nnz = nnz;
-}
-
 void evaluate_jvp(const double* y, const double* ydot, const double* p, const double* m, double c_j, const double* v, double* jvp_out) {
     int N = {{ n_states }};
     std::vector<double> dy(N, 0.0);
@@ -92,7 +78,7 @@ void evaluate_vjp(const double* y, const double* ydot, const double* p, const do
 } // extern "C"
 """
 
-def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, jac_block_funcs: str, jac_assembly_body: str) -> str:
+def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str) -> str:
     env = jinja2.Environment()
     template = env.from_string(TEMPLATE)
     return template.render(
@@ -100,7 +86,5 @@ def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, o
         n_params=n_params,
         n_obs=n_obs,
         body=body,
-        obs_body=obs_body,
-        jac_block_funcs=jac_block_funcs,
-        jac_assembly_body=jac_assembly_body
+        obs_body=obs_body
     )

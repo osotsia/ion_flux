@@ -57,16 +57,7 @@ def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor,
         
     return curr_body
 
-def extract_loops_and_assign(stmts):
-    loops = []
-    curr = stmts
-    while len(curr) == 1 and isinstance(curr[0], Loop):
-        loops.append(curr[0])
-        curr = curr[0].body
-    assert len(curr) == 1 and isinstance(curr[0], Assign)
-    return loops, curr[0]
-
-def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], bandwidth: int = 0, target: str = "cpu") -> str:
+def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], target: str = "cpu") -> str:
     topo = TopologyAnalyzer(ast_payload.get("domains", {}))
     ctx = SemanticContext(ast_payload)
     
@@ -74,10 +65,6 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
     
     eq_stmts = []
     obs_stmts = []
-    
-    jac_block_funcs = []
-    jac_assembly_stmts = []
-    block_counter = 0
 
     dx_stmts = [RawCpp("double dx_default = 1.0;")]
     
@@ -94,67 +81,12 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
             bounds = d_info.get("bounds", (0.0, 1.0))
             dx_stmts.append(RawCpp(f"double dx_{d_name} = {float(bounds[1] - bounds[0]) / res_val};"))
 
-    dx_stmts_str = "\n    ".join(s.to_cpp() for s in dx_stmts)
-
     def process_assignment(target_state, eq_dict, bounds_override=None, is_obs=False):
-        nonlocal block_counter
         stmts = emit_assignment(target_state, eq_dict, layout, topo, visitor, bounds_override, is_obs)
         if is_obs:
             obs_stmts.extend(stmts)
-            return
-            
-        eq_stmts.extend(stmts)
-        
-        loops, assign = extract_loops_and_assign(stmts)
-        
-        loop_var_defs = [f"int {l.var} = loop_idx[{i}];" for i, l in enumerate(loops)]
-        if not loops: loop_var_defs.append("int dummy_idx = loop_idx[0]; (void)dummy_idx;")
-        
-        jac_block_funcs.append(f"""
-static void eval_jac_block_{block_counter}(const double* y, const double* ydot, const double* p, const double* m, const int* loop_idx, double* res) {{
-    {' '.join(loop_var_defs)}
-    {dx_stmts_str}
-    *res = {assign.rhs.to_cpp()};
-}}""")
-        
-        loop_array_init = "{" + ", ".join(l.var for l in loops) + "}" if loops else "{0}"
-        
-        inner_body = f"""
-        int loop_idx[{max(len(loops), 1)}] = {loop_array_init};
-        
-        double dres = 1.0;
-        double res_val = 0.0;
-        __enzyme_autodiff((void*)eval_jac_block_{block_counter},
-            enzyme_dup, y, dy.data(),
-            enzyme_dup, ydot, dydot.data(),
-            enzyme_const, p,
-            enzyme_const, m,
-            enzyme_const, loop_idx,
-            enzyme_dupnoneed, &res_val, &dres);
-            
-        int global_row = {assign.lhs.index.to_cpp()};
-        for(int col = 0; col < N; ++col) {{
-            if (dy[col] != 0.0 || dydot[col] != 0.0) {{
-                double val = dy[col] + c_j * dydot[col];
-                if (val != 0.0) {{
-                    if (nnz < max_nnz) {{
-                        out_rows[nnz] = global_row;
-                        out_cols[nnz] = col;
-                        out_vals[nnz] = val;
-                        nnz++;
-                    }}
-                }}
-                dy[col] = 0.0;
-                dydot[col] = 0.0;
-            }}
-        }}"""
-        
-        assembly_code = inner_body
-        for loop in reversed(loops):
-            assembly_code = f"for(int {loop.var} = {loop.start.to_cpp()}; {loop.var} < {loop.end.to_cpp()}; ++{loop.var}) {{\n{assembly_code}\n}}"
-            
-        jac_assembly_stmts.append(f"{{\n{assembly_code}\n}}")
-        block_counter += 1
+        else:
+            eq_stmts.extend(stmts)
 
     from ion_flux.compiler.codegen.ast_analysis import extract_div_child
     for eq_data in ast_payload.get("equations", []):
@@ -246,7 +178,4 @@ static void eval_jac_block_{block_counter}(const double* y, const double* ydot, 
     body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + eq_stmts))
     obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + obs_stmts))
     
-    jac_block_funcs_str = "\n".join(jac_block_funcs)
-    jac_assembly_body_str = "\n".join(jac_assembly_stmts)
-    
-    return generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str, jac_block_funcs_str, jac_assembly_body_str)
+    return generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str)

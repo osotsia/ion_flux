@@ -69,7 +69,7 @@ class Engine:
         self._cpr_cache = self._compute_cpr()
         
         if hasattr(model, "ast"):
-            self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, observables, bandwidth=self.jacobian_bandwidth, target=self.target)
+            self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, observables, target=self.target)
             self.runtime = None
             if not self.mock_execution:
                 compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
@@ -128,7 +128,19 @@ class Engine:
                     c_ptrs.append(c_ptrs[-1] + count)
                 c_dense = colorer.dense_rows
             except Exception as e:
-                logging.warning(f"CPR Graph Coloring failed: {e}. Falling back to block-wise AD.")
+                logging.warning(f"CPR Graph Coloring failed: {e}. Falling back to Dense Forward-Mode AD.")
+                N = self.layout.n_states
+                c_seeds = [[0.0] * N for _ in range(N)]
+                for i in range(N): c_seeds[i][i] = 1.0
+                c_ptrs = list(range(0, N * N + 1, N))
+                
+                c_rows = []
+                c_cols = []
+                for c in range(N):
+                    c_rows.extend(range(N))
+                    c_cols.extend([c] * N)
+                    
+                c_dense = []
         return (c_seeds, c_ptrs, c_rows, c_cols, c_dense)
 
     @classmethod
@@ -424,26 +436,6 @@ class Engine:
         m_list = self.layout.get_mesh_data()
         N = self.layout.n_states
         
-        # Safe Fallback to Legacy Sparse Evaluator
-        if not c_seeds:
-            import ctypes
-            rows = (ctypes.c_int * (N * 50))()
-            cols = (ctypes.c_int * (N * 50))()
-            vals = (ctypes.c_double * (N * 50))()
-            nnz = ctypes.c_int(0)
-            
-            y_arr = (ctypes.c_double * N)(*y)
-            ydot_arr = (ctypes.c_double * N)(*ydot)
-            p_arr = (ctypes.c_double * len(p_list))(*p_list)
-            m_arr = (ctypes.c_double * len(m_list))(*m_list)
-            
-            self.runtime.dll.evaluate_jacobian_sparse(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), rows, cols, vals, ctypes.byref(nnz))
-            
-            jac_2d = [[0.0] * N for _ in range(N)]
-            for i in range(nnz.value):
-                jac_2d[rows[i]][cols[i]] = vals[i]
-            return jac_2d
-
         # Forward-Mode CPR Evaluation
         J = [[0.0] * N for _ in range(N)]
         for c_idx, seed in enumerate(c_seeds):
@@ -593,7 +585,8 @@ class Engine:
         try:
             if self.solver_backend == "sundials":
                 y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_sundials(
-                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), self.layout.n_obs, show_progress, v_idx
+                    self.runtime.lib_path, y0, ydot0, id_arr, p_list, m_list, t_eval_arr.tolist(), self.layout.n_obs,
+                    c_seeds, c_ptrs, c_rows, c_cols, c_dense, show_progress, v_idx
                 )
             else:
                 y_res, obs_res, micro_t, micro_y, micro_ydot = solve_ida_native(

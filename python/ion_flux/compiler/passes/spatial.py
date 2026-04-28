@@ -237,7 +237,10 @@ class SpatialLoweringVisitor:
         cpp_code = "[&]() {\n    double sum = 0.0;\n"
         for axis in axes:
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
-            cpp_code += f"    #pragma clang loop unroll(full)\n    for(int i_{int_id}_{axis} = 0; i_{int_id}_{axis} < {res}; ++i_{int_id}_{axis}) {{\n"
+            # FIX: Removed `#pragma clang loop unroll(full)`. 
+            # Enzyme differentiates standard loops perfectly. Unrolling complex integrals 
+            # with 100+ nodes causes catastrophic LLVM compile-time explosions.
+            cpp_code += f"    for(int i_{int_id}_{axis} = 0; i_{int_id}_{axis} < {res}; ++i_{int_id}_{axis}) {{\n"
             
         cpp_code += "        double vol = 1.0;\n" + geom_code
         cpp_code += f"        sum += {child_expr.to_cpp()} * vol;\n"

@@ -1,16 +1,14 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
-use super::{NativeResFn, NativeObsFn, NativeJacSparseFn, NativeJvpFn, NativeVjpFn, NativeSetThreadsFn, SolverConfig, Diagnostics};
+use super::{NativeResFn, NativeObsFn, NativeJvpFn, NativeVjpFn, NativeSetThreadsFn, SolverConfig, Diagnostics};
 use super::integrator::{step_bdf_vsvo, BdfHistory};
 use super::linalg::NativeSparseLuSolver;
-use std::os::raw::{c_double, c_int};
 
 #[pyclass(unsendable)]
 pub struct SolverHandle {
     _lib: libloading::Library,
     res_fn: NativeResFn,
     obs_fn: Option<NativeObsFn>,
-    jac_sparse_fn: NativeJacSparseFn,
     jvp_fn: Option<NativeJvpFn>,
     vjp_fn: Option<NativeVjpFn>,
     set_threads_fn: Option<NativeSetThreadsFn>,
@@ -27,10 +25,6 @@ pub struct SolverHandle {
     pub spatial_diag: Vec<f64>,
     pub max_steps: Vec<f64>,
     pub cpr: super::CprData,
-    
-    pub jac_rows_buf: Vec<i32>,
-    pub jac_cols_buf: Vec<i32>,
-    pub jac_vals_buf: Vec<f64>,
     
     history: BdfHistory,
     lu_solver: NativeSparseLuSolver,
@@ -50,7 +44,6 @@ impl SolverHandle {
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let res_fn: NativeResFn = unsafe { *lib.get(b"evaluate_residual\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let obs_fn: Option<NativeObsFn> = unsafe { lib.get(b"evaluate_observables\0").map(|s| *s).ok() };
-        let jac_sparse_fn: NativeJacSparseFn = unsafe { *lib.get(b"evaluate_jacobian_sparse\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let jvp_fn: Option<NativeJvpFn> = unsafe { lib.get(b"evaluate_jvp\0").map(|s| *s).ok() };
         let vjp_fn: Option<NativeVjpFn> = unsafe { lib.get(b"evaluate_vjp\0").map(|s| *s).ok() };
         let set_threads_fn: Option<NativeSetThreadsFn> = unsafe { lib.get(b"set_spatial_threads\0").map(|s| *s).ok() };
@@ -69,9 +62,8 @@ impl SolverHandle {
         };
         
         let mut handle = SolverHandle { 
-            _lib: lib, res_fn, obs_fn, jac_sparse_fn, jvp_fn, vjp_fn, set_threads_fn, n, bw, n_obs,
+            _lib: lib, res_fn, obs_fn, jvp_fn, vjp_fn, set_threads_fn, n, bw, n_obs,
             t: 0.0, y: y0, ydot: ydot0, id, constraints, p, m, spatial_diag, max_steps, cpr,
-            jac_rows_buf: vec![0; n * 50], jac_cols_buf: vec![0; n * 50], jac_vals_buf: vec![0.0; n * 50],
             history, lu_solver,
             config: SolverConfig::default(), diag,
         };
@@ -98,8 +90,8 @@ impl SolverHandle {
 
             crate::solver::newton::assemble_jacobian_triplets(
                 self.n, &self.y, &self.ydot, &self.p, &self.m, 0.0,
-                self.jac_sparse_fn, self.jvp_fn, self.vjp_fn,
-                &mut self.lu_solver, &mut self.jac_rows_buf, &mut self.jac_cols_buf, &mut self.jac_vals_buf,
+                self.jvp_fn, self.vjp_fn,
+                &mut self.lu_solver.triplets,
                 &self.cpr
             );
 
@@ -208,8 +200,8 @@ impl SolverHandle {
         step_bdf_vsvo(
             self.n, self.bw, &mut self.y, &mut self.ydot, &self.p, &self.m, &self.id, &self.constraints, &self.spatial_diag, &self.max_steps,
             dt, &mut self.history,
-            self.res_fn, self.jac_sparse_fn, self.jvp_fn, self.vjp_fn,
-            &mut self.lu_solver, &mut self.jac_rows_buf, &mut self.jac_cols_buf, &mut self.jac_vals_buf, &self.config, &mut self.diag, &self.cpr,
+            self.res_fn, self.jvp_fn, self.vjp_fn,
+            &mut self.lu_solver, &self.config, &mut self.diag, &self.cpr,
             hist, self.t
         ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         

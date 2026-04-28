@@ -1,10 +1,11 @@
+// --- File: rust/src/solver/sundials.rs ---
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
 use std::os::raw::{c_char, c_double, c_int, c_long, c_void};
-use super::{NativeResFn, NativeJacSparseFn, NativeObsFn};
+use super::{NativeResFn, NativeJvpFn, NativeVjpFn, NativeObsFn};
 
 pub type SunRealType = c_double;
 pub type SunIndexType = c_long; 
@@ -58,13 +59,13 @@ extern "C" {
 
 pub struct SundialsUserData {
     pub res_fn: NativeResFn,
-    pub jac_sparse_fn: NativeJacSparseFn,
+    pub jvp_fn: Option<NativeJvpFn>,
+    pub vjp_fn: Option<NativeVjpFn>,
     pub obs_fn: Option<NativeObsFn>,
     pub p: Vec<f64>,
     pub m: Vec<f64>,
-    pub jac_rows_buf: Vec<c_int>,
-    pub jac_cols_buf: Vec<c_int>,
-    pub jac_vals_buf: Vec<f64>,
+    pub cpr: crate::solver::CprData,
+    pub triplets: Vec<(usize, usize, f64)>,
     pub is_banded: bool,
     pub sun_bw: isize,
     pub n: usize,
@@ -80,10 +81,13 @@ unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, 
     let ud = &mut *(user_data as *mut SundialsUserData);
     let n = ud.n;
 
-    let mut nnz: c_int = 0;
-    (ud.jac_sparse_fn)(
-        N_VGetArrayPointer(y), N_VGetArrayPointer(yp), ud.p.as_ptr(), ud.m.as_ptr(), c_j, 
-        ud.jac_rows_buf.as_mut_ptr(), ud.jac_cols_buf.as_mut_ptr(), ud.jac_vals_buf.as_mut_ptr(), &mut nnz
+    crate::solver::newton::assemble_jacobian_triplets(
+        n, std::slice::from_raw_parts(N_VGetArrayPointer(y), n),
+        std::slice::from_raw_parts(N_VGetArrayPointer(yp), n),
+        &ud.p, &ud.m, c_j,
+        ud.jvp_fn, ud.vjp_fn,
+        &mut ud.triplets,
+        &ud.cpr
     );
 
     if ud.is_banded {
@@ -95,11 +99,7 @@ unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, 
             *a_data.add(i) = 0.0;
         }
 
-        for i in 0..(nnz as usize) {
-            let r = ud.jac_rows_buf[i] as usize;
-            let c = ud.jac_cols_buf[i] as usize;
-            let val = ud.jac_vals_buf[i];
-            
+        for &(r, c, val) in &ud.triplets {
             let band_idx = (r as isize - c as isize + mu) as usize + c * ldim;
             *a_data.add(band_idx) = val;
         }
@@ -108,10 +108,7 @@ unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, 
         for i in 0..(n*n) {
             *a_data.add(i) = 0.0;
         }
-        for i in 0..(nnz as usize) {
-            let r = ud.jac_rows_buf[i] as usize;
-            let c = ud.jac_cols_buf[i] as usize;
-            let val = ud.jac_vals_buf[i];
+        for &(r, c, val) in &ud.triplets {
             *a_data.add(c * n + r) = val;
         }
     }
@@ -200,12 +197,21 @@ pub struct SundialsHandle {
 #[pymethods]
 impl SundialsHandle {
     #[new]
-    pub fn new(lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, p: Vec<f64>, m: Vec<f64>, n_obs: usize) -> PyResult<Self> {
+    pub fn new(
+        lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, 
+        p: Vec<f64>, m: Vec<f64>, n_obs: usize, 
+        cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>
+    ) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
-        let jac_sparse_fn: NativeJacSparseFn = unsafe { *lib.get::<NativeJacSparseFn>(b"evaluate_jacobian_sparse\0").unwrap() };
+        let jvp_fn: Option<NativeJvpFn> = unsafe { lib.get::<NativeJvpFn>(b"evaluate_jvp\0").map(|s| *s).ok() };
+        let vjp_fn: Option<NativeVjpFn> = unsafe { lib.get::<NativeVjpFn>(b"evaluate_vjp\0").map(|s| *s).ok() };
         let obs_fn: Option<NativeObsFn> = unsafe { lib.get::<NativeObsFn>(b"evaluate_observables\0").map(|s| *s).ok() };
         
+        let cpr = crate::solver::CprData { 
+            color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense 
+        };
+
         let sunctx = unsafe { get_safe_sundials_context() };
         
         let y_vec = unsafe { N_VMake_Serial(n as i64, y0.as_mut_ptr(), sunctx) };
@@ -214,18 +220,16 @@ impl SundialsHandle {
         
         let ida_mem = unsafe { IDACreate(sunctx) };
         
-        let mut jac_rows_buf = vec![0_i32; n * 50];
-        let mut jac_cols_buf = vec![0_i32; n * 50];
-        let mut jac_vals_buf = vec![0.0_f64; n * 50];
-        let mut nnz: c_int = 0;
+        let mut triplets = Vec::with_capacity(n * 50);
         
-        unsafe { (jac_sparse_fn)(y0.as_ptr(), ydot0.as_ptr(), p.as_ptr(), m.as_ptr(), 1.0, jac_rows_buf.as_mut_ptr(), jac_cols_buf.as_mut_ptr(), jac_vals_buf.as_mut_ptr(), &mut nnz) };
+        crate::solver::newton::assemble_jacobian_triplets(
+            n, &y0, &ydot0, &p, &m, 1.0,
+            jvp_fn, vjp_fn, &mut triplets, &cpr
+        );
         
         let mut actual_bw: isize = 0;
-        for i in 0..(nnz as usize) {
-            let r_idx = jac_rows_buf[i] as isize;
-            let c_idx = jac_cols_buf[i] as isize;
-            let dist: isize = (r_idx - c_idx).abs();
+        for &(r, c, _) in &triplets {
+            let dist: isize = (r as isize - c as isize).abs();
             if dist > actual_bw { actual_bw = dist; }
         }
         
@@ -233,8 +237,8 @@ impl SundialsHandle {
         let sun_bw = actual_bw;
         
         let user_data = Box::new(SundialsUserData { 
-            res_fn, jac_sparse_fn, obs_fn, p, m, 
-            jac_rows_buf, jac_cols_buf, jac_vals_buf,
+            res_fn, jvp_fn, vjp_fn, obs_fn, p, m, cpr,
+            triplets,
             is_banded, sun_bw, n
         });
         
@@ -309,19 +313,19 @@ impl SundialsHandle {
             }
             if max_res < 1e-8 { break; }
 
-            let mut nnz: c_int = 0;
-            unsafe { (self.user_data.jac_sparse_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), 0.0, self.user_data.jac_rows_buf.as_mut_ptr(), self.user_data.jac_cols_buf.as_mut_ptr(), self.user_data.jac_vals_buf.as_mut_ptr(), &mut nnz); }
+            crate::solver::newton::assemble_jacobian_triplets(
+                self.n, &self._y_data, &self._yp_data, &self.user_data.p, &self.user_data.m, 0.0,
+                self.user_data.jvp_fn, self.user_data.vjp_fn,
+                &mut self.user_data.triplets,
+                &self.user_data.cpr
+            );
 
-            for i in 0..(nnz as usize) {
-                if self.user_data.jac_rows_buf[i] == self.user_data.jac_cols_buf[i] {
-                    let r = self.user_data.jac_rows_buf[i] as usize;
-                    if self._id_data[r] < 0.5 { 
-                        let diag = self.user_data.jac_vals_buf[i];
-                        if diag.abs() > 1e-12 {
-                            let mut step: f64 = -res[r] / diag;
-                            if step.abs() > 0.1_f64 { step = step.signum() * 0.1_f64; } 
-                            self._y_data[r] += step * 0.5; 
-                        }
+            for &(r, c, val) in &self.user_data.triplets {
+                if r == c && self._id_data[r] < 0.5 { 
+                    if val.abs() > 1e-12 {
+                        let mut step: f64 = -res[r] / val;
+                        if step.abs() > 0.1_f64 { step = step.signum() * 0.1_f64; } 
+                        self._y_data[r] += step * 0.5; 
                     }
                 }
             }
