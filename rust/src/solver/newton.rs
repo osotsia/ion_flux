@@ -52,7 +52,7 @@ pub fn assemble_jacobian_triplets(
                     lambda[r] = 0.0;
                     for c in 0..n {
                         let val = dy_out[c] + c_j * dydot_out[c];
-                        if val.abs() > 1e-16 {
+                        if val.abs() > 1e-16 || val.is_nan() {
                             lu_solver.triplets.push((r, c, val));
                         }
                     }

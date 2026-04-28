@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import itertools
+import math
 from typing import Dict, Any, List, Optional, Tuple, Sequence as TypingSequence
 import numpy as np
 
@@ -462,7 +463,7 @@ class Engine:
                 _, dy_out, dydot_out = self.runtime.evaluate_vjp(y, ydot, p_list, m_list, lam)
                 for c in range(N):
                     val = dy_out[c] + c_j * dydot_out[c]
-                    if abs(val) > 1e-16:
+                    if abs(val) > 1e-16 or math.isnan(val):
                         J[r][c] = val
                         
         return J
