@@ -32,16 +32,16 @@ sudo apt install cmake ninja-build
 git clone https://github.com/osotsia/ion_flux.git
 cd ion_flux
 
-# Create a virtual environment
+# Create a virtual environment and install the package
 python -m venv .venv && source .venv/bin/activate
-pip install numpy scipy pandas matplotlib jinja2 pytest pytest-asyncio
-
-# Install the package
 pip install ion_flux
 
 # Fetch LLVM and compile the Enzyme AD plugin
 ion-flux install-toolchain
+```
+**3. Get Started**
 
+```bash
 # Run the performance showcase
 python examples/6_demo.py
 
