@@ -28,12 +28,11 @@ sudo apt install cmake ninja-build
 
 **2. Install and Configure `ion_flux`**
 ```bash
-# Clone the repository to access the examples and reference models
-git clone https://github.com/osotsia/ion_flux.git
-cd ion_flux
-
-# Create a virtual environment and install the package
+# Create a virtual environment (recommended)
+mkdir my_battery_project && cd my_battery_project
 python -m venv .venv && source .venv/bin/activate
+
+# Install the package
 pip install ion_flux
 
 # Fetch LLVM and compile the Enzyme AD plugin
@@ -42,6 +41,10 @@ ion-flux install-toolchain
 **3. Get Started**
 
 ```bash
+# Clone the repository to access the examples and reference models
+git clone https://github.com/osotsia/ion_flux.git
+cd ion_flux
+
 # Run the performance showcase
 python examples/6_demo.py
 
