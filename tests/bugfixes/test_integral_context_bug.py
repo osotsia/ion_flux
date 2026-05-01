@@ -94,7 +94,6 @@ def test_unbound_domain_integral_context_resolution():
     
     Analytical Integral of x dx from 0 to 0.1 = 0.5 * (0.1)^2 = 0.005.
     
-    THIS TEST WILL FAIL (yielding ~0.5) UNTIL THE COMPILER BUG IS FIXED.
     """
     engine = Engine(model=UnboundIntegralModel(), target="cpu", mock_execution=False)
     

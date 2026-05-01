@@ -1,7 +1,7 @@
 import copy
 from typing import Dict, Any, List
 from .nodes import Node, State, Parameter, Observable, Boundary, _wrap, SystemDict, Piecewise
-from .spatial import Domain, CompositeDomain, ConcatenatedDomain
+from .spatial import Domain, CompositeDomain
 
 def merge(*systems: SystemDict) -> SystemDict:
     merged: SystemDict = {"equations": {}, "boundaries": {}, "initial_conditions": {}, "observables": {}}
@@ -71,13 +71,13 @@ class PDE:
         for name in dir(self.__class__):
             if name.startswith("__"): continue
             attr = getattr(self.__class__, name)
-            if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, ConcatenatedDomain, Terminal, PDE)):
+            if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, Terminal, PDE)):
                 to_copy[name] = attr
 
         clones = copy.deepcopy(to_copy)
         has_terminal = False
         for name, clone in clones.items():
-            if isinstance(clone, (State, Parameter, Observable, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
+            if isinstance(clone, (State, Parameter, Observable, Domain, CompositeDomain, Terminal)):
                 clone.name = name
                 setattr(self, name, clone)
                 if isinstance(clone, Terminal): has_terminal = True
@@ -93,7 +93,7 @@ class PDE:
     def _apply_namespace(self, prefix: str) -> None:
         from ion_flux.dsl.nodes import validate_identifier
         for name, attr in self.__dict__.items():
-            if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, ConcatenatedDomain, Terminal)):
+            if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, Terminal)):
                 if not hasattr(attr, "_original_name"): attr._original_name = getattr(attr, "name", "") or name
                 attr.name = validate_identifier(f"{prefix}_{attr._original_name}")
             elif isinstance(attr, PDE):
@@ -137,7 +137,7 @@ class PDE:
                         "domains": [sub.name for sub in d.domains]
                     }
                 for sub in d.domains: add_domain(sub)
-            elif type(d).__name__ in ("Domain", "ConcatenatedDomain"):
+            elif type(d).__name__ == "Domain":
                 if d.name not in compiled["domains"]:
                     compiled["domains"][d.name] = {
                         "bounds": getattr(d, "bounds", (0, 1)), 
@@ -147,8 +147,9 @@ class PDE:
                         "parent": d.parent.name if getattr(d, "parent", None) else None,
                         "type": "standard"
                     }
+                for sub in getattr(d, "_sub_regions", []):
+                    add_domain(sub)
         
-        # Scrape all instantiations to catch unbound, composite, or dynamically generated meshes
         for d in self.components(Domain): add_domain(d)
         for d in self.components(CompositeDomain): add_domain(d)
         for s in self.components(State): add_domain(getattr(s, "domain", None))

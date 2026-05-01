@@ -20,14 +20,18 @@ def verify_manifold(ast_payload: Dict[str, Any]) -> None:
             
         p_info = domains[p_name]
         p_res = p_info["resolution"]
+        p_bounds = p_info.get("bounds", (0.0, 1.0))
         
         children.sort(key=lambda x: x[1]["start_idx"])
+        
+        current_bound = p_bounds[0]
         
         for i in range(len(children)):
             c_name, c_info = children[i]
             c_start = c_info["start_idx"]
             c_res = c_info["resolution"]
             c_end = c_start + c_res
+            c_bounds = c_info.get("bounds", (0.0, 1.0))
             
             if c_start < 0 or c_end > p_res:
                 raise TopologicalError(
@@ -45,6 +49,20 @@ def verify_manifold(ast_payload: Dict[str, Any]) -> None:
                         f"but contiguous Region '{next_name}' starts at {next_start}. "
                         f"This will cause silent memory overwrites during C++ evaluation."
                     )
+
+            # Enforce Top-Down strict physical bounds mapping
+            if abs(c_bounds[0] - current_bound) > 1e-12:
+                raise TopologicalError(
+                    f"Topological Gap/Overlap Detected! Region '{c_name}' starts at physical bound {c_bounds[0]}, "
+                    f"but expected {current_bound} to perfectly tile parent '{p_name}'."
+                )
+            current_bound = c_bounds[1]
+
+        if abs(current_bound - p_bounds[1]) > 1e-12:
+            raise TopologicalError(
+                f"Topological Gap Detected! Regions of parent '{p_name}' end at {current_bound}, "
+                f"but parent extends to {p_bounds[1]}."
+            )
 
     for d_name, d_info in domains.items():
         if d_info.get("type") == "composite":

@@ -38,6 +38,7 @@ class HierarchicalMemoryCorruptionOracle(fx.PDE):
     """
     cell = fx.Domain(bounds=(0, 10), resolution=10, name="cell")
     x_n = cell.region(bounds=(0, 5), resolution=5, name="x_n")
+    x_p = cell.region(bounds=(5, 10), resolution=5, name="x_p")
     
     r_n = fx.Domain(bounds=(0, 1), resolution=100, coord_sys="spherical", name="r_n")
     
@@ -454,7 +455,6 @@ class CapacitiveImpedanceOracle(fx.PDE):
 def test_oracle_eis_mass_matrix_extraction():
     """
     PROBE: Compares the simulated EIS against the exact analytical Transfer Function.
-    This will fail until `eis.py` is updated to evaluate `M = J(c_j=1) - J(c_j=0)`.
     """
     engine = Engine(model=CapacitiveImpedanceOracle(), target="cpu", mock_execution=False)
     session = engine.start_session(parameters={"C_cap": 5.0, "R": 2.0, "i_app": 1.0})

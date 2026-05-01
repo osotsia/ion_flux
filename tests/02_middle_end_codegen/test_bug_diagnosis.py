@@ -33,6 +33,7 @@ class PiecewiseBoundaryModel(fx.PDE):
 # ==============================================================================
 class StandardRegionBoundaryModel(fx.PDE):
     cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg_A = cell.region(bounds=(0, 5.0), resolution=5, name="reg_A")
     reg = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg")
     
     c_reg = fx.State(domain=reg, name="c_reg") # Bound to REGION
@@ -55,6 +56,7 @@ class StandardRegionBoundaryModel(fx.PDE):
 # ==============================================================================
 class WorkaroundRegionBoundaryModel(fx.PDE):
     cell = fx.Domain(bounds=(0, 10.0), resolution=10)
+    reg_A = cell.region(bounds=(0, 5.0), resolution=5, name="reg_A")
     reg = cell.region(bounds=(5.0, 10.0), resolution=5, name="reg")
     
     c_reg = fx.State(domain=reg, name="c_reg")

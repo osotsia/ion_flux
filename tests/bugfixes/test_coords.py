@@ -6,10 +6,6 @@ This suite explicitly isolates the coordinate broadcasting bug identified in the
 inside a composite domain (which the compiler flattens into a 1D C-array), 
 the compiler incorrectly multiplies the *flat global index* by `dx` rather than 
 applying the necessary modulo/division operators to extract the local dimensional index.
-
-This test asserts the exact mathematical truth. It will FAIL under the current 
-compiler architecture, producing wildly out-of-bounds coordinates (e.g., treating 
-a 2D grid as a single infinitely long 1D line).
 """
 
 import pytest

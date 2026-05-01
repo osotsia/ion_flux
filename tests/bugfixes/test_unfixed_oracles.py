@@ -5,8 +5,6 @@ This suite provides distinct, minimal-reproduction test cases for two critical e
 1. BDF History Corruption during `Session.restore()` (Affects event-locator bisection).
 2. Missing FVM `V_nodes` array mapping in unstructured `Domain.from_mesh` compilations.
 
-These tests will FAIL against the current compiler/runtime, and will PASS once the
-fixes to `session.rs`, `memory.py`, and `spatial.py` are applied.
 """
 
 import pytest

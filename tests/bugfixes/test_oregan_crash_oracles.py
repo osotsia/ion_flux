@@ -60,6 +60,7 @@ class SpatialScaleGapOracle(fx.PDE):
     # BUG TRAP: The region physically spans 80 units, but is only assigned 10 nodes.
     # The compiler will give it a volume of ~10 units instead of 80!
     reg = cell.region(bounds=(0, 80.0), resolution=10, name="reg")
+    reg_rest = cell.region(bounds=(80.0, 100.0), resolution=90, name="reg_rest")
     
     c = fx.State(domain=cell, name="c")
     
