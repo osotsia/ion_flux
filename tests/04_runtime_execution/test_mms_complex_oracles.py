@@ -249,9 +249,7 @@ class NonLinearTransportMMSOracle(fx.PDE):
             },
             "initial_conditions": {
                 self.t_var: 0.0,
-                # Explicitly add 1.0 to map `coords` (0.0->1.0) to the physical bounds (1.0->2.0).
-                # Prevents a singular D(c) = 0 condition at the left boundary.
-                self.c: self.x.coords + 1.0 
+                self.c: self.x.coords
             }
         }
 

@@ -186,32 +186,66 @@ class SpatialLoweringVisitor:
         b_axis = self.topo.get_base_axis(axis)
         if not b_axis: return Literal(0.0)
         
-        start = self.topo.domains.get(b_axis, {}).get("start_idx", 0)
-        local_idx = BinaryOp("-", idx_mgr.get_local(b_axis), Literal(start))
-        return BinaryOp("*", local_idx, Var(f"dx_{b_axis}"))
+        if self.topo.domains.get(b_axis, {}).get("coord_sys") == "unstructured":
+            return Literal(0.0)
+            
+        idx_expr = idx_mgr.get_local(b_axis)
+        
+        off_centers = self.layout.mesh_offsets[b_axis]["w_centers"]
+        w_center = ArrayAccess("m", BinaryOp("+", Literal(off_centers), idx_expr))
+        
+        bounds = self.topo.domains.get(b_axis, {}).get("bounds", (0.0, 1.0))
+        l_phys_ir = Var(f"L_phys_{b_axis}")
+        
+        return BinaryOp("+", Literal(bounds[0]), BinaryOp("*", l_phys_ir, w_center))
 
     def _lower_grad(self, child: Dict[str, Any], idx_mgr: IndexManager, face: Optional[str]) -> Expr:
         b_axis = self.topo.get_base_axis(self.current_axis)
-        dx_ir = Var(f"dx_{b_axis}") if b_axis else Var("dx_default")
+        l_phys_ir = Var(f"L_phys_{b_axis}") if b_axis else Var("L_phys_default")
+        
+        if not b_axis or self.topo.domains.get(b_axis, {}).get("coord_sys") == "unstructured":
+            return Literal(0.0)
+            
+        res = self.topo.domains.get(b_axis, {}).get("resolution", 1)
+        idx_expr = idx_mgr.get_local(b_axis)
+        off_w_dx = self.layout.mesh_offsets[b_axis]["w_dx_faces"]
         
         if face == "right" or face == "left":
             idx_shift = idx_mgr.clone()
             shift = 1 if face == "right" else -1
-            idx_shift.register(b_axis, BinaryOp("+", idx_mgr.get_local(b_axis), Literal(shift)))
+            idx_shift.register(b_axis, BinaryOp("+", idx_expr, Literal(shift)))
             
             c_shift = self.lower(child, idx_shift, face=None)
             c_curr = self.lower(child, idx_mgr, face=None)
             
-            if face == "right": return BinaryOp("/", BinaryOp("-", c_shift, c_curr), dx_ir)
-            else: return BinaryOp("/", BinaryOp("-", c_curr, c_shift), dx_ir)
+            face_idx = idx_expr if face == "right" else BinaryOp("-", idx_expr, Literal(1))
+            clamped_face = FuncCall("CLAMP", [face_idx, Literal(max(res - 1, 1))])
+            w_dx = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_face))
+            
+            dist_ir = BinaryOp("*", l_phys_ir, w_dx)
+            dist_safe = FuncCall("std::max", [Literal("1e-30"), dist_ir])
+            
+            if face == "right": return BinaryOp("/", BinaryOp("-", c_shift, c_curr), dist_safe)
+            else: return BinaryOp("/", BinaryOp("-", c_curr, c_shift), dist_safe)
             
         idx_r, idx_l = idx_mgr.clone(), idx_mgr.clone()
-        idx_r.register(b_axis, BinaryOp("+", idx_mgr.get_local(b_axis), Literal(1)))
-        idx_l.register(b_axis, BinaryOp("-", idx_mgr.get_local(b_axis), Literal(1)))
+        idx_r.register(b_axis, BinaryOp("+", idx_expr, Literal(1)))
+        idx_l.register(b_axis, BinaryOp("-", idx_expr, Literal(1)))
         
         r_val = self.lower(child, idx_r, face=None)
         l_val = self.lower(child, idx_l, face=None)
-        return BinaryOp("/", BinaryOp("-", r_val, l_val), BinaryOp("*", Literal(2.0), dx_ir))
+        
+        clamped_r = FuncCall("CLAMP", [idx_expr, Literal(max(res - 1, 1))])
+        clamped_l = FuncCall("CLAMP", [BinaryOp("-", idx_expr, Literal(1)), Literal(max(res - 1, 1))])
+        
+        w_dx_r = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_r))
+        w_dx_l = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_l))
+        
+        w_dist_total = BinaryOp("+", w_dx_r, w_dx_l)
+        dist_ir = BinaryOp("*", l_phys_ir, w_dist_total)
+        dist_safe = FuncCall("std::max", [Literal("1e-30"), dist_ir])
+        
+        return BinaryOp("/", BinaryOp("-", r_val, l_val), dist_safe)
 
     def _lower_integral(self, node: Dict[str, Any], child: Dict[str, Any], idx_mgr: IndexManager) -> Expr:
         target_domain = node.get("over")
@@ -230,7 +264,7 @@ class SpatialLoweringVisitor:
             int_var = f"i_{int_id}_{axis}"
             idx_new.register(b_axis, BinaryOp("+", Var(int_var), Literal(start)))
             
-            geom_code += Discretizer.integral_volume_code(coord_sys, int_var, res, b_axis, self.layout)
+            geom_code += Discretizer.integral_volume_code_normalized(coord_sys, int_var, start, b_axis, self.layout)
         
         child_expr = self.lower(child, idx_new, face=None)
         
@@ -277,22 +311,17 @@ class SpatialLoweringVisitor:
                     p_flux = self.lower(self.region_divs[r["domain"]], idx_mgr, face="left")
                     l_flux = Ternary(c_left, BinaryOp("*", Literal(0.5), BinaryOp("+", l_flux, p_flux)), l_flux)
 
-        dx_ir = Var(f"dx_{b_axis}")
+        l_phys_ir = Var(f"L_phys_{b_axis}")
+        idx_expr = idx_mgr.get_local(b_axis)
         
-        axis = self.current_axis
-        start = self.topo.domains.get(axis, {}).get("start_idx", 0)
+        off_A = self.layout.mesh_offsets[b_axis]["w_A_faces"]
+        off_V = self.layout.mesh_offsets[b_axis]["w_V_nodes"]
         
-        idx_expr = BinaryOp("-", idx_mgr.get_local(b_axis), Literal(start))
+        A_L = ArrayAccess("m", BinaryOp("+", Literal(off_A), idx_expr))
+        A_R = ArrayAccess("m", BinaryOp("+", Literal(off_A), BinaryOp("+", idx_expr, Literal(1))))
+        V_i = ArrayAccess("m", BinaryOp("+", Literal(off_V), idx_expr))
         
-        res = self.topo.domains.get(axis, {}).get("resolution", 1)
-        c_left_bnd = BinaryOp("==", idx_expr, Literal(0))
-        c_right_bnd = BinaryOp("==", idx_expr, Literal(res - 1))
-        
-        i_R = Ternary(c_right_bnd, idx_expr, BinaryOp("+", idx_expr, Literal(0.5)))
-        i_L = Ternary(c_left_bnd, idx_expr, BinaryOp("-", idx_expr, Literal(0.5)))
-        
-        A_R, A_L, V = Discretizer.cell_geometry(coord_sys, i_R, i_L, dx_ir)
-        return Discretizer.divergence(r_flux, l_flux, A_R, A_L, V)
+        return Discretizer.divergence_normalized(r_flux, l_flux, A_R, A_L, V_i, l_phys_ir)
 
     def _lower_div_unstructured(self, child: Dict[str, Any], idx_mgr: IndexManager, b_axis: str) -> Expr:
         mesh_name = self.current_axis

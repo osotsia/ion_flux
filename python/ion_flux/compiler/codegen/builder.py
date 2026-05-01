@@ -66,20 +66,19 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
     eq_stmts = []
     obs_stmts = []
 
-    dx_stmts = [RawCpp("double dx_default = 1.0;")]
+    l_phys_stmts = [RawCpp("double L_phys_default = 1.0;")]
     
     for d_name, d_info in ast_payload.get("domains", {}).items():
         if d_info.get("type") == "composite": continue
-        res_val = max(d_info.get("resolution", 2) - 1, 1)
         if d_name in ctx.dynamic_domains:
             idx_mgr = IndexManager(topo)
             idx_mgr.register(topo.get_base_axis(d_name), Literal(0))
             
             rhs_ir = visitor.lower(ctx.dynamic_domains[d_name]["rhs"], idx_mgr)
-            dx_stmts.append(RawCpp(f"double dx_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()})) / {res_val}.0;"))
+            l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()}));"))
         else:
             bounds = d_info.get("bounds", (0.0, 1.0))
-            dx_stmts.append(RawCpp(f"double dx_{d_name} = {float(bounds[1] - bounds[0]) / res_val};"))
+            l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = {float(bounds[1] - bounds[0])};"))
 
     def process_assignment(target_state, eq_dict, bounds_override=None, is_obs=False):
         stmts = emit_assignment(target_state, eq_dict, layout, topo, visitor, bounds_override, is_obs)
@@ -175,7 +174,7 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
         else:
             process_assignment(obs_name, eq_data["eq"], is_obs=True)
 
-    body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + eq_stmts))
-    obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (dx_stmts + obs_stmts))
+    body_str = "\n    ".join(stmt.to_cpp() for stmt in (l_phys_stmts + eq_stmts))
+    obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (l_phys_stmts + obs_stmts))
     
     return generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str)

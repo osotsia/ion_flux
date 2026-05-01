@@ -3,7 +3,7 @@ from ion_flux.dsl.core import State, Parameter, Observable
 import math
 
 class MemoryLayout:
-    def __init__(self, states: List[State], parameters: List[Parameter], observables: List[Observable] = None):
+    def __init__(self, states: List[State], parameters: List[Parameter], observables: List[Observable] = None, all_domains: List[Any] = None):
         self.state_offsets: Dict[str, Tuple[int, int]] = {}
         self.param_offsets: Dict[str, Tuple[int, int]] = {}
         self.obs_offsets: Dict[str, Tuple[int, int]] = {}
@@ -73,8 +73,16 @@ class MemoryLayout:
                         self.mesh_offsets[d.name] = offsets
                 else:
                     root_domains.add(get_root_domain(d))
+                    
+        # Extract metadata for domains even if they lack bound states (e.g. for unbound fx.integrals)
+        for d in (all_domains or []):
+            for sub_d in _get_domains(d):
+                if getattr(sub_d, "csr_data", None):
+                    pass
+                else:
+                    root_domains.add(get_root_domain(sub_d))
 
-        # Phase 1: Normalized Geometry Mapping 
+        # Phase 1: Normalized Geometry Mapping (Node-Centered FVM)
         for root_d in sorted(list(root_domains), key=lambda d: d.name):
             if root_d.name not in self.mesh_offsets:
                 self.mesh_offsets[root_d.name] = {}
@@ -89,17 +97,43 @@ class MemoryLayout:
             faces = [0.0]
             centers = []
             
-            for reg in regions:
+            num_regions = len(regions)
+            for i, reg in enumerate(regions):
                 L_k = reg.bounds[1] - reg.bounds[0]
                 L_k_norm = L_k / L_phys if L_phys > 0 else 0.0
                 N_k = reg.resolution
-                du_k = L_k_norm / N_k if N_k > 0 else 0.0
                 
-                u_start = (reg.bounds[0] - bounds[0]) / L_phys if L_phys > 0 else 0.0
+                # Resolving "Effective Cells" for node-centered geometry mapping.
+                # Boundary regions contain nodes that rest exactly on the absolute edge (half-volume).
+                if num_regions == 1:
+                    C_k = max(N_k - 1.0, 1.0)
+                else:
+                    if i == 0 or i == num_regions - 1:
+                        C_k = N_k - 0.5
+                    else:
+                        C_k = N_k
+                        
+                du_k = L_k_norm / C_k if C_k > 0 else 0.0
                 
                 for j in range(N_k):
-                    centers.append(u_start + (j + 0.5) * du_k)
-                    faces.append(u_start + (j + 1.0) * du_k)
+                    is_first = (i == 0 and j == 0)
+                    is_last = (i == num_regions - 1 and j == N_k - 1)
+                    
+                    if is_first and is_last:
+                        center = 0.5 * L_k_norm
+                        face = L_k_norm
+                    elif is_first:
+                        center = 0.0
+                        face = 0.5 * du_k
+                    elif is_last:
+                        center = 1.0
+                        face = 1.0
+                    else:
+                        center = faces[-1] + 0.5 * du_k
+                        face = faces[-1] + du_k
+                        
+                    centers.append(center)
+                    faces.append(face)
                     
             N = len(centers)
             w_dx_faces = [centers[i+1] - centers[i] for i in range(N-1)]
@@ -117,7 +151,7 @@ class MemoryLayout:
                 w_V_nodes.append(vol)
                 
             w_A_faces = []
-            for i in range(N+1):
+            for i in range(N):
                 u_f = faces[i]
                 if coord_sys == "spherical":
                     area = 4.0 * math.pi * (u_f**2)
@@ -127,6 +161,15 @@ class MemoryLayout:
                     area = 1.0
                 w_A_faces.append(area)
                 
+            # Cap the final boundary face area mapping
+            u_f = faces[-1]
+            if coord_sys == "spherical":
+                w_A_faces.append(4.0 * math.pi * (u_f**2))
+            elif coord_sys == "cylindrical":
+                w_A_faces.append(u_f)
+            else:
+                w_A_faces.append(1.0)
+                
             # Volume sanity check to ensure no geometric distortion
             total_vol = sum(w_V_nodes)
             expected_vol = 1.0
@@ -135,8 +178,8 @@ class MemoryLayout:
             
             if abs(total_vol - expected_vol) > 1e-10:
                 raise RuntimeError(f"Normalized volume integration failed for domain '{root_d.name}'. Expected {expected_vol}, got {total_vol}.")
-                
-            for arr_name, arr_data in [("w_dx_faces", w_dx_faces), ("w_V_nodes", w_V_nodes), ("w_A_faces", w_A_faces)]:
+                    
+            for arr_name, arr_data in [("w_dx_faces", w_dx_faces), ("w_V_nodes", w_V_nodes), ("w_A_faces", w_A_faces), ("w_centers", centers)]:
                 self.mesh_offsets[root_d.name][arr_name] = self.m_length
                 for val in arr_data:
                     self.mesh_cache[self.m_length] = float(val)
@@ -144,7 +187,7 @@ class MemoryLayout:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MemoryLayout":
-        obj = cls([], [], [])
+        obj = cls([], [], [], [])
         obj.state_offsets = data["state_offsets"]
         obj.param_offsets = data["param_offsets"]
         obj.obs_offsets = data.get("obs_offsets", {})

@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple, Sequence as TypingSequence
 import numpy as np
 
 from ion_flux.dsl.core import PDE, State, Parameter, Observable
+from ion_flux.dsl.spatial import Domain, CompositeDomain
 from ion_flux.compiler.memory import MemoryLayout
 from ion_flux.compiler.codegen import generate_cpp, extract_state_name
 from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
@@ -49,12 +50,17 @@ class Engine:
         states = model.components(State) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, State)]
         params = model.components(Parameter) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Parameter)]
         observables = model.components(Observable) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Observable)]
+        domains = model.components(Domain) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, Domain)]
+        comp_domains = model.components(CompositeDomain) if hasattr(model, "components") else [attr for attr in model.__dict__.values() if isinstance(attr, CompositeDomain)]
+        all_domains = domains + comp_domains
         
-        self.layout = MemoryLayout(states, params, observables)
+        self.layout = MemoryLayout(states, params, observables, all_domains)
         self.parameters = {p.name: _ParamHandle(p.name, p.default) for p in params}
         self.ast_payload: Dict[str, Any] = model.ast() if hasattr(model, "ast") else {}
         
         if self.ast_payload:
+            verify_manifold(self.ast_payload)
+            targeted_states = {eq["state"] for eq in self.ast_payload.get("equations", [])}
             verify_manifold(self.ast_payload)
             targeted_states = {eq["state"] for eq in self.ast_payload.get("equations", [])}
             for state_name in self.layout.state_offsets.keys():
@@ -326,7 +332,7 @@ class Engine:
                             local_idx = (flat_idx // stride) % res
                             bounds = topo.domains.get(b_axis, {}).get("bounds", (0, 1))
                             dx = float(bounds[1] - bounds[0]) / max(res - 1, 1)
-                            return local_idx * dx
+                            return bounds[0] + local_idx * dx
                     return 0.0
                 if op == "sin": return math.sin(c)
                 if op == "cos": return math.cos(c)

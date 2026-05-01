@@ -257,7 +257,11 @@ def test_openmp_data_parallelism_emission():
         x = fx.Domain(bounds=(0, 1), resolution=100) # Resolution > 50 triggers OpenMP Pragma
         c = fx.State(domain=x)
         def math(self):
-            return {"equations": {self.c: fx.dt(self.c) == fx.grad(self.c)}, "boundaries": {}, "initial_conditions": {self.c: 0.0}}
+            return {
+                "equations": {self.c: fx.dt(self.c) == fx.grad(self.c)}, 
+                "boundaries": {self.c: {"left": fx.Dirichlet(0.0), "right": fx.Dirichlet(0.0)}}, 
+                "initial_conditions": {self.c: 0.0}
+            }
             
     engine = Engine(model=LargeOpenMPModel(), target="cpu:omp", mock_execution=True)
     assert "omp parallel for" in engine.cpp_source

@@ -83,26 +83,52 @@ def verify_manifold(ast_payload: Dict[str, Any]) -> None:
 
 def _verify_boundaries(ast_payload: Dict[str, Any]) -> None:
     spatial_states = set()
+    from collections import defaultdict
+    bc_id_to_states = defaultdict(set)
+    
+    # 1. Walk equations to map spatial states and track _bc_id contexts
     for eq_data in ast_payload.get("equations", []):
         state_name = eq_data["state"]
-        def check_spatial(node: Any) -> bool:
+        
+        def walk_and_map(node: Any, in_reduction: bool = False):
             if isinstance(node, dict):
-                if node.get("type") == "UnaryOp" and node.get("op") in ("grad", "div"): return True
-                return any(check_spatial(v) for v in node.values())
+                is_reduction = in_reduction or node.get("type") in ("Boundary", "DomainBoundary") or (node.get("type") == "UnaryOp" and node.get("op") == "integral")
+                
+                # Flag state as spatial if it uses grad or div and is not inside a reduction
+                if not in_reduction and node.get("type") == "UnaryOp" and node.get("op") in ("grad", "div"):
+                    spatial_states.add(state_name)
+                
+                # Map any node capable of receiving a boundary condition to its parent state
+                if "_bc_id" in node:
+                    bc_id_to_states[node["_bc_id"]].add(state_name)
+                    
+                for v in node.values():
+                    walk_and_map(v, is_reduction)
             elif isinstance(node, list):
-                return any(check_spatial(item) for item in node)
-            return False
-            
-        if check_spatial(eq_data):
-            spatial_states.add(state_name)
+                for item in node:
+                    walk_and_map(item, in_reduction)
+                    
+        walk_and_map(eq_data)
 
+    # 2. Collect all states that have boundary conditions applied to them
     bound_states = set()
     for bc_data in ast_payload.get("boundaries", []):
         if bc_data["type"] == "dirichlet":
             bound_states.add(bc_data["state"])
         elif bc_data["type"] == "neumann":
-            # Best effort analysis for identifying spatial coupling references
-            pass
-            
-    # For future extension: We can enforce that len(bound_states) aligns with len(spatial_states)
-    # allowing us to throw early compilation halts before relying on C++ segfault diagnostics
+            node_id = bc_data.get("node_id")
+            if node_id in bc_id_to_states:
+                bound_states.update(bc_id_to_states[node_id])
+
+    # 3. Manifold Closure Check
+    # We do not strictly enforce `spatial_states == bound_states` because 0D states 
+    # might have algebraic Dirichlet overrides. However, EVERY spatial state MUST 
+    # have at least one boundary condition to mathematically close the domain.
+    unbound_spatial = spatial_states - bound_states
+    
+    if unbound_spatial:
+        raise TopologicalError(
+            f"Missing Boundary Conditions! The following states are governed by spatial "
+            f"PDEs (grad/div) but have no boundaries defined: {', '.join(unbound_spatial)}. "
+            f"This creates an open-ended mathematical manifold and will cause undefined physics."
+        )

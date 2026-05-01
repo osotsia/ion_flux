@@ -228,8 +228,9 @@ def test_triregion_mass_conservation():
     
     res = engine.evaluate_residual(y, ydot, parameters={})
     
-    dx_bulk = 3.0 / 29.0
-    V_cells = _get_exact_volumes([30], [dx_bulk])
+    vol_off = engine.layout.mesh_offsets["cell"]["w_V_nodes"]
+    m_list = engine.layout.get_mesh_data()
+    V_cells = np.array(m_list[vol_off : vol_off + N]) * 3.0
     
     total_mass_drift = np.sum(np.array(res) * V_cells)
     assert np.isclose(total_mass_drift, 0.0, atol=1e-10), f"Leaked mass! Drift: {total_mass_drift}"

@@ -224,8 +224,7 @@ class StaggeredNonLinearMMSOracle(fx.PDE):
     t_var = fx.State(domain=None, name="t_var")
 
     def math(self):
-        # FIX: Explicitly shift coords to match the [1.0, 2.0] physical bounds
-        coords = self.x.coords + 1.0
+        coords = self.x.coords
         t = self.t_var
         
         kappa_e = self.c

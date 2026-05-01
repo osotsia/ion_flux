@@ -8,27 +8,9 @@ class Discretizer:
     """
 
     @staticmethod
-    def cell_geometry(coord_sys: str, i_R: Expr, i_L: Expr, dx_ir: Expr) -> tuple[Expr, Expr, Expr]:
-        if coord_sys == "spherical":
-            A_R = BinaryOp("*", i_R, BinaryOp("*", i_R, BinaryOp("*", dx_ir, dx_ir)))
-            A_L = BinaryOp("*", i_L, BinaryOp("*", i_L, BinaryOp("*", dx_ir, dx_ir)))
-            V = BinaryOp("/", BinaryOp("*", BinaryOp("-", BinaryOp("*", A_R, i_R), BinaryOp("*", A_L, i_L)), dx_ir), Literal(3.0))
-            
-        elif coord_sys == "cylindrical":
-            A_R = BinaryOp("*", i_R, dx_ir)
-            A_L = BinaryOp("*", i_L, dx_ir)
-            V = BinaryOp("/", BinaryOp("*", BinaryOp("-", BinaryOp("*", A_R, i_R), BinaryOp("*", A_L, i_L)), dx_ir), Literal(2.0))
-            
-        else:
-            A_R = Literal(1.0)
-            A_L = Literal(1.0)
-            V = BinaryOp("*", BinaryOp("-", i_R, i_L), dx_ir)
-            
-        return A_R, A_L, V
-
-    @staticmethod
-    def divergence(r_flux: Expr, l_flux: Expr, A_R: Expr, A_L: Expr, V: Expr) -> Expr:
-        V_safe = FuncCall("std::max", [Literal("1e-30"), V])
+    def divergence_normalized(r_flux: Expr, l_flux: Expr, A_R: Expr, A_L: Expr, V_i: Expr, L_phys: Expr) -> Expr:
+        V_scaled = BinaryOp("*", V_i, L_phys)
+        V_safe = FuncCall("std::max", [Literal("1e-30"), V_scaled])
         net_flux = BinaryOp("-", BinaryOp("*", A_R, r_flux), BinaryOp("*", A_L, l_flux))
         return BinaryOp("/", net_flux, V_safe)
 
@@ -42,21 +24,20 @@ class Discretizer:
         )
 
     @staticmethod
-    def integral_volume_code(coord_sys: str, int_var: str, res: int, b_axis: str, layout: Any = None) -> str:
-        if coord_sys == "spherical":
-            return (
-                f"        double r_R = ({int_var} == {res}-1) ? ({int_var} * dx_{b_axis}) : ({int_var} * dx_{b_axis} + 0.5 * dx_{b_axis});\n"
-                f"        double r_L = ({int_var} == 0) ? 0.0 : ({int_var} * dx_{b_axis} - 0.5 * dx_{b_axis});\n"
-                f"        vol *= (4.0/3.0) * 3.141592653589793 * (std::pow(r_R, 3.0) - std::pow(r_L, 3.0));\n"
-            )
-        elif coord_sys == "unstructured":
+    def integral_volume_code_normalized(coord_sys: str, int_var: str, start: int, b_axis: str, layout: Any = None) -> str:
+        if coord_sys == "unstructured":
             if layout and b_axis in layout.mesh_offsets and "volumes" in layout.mesh_offsets[b_axis]:
                 vol_off = layout.mesh_offsets[b_axis]["volumes"]
                 return f"        vol *= m[{vol_off} + {int_var}];\n"
             else:
                 return f"        vol *= 1.0;\n"
-        else:
-            return f"        vol *= ({int_var} == 0 || {int_var} == {res}-1) ? 0.5 * dx_{b_axis} : dx_{b_axis};\n"
+                
+        dim_exp = 3.0 if coord_sys == "spherical" else (2.0 if coord_sys == "cylindrical" else 1.0)
+        vol_off = layout.mesh_offsets[b_axis]["w_V_nodes"]
+        return (
+            f"        double L_scale_{b_axis} = std::pow(L_phys_{b_axis}, {dim_exp});\n"
+            f"        vol *= m[{vol_off} + {start} + {int_var}] * L_scale_{b_axis};\n"
+        )
 
     @staticmethod
     def ale_dimension_multiplier(coord_sys: str) -> float:

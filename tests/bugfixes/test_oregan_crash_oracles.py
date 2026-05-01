@@ -82,7 +82,7 @@ class SpatialScaleGapOracle(fx.PDE):
         }
 
 @REQUIRES_COMPILER
-@pytest.mark.xfail(reason="Known bug. Will fix later.")
+#@pytest.mark.xfail(reason="Known bug. Will fix later.")
 def test_disproportionate_resolution_distorts_physics():
     """
     PROBE: Asserts that integrating over the region yields its true physical bounds.
