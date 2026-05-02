@@ -285,6 +285,38 @@ class SpatialLoweringVisitor:
         
         return RawCpp(cpp_code)
 
+    def _harmonic_mean(self, a: Expr, b: Expr) -> Expr:
+        """
+        Computes the harmonic mean (2AB / (A+B)) to properly conserve mass 
+        across material discontinuities (e.g. stepping from high to low diffusivity).
+        
+        We use a robust absolute-value formulation:
+        J_eff = (A * |B| + B * |A| + 0.5 * eps * (A + B)) / (|A| + |B| + eps)
+        
+        This perfectly matches the harmonic mean when A and B have the same sign,
+        and smoothly evaluates to 0.0 when they have opposite signs.
+        
+        Crucially, the `0.5 * eps * (A + B)` regularizer prevents the Enzyme AD 
+        gradient from vanishing to 0.0 at the origin (A=0, B=0), ensuring the 
+        implicit Jacobian remains structurally coupled during flat initializations.
+        """
+        abs_a = FuncCall("std::abs", [a])
+        abs_b = FuncCall("std::abs", [b])
+        
+        # Primary harmonic terms
+        term1 = BinaryOp("*", a, abs_b)
+        term2 = BinaryOp("*", b, abs_a)
+        base_num = BinaryOp("+", term1, term2)
+        
+        # Regularization to provide an exact arithmetic mean subgradient at the origin
+        sum_ab = BinaryOp("+", a, b)
+        reg_num = BinaryOp("*", Literal("5e-31"), sum_ab)
+        
+        num = BinaryOp("+", base_num, reg_num)
+        den = BinaryOp("+", BinaryOp("+", abs_a, abs_b), Literal("1e-30"))
+        
+        return BinaryOp("/", num, den)
+
     def _lower_div(self, child: Dict[str, Any], idx_mgr: IndexManager) -> Expr:
         b_axis = self.topo.get_base_axis(self.current_axis)
         if not b_axis: return Literal(0.0)
@@ -306,10 +338,10 @@ class SpatialLoweringVisitor:
             for r in self.piecewise_regions:
                 if r["start_idx"] == end and r["domain"] in self.region_divs:
                     n_flux = self.lower(self.region_divs[r["domain"]], idx_mgr, face="right")
-                    r_flux = Ternary(c_right, BinaryOp("*", Literal(0.5), BinaryOp("+", r_flux, n_flux)), r_flux)
+                    r_flux = Ternary(c_right, self._harmonic_mean(r_flux, n_flux), r_flux)
                 if r["end_idx"] == start and r["domain"] in self.region_divs:
                     p_flux = self.lower(self.region_divs[r["domain"]], idx_mgr, face="left")
-                    l_flux = Ternary(c_left, BinaryOp("*", Literal(0.5), BinaryOp("+", l_flux, p_flux)), l_flux)
+                    l_flux = Ternary(c_left, self._harmonic_mean(l_flux, p_flux), l_flux)
 
         l_phys_ir = Var(f"L_phys_{b_axis}")
         idx_expr = idx_mgr.get_local(b_axis)
