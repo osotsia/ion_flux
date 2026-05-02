@@ -329,10 +329,17 @@ class Engine:
                         if b_axis in axes:
                             stride = strides[b_axis]
                             res = topo.domains.get(b_axis, {}).get("resolution", 1)
+                            start = topo.domains.get(b_axis, {}).get("start_idx", 0)
                             local_idx = (flat_idx // stride) % res
-                            bounds = topo.domains.get(b_axis, {}).get("bounds", (0, 1))
-                            dx = float(bounds[1] - bounds[0]) / max(res - 1, 1)
-                            return bounds[0] + local_idx * dx
+                            
+                            # Query the physical offset mapped by the MemoryLayout FVM geometry
+                            b_base_axis = topo.get_base_axis(b_axis)
+                            if b_base_axis in self.layout.mesh_offsets and "w_centers" in self.layout.mesh_offsets[b_base_axis]:
+                                centers_offset = self.layout.mesh_offsets[b_base_axis]["w_centers"]
+                                norm_center = self.layout.mesh_cache.get(centers_offset + start + local_idx, 0.0)
+                                bounds = topo.domains.get(b_base_axis, {}).get("bounds", (0.0, 1.0))
+                                l_phys = float(bounds[1] - bounds[0])
+                                return bounds[0] + norm_center * l_phys
                     return 0.0
                 if op == "sin": return math.sin(c)
                 if op == "cos": return math.cos(c)
