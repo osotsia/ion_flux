@@ -3,6 +3,7 @@ from ion_flux.compiler.passes.semantic import SemanticContext
 from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor, IndexManager
 from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
 from ion_flux.compiler.passes.context import SpatialContext
+from ion_flux.compiler.codegen.emitter import CppEmitter
 from .templates import generate_cpp_skeleton
 from .topology import TopologyAnalyzer
 
@@ -62,6 +63,7 @@ def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor, ctx:
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], target: str = "cpu") -> str:
     topo = TopologyAnalyzer(ast_payload.get("domains", {}))
     semantic_ctx = SemanticContext(ast_payload)
+    emitter = CppEmitter()
     
     state_map = {s.name: s for s in states}
     state_map.update({o.name: o for o in observables})
@@ -79,7 +81,7 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
             idx_mgr.register(topo.get_base_axis(d_name), Literal(0))
             
             rhs_ir = visitor.lower(semantic_ctx.dynamic_domains[d_name]["rhs"], idx_mgr, SpatialContext())
-            l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()}));"))
+            l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({emitter.emit(rhs_ir)}));"))
         else:
             bounds = d_info.get("bounds", (0.0, 1.0))
             l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = {float(bounds[1] - bounds[0])};"))
@@ -133,7 +135,7 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
             )
         process_assignment(eq_data["state"], eq_data["eq"], ctx, eq_data.get("bounds_override"), is_obs=True)
 
-    body_str = "\n    ".join(stmt.to_cpp() for stmt in (l_phys_stmts + eq_stmts))
-    obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (l_phys_stmts + obs_stmts))
+    body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + eq_stmts))
+    obs_body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + obs_stmts))
     
     return generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str)

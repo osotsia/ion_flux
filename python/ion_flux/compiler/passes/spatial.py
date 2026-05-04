@@ -1,8 +1,8 @@
-from typing import Dict, Any, Optional, List
-from .ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp
+from typing import Dict, Any, Optional, List, Tuple
+from .ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus
 from .semantic import SemanticContext
-from .discretization import Discretizer
 from .context import SpatialContext
+from ion_flux.compiler.topology.dialects import get_dialect
 
 class IndexManager:
     """
@@ -41,7 +41,6 @@ class IndexManager:
             start_idx = self.topo.domains.get(axis, {}).get("start_idx", 0)
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
             
-            # Map global physical index to local array index and clamp to prevent out-of-bounds memory access
             local_idx = BinaryOp("-", abs_idx, Literal(start_idx))
             clamped = FuncCall("CLAMP", [local_idx, Literal(res)])
             
@@ -61,7 +60,6 @@ class IndexManager:
         return flat
         
     def clone(self) -> 'IndexManager':
-        """Creates an independent copy for staggered face evaluations or nested loops."""
         new_mgr = IndexManager(self.topo)
         new_mgr.active_indices = self.active_indices.copy()
         return new_mgr
@@ -69,17 +67,17 @@ class IndexManager:
 
 class SpatialLoweringVisitor:
     """
-    Transforms topology-agnostic Python AST math into deterministic C++ AST elements.
+    Transforms topology-agnostic Python AST math into deterministic Loop-Level MIR.
     Strictly stateless: Relies entirely on the immutable SpatialContext for tracking evaluation state.
     """
     
     _BIN_SYM = {
-        "add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "std::pow",
+        "add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "pow",
         "gt": ">", "lt": "<", "ge": ">=", "le": "<=", "eq": "==", "ne": "!="
     }
     
     _UNARY_SYM = {
-        "neg": "-", "abs": "std::abs", "exp": "std::exp", "log": "std::log", 
+        "abs": "std::abs", "exp": "std::exp", "log": "std::log", 
         "sin": "std::sin", "cos": "std::cos", "sqrt": "std::sqrt"
     }
 
@@ -91,10 +89,6 @@ class SpatialLoweringVisitor:
         self.target = target
 
     def lower(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext, face: Optional[str] = None) -> Expr:
-        """
-        Primary entry point. Checks for Neumann boundary overrides before dispatching 
-        the standard bulk equation evaluation.
-        """
         bc_info = self.semantic_ctx.get_neumann_bc(node.get("_bc_id"), face)
         
         if bc_info:
@@ -108,7 +102,6 @@ class SpatialLoweringVisitor:
             edge_val = start if face == "left" else start + res - 1
             is_edge = BinaryOp("==", idx_mgr.get_local(b_axis), Literal(edge_val))
             
-            # Mask the bulk equation with the boundary condition at the exact edge
             return Ternary(is_edge, bc_ir, self._dispatch(node, idx_mgr, ctx, face))
 
         return self._dispatch(node, idx_mgr, ctx, face)
@@ -146,8 +139,6 @@ class SpatialLoweringVisitor:
         arr = "ydot" if ctx.use_ydot else "y"
         base_access = self._array_access(arr, BinaryOp("+", Literal(offset), flat_idx))
         
-        # If evaluated on a staggered face (e.g., inside a gradient or divergence), 
-        # interpolate the adjacent node values.
         if face and ctx.axis:
             b_axis = self.topo.get_base_axis(ctx.axis)
             res = self.topo.domains.get(ctx.axis, {}).get("resolution", 1)
@@ -162,7 +153,6 @@ class SpatialLoweringVisitor:
             
             interpolated_access = BinaryOp("*", Literal(0.5), BinaryOp("+", base_access, neighbor_access))
             
-            # Dirichlet boundary overrides map exactly to the nodes on the manifold edge
             dirichlet_bcs = self.semantic_ctx.get_dirichlet_bc(state_name)
             if dirichlet_bcs:
                 local_idx = BinaryOp("-", idx_mgr.get_local(b_axis), Literal(start))
@@ -180,7 +170,6 @@ class SpatialLoweringVisitor:
         return base_access
 
     def _lower_boundary(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
-        """Forces the current evaluation to the specific domain edge requested by the user."""
         idx_bnd = idx_mgr.clone()
         from ion_flux.compiler.codegen.ast_analysis import extract_state_names
         state_names = extract_state_names(node["child"])
@@ -209,7 +198,6 @@ class SpatialLoweringVisitor:
             
         bop = BinaryOp(self._BIN_SYM[op], l, r) if op != "pow" else FuncCall("std::pow", [l, r])
         
-        # Boolean constraints emit strictly differentiable continuous 1.0 or 0.0 values 
         if op in ("gt", "lt", "ge", "le", "eq", "ne"): 
             return Ternary(bop, Literal(1.0), Literal(0.0))
             
@@ -225,23 +213,24 @@ class SpatialLoweringVisitor:
         if op == "coords": 
             return self._lower_coords(node, idx_mgr, ctx)
         
-        # Update spatial context for operators traversing FVM topology
         child_ctx = ctx
         if op in ("grad", "div"): 
             child_ctx = ctx.with_updates(axis=node.get("axis") or ctx.axis)
 
         if op == "grad": 
-            res = self._lower_grad(child, idx_mgr, child_ctx, face)
+            dialect = get_dialect(self.topo, self.layout, child_ctx.axis)
+            return dialect.gradient(self, child, idx_mgr, child_ctx, face)
         elif op == "div": 
-            res = self._lower_div(child, idx_mgr, child_ctx)
-        else:
-            c_ir = self.lower(child, idx_mgr, child_ctx, face)
-            res = RawCpp(f"(-{c_ir.to_cpp()})") if op == "neg" else FuncCall(self._UNARY_SYM[op], [c_ir])
+            dialect = get_dialect(self.topo, self.layout, child_ctx.axis)
+            return dialect.divergence(self, child, idx_mgr, child_ctx)
             
-        return res
+        c_ir = self.lower(child, idx_mgr, child_ctx, face)
+        if op == "neg": 
+            return UnaryMinus(c_ir)
+            
+        return FuncCall(self._UNARY_SYM[op], [c_ir])
 
     def _lower_coords(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
-        """Retrieves the physical coordinate mapping of the active loop node."""
         axis = node.get("axis") or ctx.axis
         b_axis = self.topo.get_base_axis(axis)
         
@@ -257,57 +246,8 @@ class SpatialLoweringVisitor:
         
         return BinaryOp("+", Literal(bounds[0]), BinaryOp("*", l_phys_ir, w_center))
 
-    def _lower_grad(self, child: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext, face: Optional[str]) -> Expr:
-        b_axis = self.topo.get_base_axis(ctx.axis)
-        l_phys_ir = Var(f"L_phys_{b_axis}") if b_axis else Var("L_phys_default")
-        
-        if not b_axis or self.topo.domains.get(b_axis, {}).get("coord_sys") == "unstructured":
-            return Literal(0.0)
-            
-        res = self.topo.domains.get(b_axis, {}).get("resolution", 1)
-        idx_expr = idx_mgr.get_local(b_axis)
-        off_w_dx = self.layout.mesh_offsets[b_axis]["w_dx_faces"]
-        
-        if face == "right" or face == "left":
-            idx_shift = idx_mgr.clone()
-            shift = 1 if face == "right" else -1
-            idx_shift.register(b_axis, BinaryOp("+", idx_expr, Literal(shift)))
-            
-            c_shift = self.lower(child, idx_shift, ctx, face=None)
-            c_curr = self.lower(child, idx_mgr, ctx, face=None)
-            
-            face_idx = idx_expr if face == "right" else BinaryOp("-", idx_expr, Literal(1))
-            clamped_face = FuncCall("CLAMP", [face_idx, Literal(max(res - 1, 1))])
-            w_dx = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_face))
-            
-            dist_ir = BinaryOp("*", l_phys_ir, w_dx)
-            dist_safe = FuncCall("std::max", [Literal("1e-30"), dist_ir])
-            
-            if face == "right": 
-                return BinaryOp("/", BinaryOp("-", c_shift, c_curr), dist_safe)
-            else: 
-                return BinaryOp("/", BinaryOp("-", c_curr, c_shift), dist_safe)
-            
-        idx_r, idx_l = idx_mgr.clone(), idx_mgr.clone()
-        idx_r.register(b_axis, BinaryOp("+", idx_expr, Literal(1)))
-        idx_l.register(b_axis, BinaryOp("-", idx_expr, Literal(1)))
-        
-        r_val = self.lower(child, idx_r, ctx, face=None)
-        l_val = self.lower(child, idx_l, ctx, face=None)
-        
-        clamped_r = FuncCall("CLAMP", [idx_expr, Literal(max(res - 1, 1))])
-        clamped_l = FuncCall("CLAMP", [BinaryOp("-", idx_expr, Literal(1)), Literal(max(res - 1, 1))])
-        
-        w_dx_r = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_r))
-        w_dx_l = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_l))
-        
-        w_dist_total = BinaryOp("+", w_dx_r, w_dx_l)
-        dist_ir = BinaryOp("*", l_phys_ir, w_dist_total)
-        dist_safe = FuncCall("std::max", [Literal("1e-30"), dist_ir])
-        
-        return BinaryOp("/", BinaryOp("-", r_val, l_val), dist_safe)
-
     def _lower_integral(self, node: Dict[str, Any], child: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
+        from ion_flux.compiler.codegen.emitter import CppEmitter
         target_domain = node.get("over")
         axes = self.topo.get_axes(target_domain)
         
@@ -318,19 +258,18 @@ class SpatialLoweringVisitor:
         for axis in axes:
             b_axis = self.topo.get_base_axis(axis)
             start = self.topo.domains.get(axis, {}).get("start_idx", 0)
-            coord_sys = self.topo.domains.get(axis, {}).get("coord_sys", "cartesian")
-            
             int_var = f"i_{int_id}_{axis}"
             idx_new.register(b_axis, BinaryOp("+", Var(int_var), Literal(start)))
-            geom_code += Discretizer.integral_volume_code_normalized(coord_sys, int_var, start, b_axis, self.layout)
+            
+            dialect = get_dialect(self.topo, self.layout, axis)
+            geom_code += dialect.integral_volume_weight(int_var, start)
         
-        # Temporarily inject the primary integration axis to preserve 
-        # spatial context for nested topology-agnostic operators (e.g., fx.grad inside fx.integral)
         int_ctx = ctx
         if axes:
             int_ctx = ctx.with_updates(axis=axes[-1])
             
         child_expr = self.lower(child, idx_new, int_ctx, face=None)
+        child_cpp = CppEmitter().emit(child_expr)
         
         cpp_code = "[&]() {\n    double sum = 0.0;\n"
         for axis in axes:
@@ -338,13 +277,12 @@ class SpatialLoweringVisitor:
             cpp_code += f"    #pragma clang loop unroll(full)\n    for(int i_{int_id}_{axis} = 0; i_{int_id}_{axis} < {res}; ++i_{int_id}_{axis}) {{\n"
             
         cpp_code += "        double vol = 1.0;\n" + geom_code
-        cpp_code += f"        sum += {child_expr.to_cpp()} * vol;\n"
+        cpp_code += f"        sum += {child_cpp} * vol;\n"
         
         for _ in axes: 
             cpp_code += "    }\n"
             
         cpp_code += "    return sum;\n}()"
-        
         return RawCpp(cpp_code)
 
     def _harmonic_mean(self, a: Expr, b: Expr) -> Expr:
@@ -362,12 +300,10 @@ class SpatialLoweringVisitor:
         abs_a = FuncCall("std::abs", [a])
         abs_b = FuncCall("std::abs", [b])
         
-        # Primary harmonic terms
         term1 = BinaryOp("*", a, abs_b)
         term2 = BinaryOp("*", b, abs_a)
         base_num = BinaryOp("+", term1, term2)
         
-        # Regularization to provide an exact arithmetic mean subgradient at the origin
         sum_ab = BinaryOp("+", a, b)
         reg_num = BinaryOp("*", Literal("5e-31"), sum_ab)
         
@@ -376,19 +312,8 @@ class SpatialLoweringVisitor:
         
         return BinaryOp("/", num, den)
 
-    def _lower_div(self, child: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
-        b_axis = self.topo.get_base_axis(ctx.axis)
-        if not b_axis: 
-            return Literal(0.0)
-        
-        coord_sys = self.topo.domains.get(ctx.axis, {}).get("coord_sys", "cartesian")
-        if coord_sys == "unstructured":
-            return self._lower_div_unstructured(child, idx_mgr, ctx, b_axis)
-
-        r_flux = self.lower(child, idx_mgr, ctx, face="right")
-        l_flux = self.lower(child, idx_mgr, ctx, face="left")
-
-        # Stitches distinct spatial regions together using Harmonic Mean interpolation
+    def stitch_piecewise_fluxes(self, r_flux: Expr, l_flux: Expr, idx_mgr: IndexManager, ctx: SpatialContext, b_axis: str) -> Tuple[Expr, Expr]:
+        """Sutures independent regional fluxes across macro material interfaces."""
         if ctx.is_piecewise and ctx.current_region_data:
             reg = ctx.current_region_data
             start, end = reg["start_idx"], reg["end_idx"]
@@ -403,65 +328,8 @@ class SpatialLoweringVisitor:
                 if r["end_idx"] == start and r["domain"] in (ctx.region_divs or {}):
                     p_flux = self.lower(ctx.region_divs[r["domain"]], idx_mgr, ctx, face="left")
                     l_flux = Ternary(c_left, self._harmonic_mean(l_flux, p_flux), l_flux)
-
-        l_phys_ir = Var(f"L_phys_{b_axis}")
-        idx_expr = idx_mgr.get_local(b_axis)
-        
-        off_A = self.layout.mesh_offsets[b_axis]["w_A_faces"]
-        off_V = self.layout.mesh_offsets[b_axis]["w_V_nodes"]
-        
-        A_L = ArrayAccess("m", BinaryOp("+", Literal(off_A), idx_expr))
-        A_R = ArrayAccess("m", BinaryOp("+", Literal(off_A), BinaryOp("+", idx_expr, Literal(1))))
-        V_i = ArrayAccess("m", BinaryOp("+", Literal(off_V), idx_expr))
-        
-        return Discretizer.divergence_normalized(r_flux, l_flux, A_R, A_L, V_i, l_phys_ir)
-
-    def _lower_div_unstructured(self, child: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext, b_axis: str) -> Expr:
-        mesh_name = ctx.axis
-        offsets = self.layout.mesh_offsets[mesh_name]
-        rp, ci, w = offsets["row_ptr"], offsets["col_ind"], offsets["weights"]
-        
-        from ion_flux.compiler.codegen.ast_analysis import extract_state_name
-        s_off = self.layout.state_offsets[extract_state_name(child)][0]
-        idx_cpp = idx_mgr.get_local(b_axis).to_cpp()
-        
-        cpp_code = Discretizer.unstructured_divergence_code(rp, ci, w, s_off, idx_cpp)
-        bulk_div = RawCpp(cpp_code)
-        
-        # Unstructured math inherently applies the gradient inside the sparse kernel.
-        # This replaces the AST `grad` wrapper with a scalar 1.0 so we can extract 
-        # the remaining diffusion multipliers correctly.
-        def replace_grad(n):
-            if not isinstance(n, dict): return n
-            if n.get("type") == "UnaryOp" and n.get("op") == "grad": 
-                return {"type": "Scalar", "value": 1.0}
-            new_n = {}
-            for k, v in n.items():
-                if isinstance(v, dict): new_n[k] = replace_grad(v)
-                elif isinstance(v, list): new_n[k] = [replace_grad(x) for x in v]
-                else: new_n[k] = v
-            return new_n
-            
-        multiplier_expr = self.lower(replace_grad(child), idx_mgr, ctx)
-        bulk_div = BinaryOp("*", multiplier_expr, bulk_div)
-
-        bc_id = child.get("_bc_id")
-        bc_terms = []
-        if bc_id:
-            for s_face in ["left", "right", "top", "bottom"]:
-                if s_face in offsets.get("surfaces", {}) and self.semantic_ctx.get_neumann_bc(bc_id, s_face):
-                    bc_val = self.lower(self.semantic_ctx.get_neumann_bc(bc_id, s_face)["ast"], idx_mgr, ctx).to_cpp()
-                    mask = f"m[{offsets['surfaces'][s_face]} + {idx_cpp}]"
                     
-                    if "volumes" in offsets:
-                        bc_terms.append(f"(({bc_val}) * {mask} / std::max(1e-30, m[{offsets['volumes']} + {idx_cpp}]))")
-                    else:
-                        bc_terms.append(f"({bc_val}) * {mask}")
-                        
-        if bc_terms: 
-            return RawCpp(f"({bulk_div.to_cpp()} + {' + '.join(bc_terms)})")
-            
-        return bulk_div
+        return r_flux, l_flux
 
     def generate_ale_dilution(self, state_name: str, idx_mgr: IndexManager, ctx: SpatialContext) -> List[Expr]:
         """
@@ -473,6 +341,8 @@ class SpatialLoweringVisitor:
         if not domain: 
             return ale
 
+        dialect = get_dialect(self.topo, self.layout, domain.name)
+
         for d_name, binding in self.semantic_ctx.dynamic_domains.items():
             if domain.name == d_name:
                 L = self.lower(binding["rhs"], idx_mgr, ctx)
@@ -480,8 +350,9 @@ class SpatialLoweringVisitor:
                 
                 y_curr = self._array_access("y", BinaryOp("+", Literal(self.layout.state_offsets[state_name][0]), idx_mgr.get_flat_index(d_name)))
                 
-                dim_mult = Discretizer.ale_dimension_multiplier(getattr(domain, "coord_sys", ""))
+                dim_mult = dialect.ale_dimension_multiplier()
                 div_v = BinaryOp("*", Literal(dim_mult), BinaryOp("/", L_dot, FuncCall("std::max", [Literal(1e-12), L])))
-                ale.append(BinaryOp("*", RawCpp(f"(-{y_curr.to_cpp()})"), div_v))
+                
+                ale.append(BinaryOp("*", UnaryMinus(y_curr), div_v))
                 
         return ale
