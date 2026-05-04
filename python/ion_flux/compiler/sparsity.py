@@ -28,7 +28,7 @@ class SparsityAnalyzer:
         
         self.sparse_triplets: Set[Tuple[int, int]] = set()
         self.bc_map: Dict[str, Dict[str, Any]] = {}
-        self.obs_map: Dict[str, Any] = {}
+        self.obs_map: Dict[str, List[Any]] = {}
         
         self._build_bc_map()
         self._build_obs_map()
@@ -41,9 +41,11 @@ class SparsityAnalyzer:
                 self.bc_map[bc["node_id"]] = bc["bcs"]
 
     def _build_obs_map(self):
-        """Map Observables so they can be recursively traversed when encountered."""
+        """Map normalized Observables. They can contain multiple elements if fractioned by Piecewise."""
         for obs in self.ast_payload.get("observables", []):
-            self.obs_map[obs["state"]] = obs
+            if obs["state"] not in self.obs_map:
+                self.obs_map[obs["state"]] = []
+            self.obs_map[obs["state"]].append(obs)
 
     def flat_to_coords(self, k: int, d_name: str) -> Dict[str, int]:
         """Projects a flat C-array index back into a multi-dimensional topological coordinate."""
@@ -90,11 +92,7 @@ class SparsityAnalyzer:
         elif t == "Observable":
             obs_name = node["name"]
             if obs_name in self.obs_map:
-                obs_data = self.obs_map[obs_name]
-                if obs_data["type"] == "piecewise":
-                    for reg in obs_data["regions"]:
-                        res.extend(self._extract_deps(reg["eq"]))
-                else:
+                for obs_data in self.obs_map[obs_name]:
                     res.extend(self._extract_deps(obs_data["eq"]))
         elif t == "Boundary":
             child_deps = self._extract_deps(node["child"])
@@ -120,9 +118,6 @@ class SparsityAnalyzer:
         elif t == "BinaryOp":
             res.extend(self._extract_deps(node["left"]))
             res.extend(self._extract_deps(node["right"]))
-        elif t == "Piecewise":
-            for reg in node["regions"]:
-                res.extend(self._extract_deps(reg["eq"]))
         elif t == "dirichlet_bnd":
             res.extend(self._extract_deps(node["node"]))
         else:
@@ -231,18 +226,18 @@ class SparsityAnalyzer:
     def _analyze(self):
         for eq in self.ast_payload.get("equations", []):
             state_name = eq["state"]
-            if eq["type"] == "piecewise":
-                for reg in eq["regions"]:
-                    b_axis = self.topo.get_base_axis(reg["domain"])
-                    start = reg["start_idx"]
-                    end = reg["end_idx"]
-                    deps = self._extract_deps(reg["eq"])
-                    deps.append(Dependency(state_name, "local")) # Diagonal guarantee
-                    self._apply_deps(state_name, deps, restrict_axis=b_axis, restrict_range=(start, end))
-            else:
-                deps = self._extract_deps(eq["eq"])
-                deps.append(Dependency(state_name, "local"))
-                self._apply_deps(state_name, deps)
+            deps = self._extract_deps(eq["eq"])
+            deps.append(Dependency(state_name, "local")) # Diagonal guarantee
+            
+            restrict_axis = None
+            restrict_range = None
+            if "bounds_override" in eq and eq["bounds_override"]:
+                # Isolate to the specific topological constraint established by the Normalizer
+                b_axis, (b_start, b_res) = next(iter(eq["bounds_override"].items()))
+                restrict_axis = b_axis
+                restrict_range = (b_start, b_start + b_res)
+                
+            self._apply_deps(state_name, deps, restrict_axis=restrict_axis, restrict_range=restrict_range)
                 
         for bc in self.ast_payload.get("boundaries", []):
             if bc["type"] == "dirichlet":

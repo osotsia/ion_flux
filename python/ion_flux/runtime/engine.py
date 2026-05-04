@@ -59,10 +59,20 @@ class Engine:
         self.ast_payload: Dict[str, Any] = model.ast() if hasattr(model, "ast") else {}
         
         if self.ast_payload:
+            from ion_flux.compiler.codegen.topology import TopologyAnalyzer
+            from ion_flux.compiler.passes.semantic import SemanticContext
+            from ion_flux.compiler.passes.normalization import NormalizationPass
+            
+            topo = TopologyAnalyzer(self.ast_payload.get("domains", {}))
+            semantic_ctx = SemanticContext(self.ast_payload)
+            state_map = {s.name: s for s in states + observables}
+            
+            # Phase 2: Structurally Normalize the AST
+            self.ast_payload = NormalizationPass(self.ast_payload, topo, semantic_ctx, state_map).run()
+            
             verify_manifold(self.ast_payload)
             targeted_states = {eq["state"] for eq in self.ast_payload.get("equations", [])}
-            verify_manifold(self.ast_payload)
-            targeted_states = {eq["state"] for eq in self.ast_payload.get("equations", [])}
+            
             for state_name in self.layout.state_offsets.keys():
                 if state_name not in targeted_states:
                     raise ValueError(f"Unconstrained state detected: '{state_name}'. Rank deficiency in system.")
