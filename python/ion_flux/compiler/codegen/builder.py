@@ -2,16 +2,18 @@ from typing import List, Dict, Any
 from ion_flux.compiler.passes.semantic import SemanticContext
 from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor, IndexManager
 from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
+from ion_flux.compiler.passes.context import SpatialContext
 from .templates import generate_cpp_skeleton
 from .topology import TopologyAnalyzer
 
-def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor, 
+def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor, ctx: SpatialContext,
                     bounds_override=None, is_obs=False) -> List[Any]:
     target_domain = getattr(visitor.state_map.get(target_state), "domain", None)
     axes = topo.get_axes(target_domain.name if target_domain else None)
     bounds_override = bounds_override or {}
     
-    visitor.current_axis = topo.get_base_axis(axes[-1]) if axes else None
+    base_axis = topo.get_base_axis(axes[-1]) if axes else None
+    eq_ctx = ctx.with_updates(axis=base_axis)
     
     idx_mgr = IndexManager(topo)
     for axis in axes:
@@ -29,19 +31,19 @@ def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor,
     res_ir = ArrayAccess(array_name, BinaryOp("+", Literal(offset), flat_idx))
     
     if isinstance(eq_dict, dict) and eq_dict.get("type") == "dirichlet_bnd":
-        rhs_ir = visitor.lower(eq_dict["node"], idx_mgr)
+        rhs_ir = visitor.lower(eq_dict["node"], idx_mgr, eq_ctx)
         y_ir = visitor._array_access("y", BinaryOp("+", Literal(offset), flat_idx))
         assign = Assign(res_ir, BinaryOp("-", y_ir, rhs_ir))
     elif not is_obs:
-        lhs_ir = visitor.lower(eq_dict["left"], idx_mgr)
-        rhs_ir = visitor.lower(eq_dict["right"], idx_mgr)
+        lhs_ir = visitor.lower(eq_dict["left"], idx_mgr, eq_ctx)
+        rhs_ir = visitor.lower(eq_dict["right"], idx_mgr, eq_ctx)
         
-        for ale_ir in visitor.generate_ale_dilution(target_state, idx_mgr):
+        for ale_ir in visitor.generate_ale_dilution(target_state, idx_mgr, eq_ctx):
             rhs_ir = BinaryOp("+", rhs_ir, ale_ir)
             
         assign = Assign(res_ir, BinaryOp("-", lhs_ir, rhs_ir))
     else:
-        rhs_ir = visitor.lower(eq_dict, idx_mgr)
+        rhs_ir = visitor.lower(eq_dict, idx_mgr, eq_ctx)
         assign = Assign(res_ir, rhs_ir)
             
     curr_body = [assign]
@@ -59,9 +61,10 @@ def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor,
 
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], target: str = "cpu") -> str:
     topo = TopologyAnalyzer(ast_payload.get("domains", {}))
-    ctx = SemanticContext(ast_payload)
+    semantic_ctx = SemanticContext(ast_payload)
     
-    visitor = SpatialLoweringVisitor(layout, {s.name: s for s in states}, ctx, topo, target)
+    visitor = SpatialLoweringVisitor(layout, {s.name: s for s in states}, semantic_ctx, topo, target)
+    base_ctx = SpatialContext()
     
     eq_stmts = []
     obs_stmts = []
@@ -70,18 +73,18 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
     
     for d_name, d_info in ast_payload.get("domains", {}).items():
         if d_info.get("type") == "composite": continue
-        if d_name in ctx.dynamic_domains:
+        if d_name in semantic_ctx.dynamic_domains:
             idx_mgr = IndexManager(topo)
             idx_mgr.register(topo.get_base_axis(d_name), Literal(0))
             
-            rhs_ir = visitor.lower(ctx.dynamic_domains[d_name]["rhs"], idx_mgr)
+            rhs_ir = visitor.lower(semantic_ctx.dynamic_domains[d_name]["rhs"], idx_mgr, base_ctx)
             l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({rhs_ir.to_cpp()}));"))
         else:
             bounds = d_info.get("bounds", (0.0, 1.0))
             l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = {float(bounds[1] - bounds[0])};"))
 
-    def process_assignment(target_state, eq_dict, bounds_override=None, is_obs=False):
-        stmts = emit_assignment(target_state, eq_dict, layout, topo, visitor, bounds_override, is_obs)
+    def process_assignment(target_state, eq_dict, proc_ctx, bounds_override=None, is_obs=False):
+        stmts = emit_assignment(target_state, eq_dict, layout, topo, visitor, proc_ctx, bounds_override, is_obs)
         if is_obs:
             obs_stmts.extend(stmts)
         else:
@@ -92,18 +95,19 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
         state_name = eq_data["state"]
         
         if eq_data["type"] == "piecewise":
-            visitor.is_piecewise = True
-            visitor.piecewise_regions = eq_data["regions"]
-            
-            visitor.region_divs = {r["domain"]: extract_div_child(r["eq"]) for r in eq_data["regions"]}
+            pw_ctx = SpatialContext(
+                is_piecewise=True,
+                piecewise_regions=eq_data["regions"],
+                region_divs={r["domain"]: extract_div_child(r["eq"]) for r in eq_data["regions"]}
+            )
             
             for reg in eq_data["regions"]:
-                visitor.current_region_data = reg
+                reg_ctx = pw_ctx.with_updates(current_region_data=reg)
                 b_axis = topo.get_base_axis(reg["domain"])
                 
                 r_start = reg["start_idx"]
                 r_res = reg["end_idx"] - reg["start_idx"]
-                d_bcs = ctx.get_dirichlet_bc(state_name)
+                d_bcs = semantic_ctx.get_dirichlet_bc(state_name)
                 d_name = getattr(visitor.state_map[state_name], "domain", None)
                 last_axis = topo.get_axes(d_name.name)[-1] if d_name else None
                 
@@ -119,12 +123,9 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
                         
                 if r_res > 0:
                     override = {b_axis: (r_start, r_res)}
-                    process_assignment(state_name, reg["eq"], override)
-                
-            visitor.is_piecewise = False
-            visitor.current_region_data = None
+                    process_assignment(state_name, reg["eq"], reg_ctx, override)
         else:
-            d_bcs = ctx.get_dirichlet_bc(state_name)
+            d_bcs = semantic_ctx.get_dirichlet_bc(state_name)
             d_name = getattr(visitor.state_map[state_name], "domain", None)
             last_axis = topo.get_axes(d_name.name)[-1] if d_name else None
             
@@ -139,9 +140,9 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
                     res -= 1
                 if res > 0:
                     override[topo.get_base_axis(last_axis)] = (start, res)
-                    process_assignment(state_name, eq_data["eq"], override)
+                    process_assignment(state_name, eq_data["eq"], SpatialContext(), override)
             else:
-                process_assignment(state_name, eq_data["eq"], override)
+                process_assignment(state_name, eq_data["eq"], SpatialContext(), override)
 
     for bc_data in ast_payload.get("boundaries", []):
         if bc_data["type"] == "dirichlet":
@@ -161,18 +162,24 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
                 dirichlet_node = {"type": "dirichlet_bnd", "node": val_dict}
                 idx = start if side == "left" else start + res - 1
                 override = {base_axis: (idx, 1)} if base_axis else {}
-                process_assignment(state_name, dirichlet_node, override)
+                process_assignment(state_name, dirichlet_node, SpatialContext(), override)
 
     visitor.state_map.update({o.name: o for o in observables})
     for eq_data in ast_payload.get("observables", []):
         obs_name = eq_data["state"]
         if eq_data["type"] == "piecewise":
+            pw_ctx = SpatialContext(
+                is_piecewise=True,
+                piecewise_regions=eq_data["regions"],
+                region_divs={r["domain"]: extract_div_child(r["eq"]) for r in eq_data["regions"]}
+            )
             for reg in eq_data["regions"]:
+                reg_ctx = pw_ctx.with_updates(current_region_data=reg)
                 b_axis = topo.get_base_axis(reg["domain"])
                 override = {b_axis: (reg["start_idx"], reg["end_idx"] - reg["start_idx"])}
-                process_assignment(obs_name, reg["eq"], override, is_obs=True)
+                process_assignment(obs_name, reg["eq"], reg_ctx, override, is_obs=True)
         else:
-            process_assignment(obs_name, eq_data["eq"], is_obs=True)
+            process_assignment(obs_name, eq_data["eq"], SpatialContext(), is_obs=True)
 
     body_str = "\n    ".join(stmt.to_cpp() for stmt in (l_phys_stmts + eq_stmts))
     obs_body_str = "\n    ".join(stmt.to_cpp() for stmt in (l_phys_stmts + obs_stmts))
