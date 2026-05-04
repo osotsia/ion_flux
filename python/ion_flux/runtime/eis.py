@@ -3,13 +3,16 @@ import scipy.linalg
 from typing import Any
 
 def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str) -> Any:
-    """Extracts the analytical Jacobian directly from Enzyme and algebraically solves the transfer function."""
-    from ion_flux.runtime.engine import SimulationResult
+    """
+    Extracts the analytical Jacobian directly from the Ahead-of-Time Enzyme module 
+    and algebraically solves the transfer function for an Electrochemical Impedance Spectrum.
+    """
+    from ion_flux.runtime.results import SimulationResult
     
     w_arr = np.asarray(frequencies) * 2 * np.pi
     
     if not session.handle:
-        # Mock execution fallback
+        # Mock execution fallback for Test/CI environments
         Z = 0.05 + (0.1 / (1 + 1j * w_arr * 0.1)) + (0.01 / np.sqrt(1j * w_arr))
     else:
         N = session.engine.layout.n_states
@@ -17,32 +20,33 @@ def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str)
         y = session.handle.get_state()
         ydot = np.zeros_like(y)
         
-        # EXACT MASS MATRIX EXTRACTION
-        # Because J(c_j) = dF/dy + c_j * dF/dydot, evaluating J at c_j=1.0 and 
-        # subtracting the steady-state J(0.0) extracts exactly dF/dydot (The Mass Matrix).
+        # EXACT MASS MATRIX EXTRACTION:
+        # Because the Native CPR evaluate_jacobian computes J(c_j) = dF/dy + c_j * dF/dydot, 
+        # evaluating J at c_j=1.0 and subtracting the steady-state J(0.0) algebraically isolates 
+        # exactly dF/dydot (The Dynamic Mass Matrix).
         J_steady = np.array(session.engine.evaluate_jacobian(y.tolist(), ydot.tolist(), 0.0, session.parameters))
         J_1 = np.array(session.engine.evaluate_jacobian(y.tolist(), ydot.tolist(), 1.0, session.parameters))
         M = J_1 - J_steady
         
         # Pack both standard mathematical parameters and structural mesh constants
-        p_list = session.engine._pack_parameters(session.parameters)
-        m_list = session.engine.layout.get_mesh_data()
+        p_list = session.manifest.pack_parameters(session.parameters)
+        m_list = session.manifest.layout.get_mesh_data()
         
-        offset = session.engine.layout.get_param_offset(input_var)
+        offset = session.manifest.layout.get_param_offset(input_var)
         
         dF_dp_input = np.zeros(N)
         lam = [0.0] * N
         for i in range(N):
             lam[i] = 1.0
-            # Evaluate Vector-Jacobian Product (VJP) passing the explicit mesh (m_list) safely
-            dp_out, _, _ = session.engine.runtime.evaluate_vjp(
+            # Evaluate Exact Vector-Jacobian Product (VJP) mapping perturbations through native Enzyme
+            dp_out, _, _ = session.manifest.runtime.evaluate_vjp(
                 y.tolist(), ydot.tolist(), p_list, m_list, lam
             )
             dF_dp_input[i] = dp_out[offset]
             lam[i] = 0.0
         
         B = -dF_dp_input
-        out_offset = session.engine.layout.get_state_offset(output_var)
+        out_offset = session.manifest.layout.get_state_offset(output_var)
         C = np.zeros(N)
         C[out_offset] = 1.0 
         
@@ -51,7 +55,7 @@ def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str)
         for i, w in enumerate(w_arr):
             A = 1j * w * M + J_steady
             try:
-                # Solve the complex linear system (j*w*M + J) * X = B
+                # Solve the complex linear system algebraically: (j*w*M + J) * X = B
                 X = scipy.linalg.solve(A, B)
                 Z[i] = np.dot(C, X)
             except scipy.linalg.LinAlgError:

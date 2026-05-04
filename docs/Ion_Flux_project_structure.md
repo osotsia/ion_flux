@@ -61,12 +61,17 @@ ion_flux/
 │       │   ├── pde.py              # Handles hierarchical submodel merging and AST namespace isolation.
 │       │   └── spatial.py          # Domain topologies and moving-mesh bindings.
 │       ├── runtime/                # --- PYTHON EXECUTION ORCHESTRATION ---
+│       │   ├── engine.py           # 1. Facade. Unifies User API (solve, solve_batch, load, export).
+│       │   ├── manifest.py         # 2. Immutable Data Target. Holds MemoryLayout & Topological Constants.
+│       │   ├── _1_builder.py       # 3. Compiler Boundary. Bridges model AST to LLVM & returns Manifest.
+│       │   ├── _2_initializers.py  # 4. AST Evaluator. Dynamically calcs y0 & ydot0 from parameters.
+│       │   ├── _3_dispatch.py      # 5. FFI Execution. Packs C-arrays & handles Rayon/Rust invocation.
+│       │   ├── _4_diagnostics.py   # 6. Observability. Formats native Rust panics to clean Python errors.
 │       │   ├── eis.py              # Solves Frequency-Domain impedance analytically via Enzyme Mass Matrices.
-│       │   ├── engine.py           # Main interface. Orchestrates lowering, compilation, and batch submission.
 │       │   ├── results.py          # Wraps flat FFI C-arrays back into multidimensional Python structures.
-│       │   ├── scheduler.py        
+│       │   ├── scheduler.py        # Async task batching limits.
 │       │   ├── session.py          # Persistent handles preserving native memory for micro-stepping HIL.
-│       │   └── telemetry.py        
+│       │   └── telemetry.py        # Observability metrics for cache hits/sparsity.
 │       └── compiler/               # --- MIDDLE-END (STAGED LOWERING) ---
 │           ├── _1_analysis/        # Intent: Topological resolution and validation.
 │           │   ├── ast_utils.py    

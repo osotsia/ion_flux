@@ -252,3 +252,7 @@ def test_multi_domain_ale_namespace_isolation():
     # We use a 5% tolerance as moving grid temporal integration introduces minor drift.
     np.testing.assert_allclose(res["c_A"].data[-1], 1.25, rtol=5e-2)
     np.testing.assert_allclose(res["c_B"].data[-1], 1.0 / 1.4, rtol=5e-2)
+
+
+if __name__ == "__main__":
+    pytest.main(["-v", "-s", __file__])

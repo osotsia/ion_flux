@@ -96,7 +96,17 @@ class NativeCompiler:
             if "#pragma omp" in cpp_source:
                 cmd.append("-fopenmp")
                 if sys.platform == "darwin":
-                    cmd.extend(["-lomp", "-Wl,-rpath,/opt/homebrew/lib", "-Wl,-rpath,/usr/local/lib"])
+                    cmd.extend([
+                        "-lomp", 
+                        # M-Series Macs (Keg-only paths)
+                        "-I/opt/homebrew/opt/libomp/include", 
+                        "-L/opt/homebrew/opt/libomp/lib",
+                        "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+                        # Intel Macs (Keg-only paths)
+                        "-I/usr/local/opt/libomp/include", 
+                        "-L/usr/local/opt/libomp/lib",
+                        "-Wl,-rpath,/usr/local/opt/libomp/lib"
+                    ])
                 elif sys.platform == "linux":
                     cmd.extend(["-static-libgcc", "-static-libstdc++", "-Wl,-Bstatic", "-lgomp", "-Wl,-Bdynamic"])
             
