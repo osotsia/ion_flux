@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from ion_flux.compiler.passes.semantic import SemanticContext
 from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor, IndexManager
 from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
@@ -60,7 +60,7 @@ def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor, ctx:
         
     return curr_body
 
-def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], target: str = "cpu") -> str:
+def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], observables: List[Any], target: str = "cpu") -> Tuple[str, List[Any]]:
     topo = TopologyAnalyzer(ast_payload.get("domains", {}))
     semantic_ctx = SemanticContext(ast_payload)
     emitter = CppEmitter()
@@ -138,4 +138,5 @@ def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], ob
     body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + eq_stmts))
     obs_body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + obs_stmts))
     
-    return generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str)
+    cpp_str = generate_cpp_skeleton(layout.n_states, layout.n_params, layout.n_obs, body_str, obs_body_str)
+    return cpp_str, eq_stmts

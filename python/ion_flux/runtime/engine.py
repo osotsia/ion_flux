@@ -82,15 +82,15 @@ class Engine:
         else:
             self.jacobian_bandwidth = jacobian_bandwidth
         
-        self._cpr_cache = self._compute_cpr()
-        
         if hasattr(model, "ast"):
-            self.cpp_source = generate_cpp(self.ast_payload, self.layout, states, observables, target=self.target)
+            self.cpp_source, eq_stmts = generate_cpp(self.ast_payload, self.layout, states, observables, target=self.target)
+            self._cpr_cache = self._compute_cpr(eq_stmts)
             self.runtime = None
             if not self.mock_execution:
                 compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
                 self.runtime = compiler.compile(self.cpp_source, self.layout.n_states)
         else:
+            self._cpr_cache = ([], [], [], [], [])
             self.runtime = None
             
         for k, v in kwargs.items(): setattr(self, k, v)
@@ -124,12 +124,11 @@ class Engine:
                 
         return max_bw if max_bw > 0 else 0
 
-    def _compute_cpr(self):
+    def _compute_cpr(self, eq_stmts: List[Any]):
         c_seeds, c_ptrs, c_rows, c_cols, c_dense = [], [], [], [], []
         if self.jacobian_bandwidth != -1 and hasattr(self, "ast_payload") and self.ast_payload:
             try:
-                states = self.model.components(State) if hasattr(self.model, "components") else [attr for attr in self.model.__dict__.values() if isinstance(attr, State)]
-                analyzer = SparsityAnalyzer(self.ast_payload, self.layout, states)
+                analyzer = SparsityAnalyzer(eq_stmts, self.layout)
                 colorer = HybridGraphColorer(self.layout.n_states, analyzer.sparse_triplets, dense_threshold=20)
                 
                 c_seeds = colorer.color_seeds

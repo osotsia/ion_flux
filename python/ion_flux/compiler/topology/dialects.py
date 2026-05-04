@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional
-from ion_flux.compiler.passes.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, RawCpp
+from ion_flux.compiler.passes.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, RawCpp, UnstructuredRead
 
 class TopologyDialect:
     """Base interface for abstracting spatial geometries."""
@@ -32,7 +32,6 @@ class StructuredDialect(TopologyDialect):
         r_flux = visitor.lower(child, idx_mgr, ctx, face="right")
         l_flux = visitor.lower(child, idx_mgr, ctx, face="left")
         
-        # Suture regional fluxes using harmonic means to conserve mass across material interfaces
         r_flux, l_flux = visitor.stitch_piecewise_fluxes(r_flux, l_flux, idx_mgr, ctx, self.b_axis)
         
         l_phys_ir = Var(f"L_phys_{self.b_axis}")
@@ -114,23 +113,16 @@ class StructuredDialect(TopologyDialect):
 class UnstructuredDialect(TopologyDialect):
     """Emits explicit CSR pointers for 3D unstructured meshes."""
     def divergence(self, visitor, child: Dict[str, Any], idx_mgr, ctx) -> Expr:
-        from ion_flux.compiler.codegen.emitter import CppEmitter
         from ion_flux.compiler.codegen.ast_analysis import extract_state_name
         
         offsets = self.layout.mesh_offsets[self.axis_name]
-        rp, ci, w = offsets["row_ptr"], offsets["col_ind"], offsets["weights"]
-        s_off = self.layout.state_offsets[extract_state_name(child)][0]
+        rp_off = Literal(offsets["row_ptr"])
+        ci_off = Literal(offsets["col_ind"])
+        w_off = Literal(offsets["weights"])
+        s_off = Literal(self.layout.state_offsets[extract_state_name(child)][0])
+        idx_expr = idx_mgr.get_local(self.b_axis)
         
-        emitter = CppEmitter()
-        idx_cpp = emitter.emit(idx_mgr.get_local(self.b_axis))
-        
-        cpp_code = (
-            f"[&]() {{\n    double sum = 0.0;\n"
-            f"    for(int k = (int)m[{rp} + {idx_cpp}]; k < (int)m[{rp} + {idx_cpp} + 1]; ++k) {{\n"
-            f"        sum += m[{w} + k] * (y[{s_off} + (int)m[{ci} + k]] - y[{s_off} + {idx_cpp}]);\n"
-            f"    }}\n    return sum;\n}}()"
-        )
-        bulk_div = RawCpp(cpp_code)
+        bulk_div = UnstructuredRead(s_off, rp_off, ci_off, w_off, idx_expr)
         
         def replace_grad(n):
             if not isinstance(n, dict): return n
@@ -144,25 +136,24 @@ class UnstructuredDialect(TopologyDialect):
             return new_n
             
         multiplier_expr = visitor.lower(replace_grad(child), idx_mgr, ctx)
-        bulk_div = BinaryOp("*", multiplier_expr, bulk_div)
+        res_ir = BinaryOp("*", multiplier_expr, bulk_div)
 
         bc_id = child.get("_bc_id")
-        bc_terms = []
         if bc_id:
             for s_face in ["left", "right", "top", "bottom"]:
                 if s_face in offsets.get("surfaces", {}) and visitor.semantic_ctx.get_neumann_bc(bc_id, s_face):
-                    bc_val = emitter.emit(visitor.lower(visitor.semantic_ctx.get_neumann_bc(bc_id, s_face)["ast"], idx_mgr, ctx))
-                    mask = f"m[{offsets['surfaces'][s_face]} + {idx_cpp}]"
+                    bc_ast = visitor.lower(visitor.semantic_ctx.get_neumann_bc(bc_id, s_face)["ast"], idx_mgr, ctx)
+                    mask_ir = ArrayAccess("m", BinaryOp("+", Literal(offsets['surfaces'][s_face]), idx_expr))
                     
                     if "volumes" in offsets:
-                        bc_terms.append(f"(({bc_val}) * {mask} / std::max(1e-30, m[{offsets['volumes']} + {idx_cpp}]))")
+                        vol_ir = FuncCall("std::max", [Literal("1e-30"), ArrayAccess("m", BinaryOp("+", Literal(offsets['volumes']), idx_expr))])
+                        term_ir = BinaryOp("/", BinaryOp("*", bc_ast, mask_ir), vol_ir)
                     else:
-                        bc_terms.append(f"({bc_val}) * {mask}")
+                        term_ir = BinaryOp("*", bc_ast, mask_ir)
                         
-        if bc_terms: 
-            return RawCpp(f"({emitter.emit(bulk_div)} + {' + '.join(bc_terms)})")
-            
-        return bulk_div
+                    res_ir = BinaryOp("+", res_ir, term_ir)
+                    
+        return res_ir
 
     def gradient(self, visitor, child: Dict[str, Any], idx_mgr, ctx, face: Optional[str]) -> Expr:
         return Literal(0.0)

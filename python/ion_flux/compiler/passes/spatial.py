@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional, List, Tuple
-from .ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus
+from .ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus, Reduction
 from .semantic import SemanticContext
 from .context import SpatialContext
 from ion_flux.compiler.topology.dialects import get_dialect
@@ -45,25 +45,18 @@ class IndexManager:
             clamped = FuncCall("CLAMP", [local_idx, Literal(res)])
             
             stride = strides[axis]
-            if stride > 1: 
-                terms.append(BinaryOp("*", clamped, Literal(stride)))
-            else: 
-                terms.append(clamped)
+            if stride > 1: terms.append(BinaryOp("*", clamped, Literal(stride)))
+            else: terms.append(clamped)
             
-        if not terms: 
-            return Literal(0)
-            
+        if not terms: return Literal(0)
         flat = terms[0]
-        for t in terms[1:]: 
-            flat = BinaryOp("+", flat, t)
-            
+        for t in terms[1:]: flat = BinaryOp("+", flat, t)
         return flat
         
     def clone(self) -> 'IndexManager':
         new_mgr = IndexManager(self.topo)
         new_mgr.active_indices = self.active_indices.copy()
         return new_mgr
-
 
 class SpatialLoweringVisitor:
     """
@@ -72,7 +65,7 @@ class SpatialLoweringVisitor:
     """
     
     _BIN_SYM = {
-        "add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "pow",
+        "add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "std::pow",
         "gt": ">", "lt": "<", "ge": ">=", "le": "<=", "eq": "==", "ne": "!="
     }
     
@@ -90,10 +83,8 @@ class SpatialLoweringVisitor:
 
     def lower(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext, face: Optional[str] = None) -> Expr:
         bc_info = self.semantic_ctx.get_neumann_bc(node.get("_bc_id"), face)
-        
         if bc_info:
             bc_ir = self.lower(bc_info["ast"], idx_mgr, ctx, face=None)
-            
             axis = ctx.axis
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
             start = self.topo.domains.get(axis, {}).get("start_idx", 0)
@@ -108,22 +99,13 @@ class SpatialLoweringVisitor:
 
     def _dispatch(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext, face: Optional[str]) -> Expr:
         t = node.get("type")
-        
-        if t == "Scalar": 
-            return Literal(node["value"])
-        if t == "Parameter": 
-            return ArrayAccess("p", Literal(self.layout.get_param_offset(node['name'])))
-        if t == "State": 
-            return self._lower_state(node, idx_mgr, ctx, face)
-        if t == "Boundary": 
-            return self._lower_boundary(node, idx_mgr, ctx)
-        if t == "BinaryOp": 
-            return self._lower_binary_op(node, idx_mgr, ctx, face)
-        if t == "UnaryOp": 
-            return self._lower_unary_op(node, idx_mgr, ctx, face)
-        if t == "dirichlet_bnd": 
-            return self.lower(node["node"], idx_mgr, ctx) 
-            
+        if t == "Scalar": return Literal(node["value"])
+        if t == "Parameter": return ArrayAccess("p", Literal(self.layout.get_param_offset(node['name'])))
+        if t == "State": return self._lower_state(node, idx_mgr, ctx, face)
+        if t == "Boundary": return self._lower_boundary(node, idx_mgr, ctx)
+        if t == "BinaryOp": return self._lower_binary_op(node, idx_mgr, ctx, face)
+        if t == "UnaryOp": return self._lower_unary_op(node, idx_mgr, ctx, face)
+        if t == "dirichlet_bnd": return self.lower(node["node"], idx_mgr, ctx) 
         raise ValueError(f"Unknown IR Node: {t}")
 
     def _array_access(self, arr: str, index: Expr) -> Expr:
@@ -182,7 +164,6 @@ class SpatialLoweringVisitor:
                 b_axis = self.topo.get_base_axis(self.topo.get_axes(d_name)[-1])
                 start = self.topo.domains.get(b_axis, {}).get("start_idx", 0)
                 res = self.topo.domains.get(b_axis, {}).get("resolution", 1)
-                
                 b_idx = start if node["side"] == "left" else start + res - 1
                 idx_bnd.register(b_axis, Literal(b_idx))
                 
@@ -193,25 +174,17 @@ class SpatialLoweringVisitor:
         r = self.lower(node["right"], idx_mgr, ctx, face)
         op = node["op"]
         
-        if op in ("max", "min"): 
-            return FuncCall(f"std::{op}", [l, r])
-            
+        if op in ("max", "min"): return FuncCall(f"std::{op}", [l, r])
         bop = BinaryOp(self._BIN_SYM[op], l, r) if op != "pow" else FuncCall("std::pow", [l, r])
-        
-        if op in ("gt", "lt", "ge", "le", "eq", "ne"): 
-            return Ternary(bop, Literal(1.0), Literal(0.0))
+        if op in ("gt", "lt", "ge", "le", "eq", "ne"): return Ternary(bop, Literal(1.0), Literal(0.0))
             
         return bop
 
     def _lower_unary_op(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext, face: Optional[str]) -> Expr:
         op, child = node["op"], node["child"]
-        
-        if op == "dt": 
-            return self.lower(child, idx_mgr, ctx.with_updates(use_ydot=True), face)
-        if op == "integral": 
-            return self._lower_integral(node, child, idx_mgr, ctx)
-        if op == "coords": 
-            return self._lower_coords(node, idx_mgr, ctx)
+        if op == "dt": return self.lower(child, idx_mgr, ctx.with_updates(use_ydot=True), face)
+        if op == "integral": return self._lower_integral(node, child, idx_mgr, ctx)
+        if op == "coords": return self._lower_coords(node, idx_mgr, ctx)
         
         child_ctx = ctx
         if op in ("grad", "div"): 
@@ -225,8 +198,7 @@ class SpatialLoweringVisitor:
             return dialect.divergence(self, child, idx_mgr, child_ctx)
             
         c_ir = self.lower(child, idx_mgr, child_ctx, face)
-        if op == "neg": 
-            return UnaryMinus(c_ir)
+        if op == "neg": return UnaryMinus(c_ir)
             
         return FuncCall(self._UNARY_SYM[op], [c_ir])
 
@@ -254,11 +226,17 @@ class SpatialLoweringVisitor:
         idx_new = idx_mgr.clone()
         int_id = id(node)
         geom_code = ""
+        loop_vars = []
+        loop_ends = []
         
         for axis in axes:
             b_axis = self.topo.get_base_axis(axis)
             start = self.topo.domains.get(axis, {}).get("start_idx", 0)
+            res = self.topo.domains.get(axis, {}).get("resolution", 1)
             int_var = f"i_{int_id}_{axis}"
+            
+            loop_vars.append(int_var)
+            loop_ends.append(Literal(res))
             idx_new.register(b_axis, BinaryOp("+", Var(int_var), Literal(start)))
             
             dialect = get_dialect(self.topo, self.layout, axis)
@@ -279,11 +257,10 @@ class SpatialLoweringVisitor:
         cpp_code += "        double vol = 1.0;\n" + geom_code
         cpp_code += f"        sum += {child_cpp} * vol;\n"
         
-        for _ in axes: 
-            cpp_code += "    }\n"
-            
+        for _ in axes: cpp_code += "    }\n"
         cpp_code += "    return sum;\n}()"
-        return RawCpp(cpp_code)
+        
+        return Reduction(loop_vars, loop_ends, child_expr, cpp_code)
 
     def _harmonic_mean(self, a: Expr, b: Expr) -> Expr:
         """

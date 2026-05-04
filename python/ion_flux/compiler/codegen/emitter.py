@@ -1,6 +1,6 @@
 from ion_flux.compiler.passes.ir import (
     IRNode, Literal, Var, ArrayAccess, BinaryOp, UnaryMinus, 
-    FuncCall, Ternary, Assign, Loop, RawCpp
+    FuncCall, Ternary, Assign, Loop, RawCpp, UnstructuredRead, Reduction
 )
 
 class CppEmitter:
@@ -29,6 +29,20 @@ class CppEmitter:
             body_str = '\n    '.join(self.emit(b) for b in node.body)
             pragma_str = f"{node.pragma}\n" if node.pragma else ""
             return f"{pragma_str}for (int {node.var} = {self.emit(node.start)}; {node.var} < {self.emit(node.end)}; ++{node.var}) {{\n    {body_str}\n}}"
+        if isinstance(node, UnstructuredRead):
+            rp = self.emit(node.rp_offset)
+            ci = self.emit(node.ci_offset)
+            w = self.emit(node.w_offset)
+            s_off = self.emit(node.state_offset)
+            idx = self.emit(node.idx_expr)
+            return (
+                f"[&]() {{\n    double sum = 0.0;\n"
+                f"    for(int k = (int)m[{rp} + {idx}]; k < (int)m[{rp} + {idx} + 1]; ++k) {{\n"
+                f"        sum += m[{w} + k] * (y[{s_off} + (int)m[{ci} + k]] - y[{s_off} + {idx}]);\n"
+                f"    }}\n    return sum;\n}}()"
+            )
+        if isinstance(node, Reduction):
+            return node.cpp_code
         if isinstance(node, RawCpp): 
             return node.code
             
