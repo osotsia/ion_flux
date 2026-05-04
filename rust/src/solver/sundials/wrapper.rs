@@ -1,11 +1,13 @@
-// --- File: rust/src/solver/sundials.rs ---
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
 use pyo3::prelude::*;
-use numpy::{PyArray1, ToPyArray};
+use numpy::{PyArray1, PyArray2, ToPyArray};
 use std::os::raw::{c_char, c_double, c_int, c_long, c_void};
-use super::{NativeResFn, NativeJvpFn, NativeVjpFn, NativeObsFn};
+use std::io::Write;
+use crate::solver::shared::callbacks::{NativeResFn, NativeJvpFn, NativeVjpFn, NativeObsFn};
+use crate::solver::shared::problem::CprData;
+use crate::solver::_4_linear::jacobian::assemble_triplets;
 
 pub type SunRealType = c_double;
 pub type SunIndexType = c_long; 
@@ -64,11 +66,12 @@ pub struct SundialsUserData {
     pub obs_fn: Option<NativeObsFn>,
     pub p: Vec<f64>,
     pub m: Vec<f64>,
-    pub cpr: crate::solver::CprData,
+    pub cpr: CprData,
     pub triplets: Vec<(usize, usize, f64)>,
     pub is_banded: bool,
     pub sun_bw: isize,
     pub n: usize,
+    pub id: Vec<f64>,
 }
 
 unsafe extern "C" fn ida_res_callback(_t: c_double, y: N_Vector, yp: N_Vector, res: N_Vector, user_data: *mut c_void) -> c_int {
@@ -81,13 +84,14 @@ unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, 
     let ud = &mut *(user_data as *mut SundialsUserData);
     let n = ud.n;
 
-    crate::solver::newton::assemble_jacobian_triplets(
+    assemble_triplets(
         n, std::slice::from_raw_parts(N_VGetArrayPointer(y), n),
         std::slice::from_raw_parts(N_VGetArrayPointer(yp), n),
         &ud.p, &ud.m, c_j,
         ud.jvp_fn, ud.vjp_fn,
         &mut ud.triplets,
-        &ud.cpr
+        &ud.cpr,
+        &ud.id
     );
 
     if ud.is_banded {
@@ -95,9 +99,7 @@ unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, 
         let ldim = SUNBandMatrix_LDim(jac) as usize;
         let mu = SUNBandMatrix_UpperBandwidth(jac) as isize;
 
-        for i in 0..(ldim * n) {
-            *a_data.add(i) = 0.0;
-        }
+        for i in 0..(ldim * n) { *a_data.add(i) = 0.0; }
 
         for &(r, c, val) in &ud.triplets {
             let band_idx = (r as isize - c as isize + mu) as usize + c * ldim;
@@ -105,19 +107,12 @@ unsafe extern "C" fn ida_jac_callback(_t: c_double, c_j: c_double, y: N_Vector, 
         }
     } else {
         let a_data = SUNDenseMatrix_Data(jac);
-        for i in 0..(n*n) {
-            *a_data.add(i) = 0.0;
-        }
-        for &(r, c, val) in &ud.triplets {
-            *a_data.add(c * n + r) = val;
-        }
+        for i in 0..(n*n) { *a_data.add(i) = 0.0; }
+        for &(r, c, val) in &ud.triplets { *a_data.add(c * n + r) = val; }
     }
     0
 }
 
-/// Safely generates a SUNContext by querying the currently loaded memory mapping.
-/// If SUNDIALS was linked with MPI, those symbols will be forcefully resolved to ensure
-/// OpenMPI receives the correct `ompi_mpi_comm_world` instance it expects.
 unsafe fn get_safe_sundials_context() -> SUNContext {
     let mut sunctx: SUNContext = std::ptr::null_mut();
     let mut comm: *mut c_void = std::ptr::null_mut();
@@ -127,7 +122,7 @@ unsafe fn get_safe_sundials_context() -> SUNContext {
         #[cfg(target_os = "macos")] let rtld_search = -2isize as *mut c_void; 
         #[cfg(not(target_os = "macos"))] let rtld_search = 0isize as *mut c_void;  
         
-        let mut get_sym = |name: &str| -> *mut c_void {
+        let get_sym = |name: &str| -> *mut c_void {
             let c_name = std::ffi::CString::new(name).unwrap();
             let mut ptr = dlsym(rtld_search, c_name.as_ptr());
             
@@ -169,7 +164,6 @@ unsafe fn get_safe_sundials_context() -> SUNContext {
             }
         }
     }
-    
     SUNContext_Create(comm, &mut sunctx);
     sunctx
 }
@@ -208,38 +202,28 @@ impl SundialsHandle {
         let vjp_fn: Option<NativeVjpFn> = unsafe { lib.get::<NativeVjpFn>(b"evaluate_vjp\0").map(|s| *s).ok() };
         let obs_fn: Option<NativeObsFn> = unsafe { lib.get::<NativeObsFn>(b"evaluate_observables\0").map(|s| *s).ok() };
         
-        let cpr = crate::solver::CprData { 
-            color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense 
-        };
-
+        let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
         let sunctx = unsafe { get_safe_sundials_context() };
         
         let y_vec = unsafe { N_VMake_Serial(n as i64, y0.as_mut_ptr(), sunctx) };
         let yp_vec = unsafe { N_VMake_Serial(n as i64, ydot0.as_mut_ptr(), sunctx) };
-        let id_vec = unsafe { N_VMake_Serial(n as i64, id.as_mut_ptr(), sunctx) };
+        let id_vec = unsafe { N_VMake_Serial(n as i64, id.as_mut_ptr(), sunctx) }; 
         
         let ida_mem = unsafe { IDACreate(sunctx) };
         
         let mut triplets = Vec::with_capacity(n * 50);
-        
-        crate::solver::newton::assemble_jacobian_triplets(
-            n, &y0, &ydot0, &p, &m, 1.0,
-            jvp_fn, vjp_fn, &mut triplets, &cpr
-        );
+        assemble_triplets(n, &y0, &ydot0, &p, &m, 1.0, jvp_fn, vjp_fn, &mut triplets, &cpr, &id);
         
         let mut actual_bw: isize = 0;
         for &(r, c, _) in &triplets {
             let dist: isize = (r as isize - c as isize).abs();
             if dist > actual_bw { actual_bw = dist; }
         }
-        
         let is_banded = actual_bw < (n as isize) / 2;
         let sun_bw = actual_bw;
         
         let user_data = Box::new(SundialsUserData { 
-            res_fn, jvp_fn, vjp_fn, obs_fn, p, m, cpr,
-            triplets,
-            is_banded, sun_bw, n
+            res_fn, jvp_fn, vjp_fn, obs_fn, p, m, cpr, triplets, is_banded, sun_bw, n, id: id.clone()
         });
         
         unsafe {
@@ -279,9 +263,7 @@ impl SundialsHandle {
         let tout = self.t + dt;
         let mut tret: f64 = 0.0;
         let res = unsafe { IDASolve(self.ida_mem, tout, &mut tret, self.y_vec, self.yp_vec, 1) };
-        if res < 0 {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDASolve failed with error code {}", res)));
-        }
+        if res < 0 { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDASolve failed with error code {}", res))); }
         self.t = tret;
         self.sync_from_sundials();
         Ok(())
@@ -308,16 +290,12 @@ impl SundialsHandle {
             unsafe { (self.user_data.res_fn)(self._y_data.as_ptr(), self._yp_data.as_ptr(), self.user_data.p.as_ptr(), self.user_data.m.as_ptr(), res.as_mut_ptr()); }
 
             let mut max_res = 0.0_f64;
-            for i in 0..self.n {
-                if self._id_data[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); }
-            }
+            for i in 0..self.n { if self._id_data[i] < 0.5 && res[i].abs() > max_res { max_res = res[i].abs(); } }
             if max_res < 1e-8 { break; }
 
-            crate::solver::newton::assemble_jacobian_triplets(
+            assemble_triplets(
                 self.n, &self._y_data, &self._yp_data, &self.user_data.p, &self.user_data.m, 0.0,
-                self.user_data.jvp_fn, self.user_data.vjp_fn,
-                &mut self.user_data.triplets,
-                &self.user_data.cpr
+                self.user_data.jvp_fn, self.user_data.vjp_fn, &mut self.user_data.triplets, &self.user_data.cpr, &self._id_data 
             );
 
             for &(r, c, val) in &self.user_data.triplets {
@@ -339,18 +317,14 @@ impl SundialsHandle {
         let ic_res = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-6) }; 
         if ic_res < 0 { 
             let ic_res2 = unsafe { IDACalcIC(self.ida_mem, 1, self.t + 1e-8) };
-            if ic_res2 < 0 {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed."))); 
-            }
+            if ic_res2 < 0 { return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("SUNDIALS IDACalcIC failed."))); }
         }
         
         self.sync_from_sundials();
         Ok(())
     }
 
-    pub fn reach_steady_state(&mut self) -> PyResult<()> {
-        self.step(1000.0)
-    }
+    pub fn reach_steady_state(&mut self) -> PyResult<()> { self.step(1000.0) }
 }
 
 impl SundialsHandle {
@@ -374,13 +348,57 @@ impl SundialsHandle {
 impl Drop for SundialsHandle {
     fn drop(&mut self) {
         unsafe {
-            IDAFree(&mut self.ida_mem);
-            SUNLinSolFree(self.ls);
-            SUNMatDestroy(self.a_mat);
-            N_VDestroy(self.y_vec);
-            N_VDestroy(self.yp_vec);
-            N_VDestroy(self.id_vec);
-            SUNContext_Free(&mut self.sunctx);
+            IDAFree(&mut self.ida_mem); SUNLinSolFree(self.ls); SUNMatDestroy(self.a_mat);
+            N_VDestroy(self.y_vec); N_VDestroy(self.yp_vec); N_VDestroy(self.id_vec); SUNContext_Free(&mut self.sunctx);
         }
     }
+}
+
+#[pyfunction]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, show_progress=true, v_idx=-1))]
+pub fn solve_ida_sundials<'py>(
+    py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, n_obs: usize, 
+    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+    show_progress: bool, v_idx: i32
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+
+    let mut handle = SundialsHandle::new(
+        lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list, n_obs, 
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense
+    )?;
+    
+    let mut out_traj = vec![0.0; t_eval.len() * handle.n];
+    let mut out_obs = vec![0.0; t_eval.len() * n_obs];
+    for i in 0..handle.n { out_traj[i] = handle._y_data[i]; }
+    
+    let mut step_obs = vec![0.0; n_obs];
+    handle.get_observables(&mut step_obs)?;
+    for i in 0..n_obs { out_obs[i] = step_obs[i]; }
+    
+    let total_steps = t_eval.len().saturating_sub(1);
+    
+    for step in 1..t_eval.len() {
+        let dt = t_eval[step] - t_eval[step - 1];
+        handle.step(dt)?;
+        for i in 0..handle.n { out_traj[step * handle.n + i] = handle._y_data[i]; }
+        
+        handle.get_observables(&mut step_obs)?;
+        for i in 0..n_obs { out_obs[step * n_obs + i] = step_obs[i]; }
+        
+        if show_progress && total_steps > 0 {
+            let pct = (step as f64 / total_steps as f64) * 100.0;
+            let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
+            let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle._y_data[v_idx as usize]) } else { String::new() };
+            print!("\r▶ Sundials [{}] {:.1}% | t: {:.1}s{}   ", bar, pct, t_eval[step], v_str);
+            std::io::stdout().flush().unwrap();
+        }
+    }
+    if show_progress && total_steps > 0 { println!(); }
+    
+    let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
+    let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
+    let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray(py);
+    let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray(py);
+    Ok((res_y, res_obs, empty_t, empty_y.clone(), empty_y))
 }

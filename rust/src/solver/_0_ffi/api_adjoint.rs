@@ -1,7 +1,10 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, ToPyArray};
-use super::{NativeJvpFn, NativeVjpFn, Diagnostics};
-use super::linalg::{NativeSparseLuSolver, solve_gmres};
+use crate::solver::shared::callbacks::{NativeJvpFn, NativeVjpFn};
+use crate::solver::shared::problem::CprData;
+use crate::solver::_4_linear::sparse_lu::NativeSparseLuSolver;
+use crate::solver::_4_linear::gmres::solve_gmres;
+use crate::solver::shared::diagnostics::Diagnostics;
 
 #[pyfunction]
 pub fn discrete_adjoint_native<'py>(
@@ -15,17 +18,14 @@ pub fn discrete_adjoint_native<'py>(
     let mut p_grad = vec![0.0; n_params];
 
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-    let jvp_fn: NativeJvpFn = unsafe { *lib.get::<NativeJvpFn>(b"evaluate_jvp\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-    let vjp_fn: NativeVjpFn = unsafe { *lib.get::<NativeVjpFn>(b"evaluate_vjp\0").map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
+    let jvp_fn: NativeJvpFn = unsafe { *lib.get(b"evaluate_jvp\0").unwrap() };
+    let vjp_fn: NativeVjpFn = unsafe { *lib.get(b"evaluate_vjp\0").unwrap() };
 
-    let cpr = super::CprData { 
-        color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense 
-    };
-
+    let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
     let mut lambda = vec![0.0; n];
     let mut prev_dydot_vjp = vec![0.0; n];
     let mut prev_c_j = 0.0;
-    let mut diag = Diagnostics::default();
+    let mut diag = Diagnostics::new(n);
     let mut solver = NativeSparseLuSolver::new(n, bandwidth);
     
     for step in (1..n_steps).rev() {
@@ -36,17 +36,13 @@ pub fn discrete_adjoint_native<'py>(
         let y = &y_traj[step];
         let ydot = &ydot_traj[step];
         let p_list = &p_traj[step];
-        
         let mut rhs = vec![0.0; n];
-        
         for i in 0..n { rhs[i] = -dl_dy[step][i] + prev_dydot_vjp[i] * prev_c_j; }
         
         if bandwidth == -1 {
             let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p_list.as_ptr(); let m_ptr = m_list.as_ptr();
             let jvp_t = |v: &[f64], out: &mut [f64]| {
-                let mut dp_dummy = vec![0.0; n_params];
-                let mut dy_out = vec![0.0; n];
-                let mut dydot_out = vec![0.0; n];
+                let mut dp_dummy = vec![0.0; n_params]; let mut dy_out = vec![0.0; n]; let mut dydot_out = vec![0.0; n];
                 unsafe { vjp_fn(y_ptr, ydot_ptr, p_ptr, m_ptr, v.as_ptr(), dp_dummy.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
                 for i in 0..n { out[i] = dy_out[i] + c_j * dydot_out[i]; }
             };
@@ -54,56 +50,36 @@ pub fn discrete_adjoint_native<'py>(
             solve_gmres(n, &mut rhs, jvp_t, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         } else {
             solver.triplets.clear();
-            
             if !cpr.color_seeds.is_empty() {
                 for (c_idx, seed) in cpr.color_seeds.iter().enumerate() {
                     let mut jvp_out = vec![0.0; n];
                     unsafe { jvp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), c_j, seed.as_ptr(), jvp_out.as_mut_ptr()); }
-                    let start = cpr.color_ptrs[c_idx];
-                    let end = cpr.color_ptrs[c_idx + 1];
-                    for i in start..end {
-                        let r = cpr.color_rows[i];
-                        let c = cpr.color_cols[i];
-                        // Implicit sparse transposition for FAER adjoint (J^T * lambda = C)
-                        solver.triplets.push((c, r, jvp_out[r]));
+                    for i in cpr.color_ptrs[c_idx]..cpr.color_ptrs[c_idx + 1] {
+                        solver.triplets.push((cpr.color_cols[i], cpr.color_rows[i], jvp_out[cpr.color_rows[i]]));
                     }
                 }
-                
                 if !cpr.dense_rows.is_empty() {
-                    let mut dp_out = vec![0.0; n_params];
-                    let mut dy_out = vec![0.0; n];
-                    let mut dydot_out = vec![0.0; n];
-                    let mut lambda_vjp = vec![0.0; n];
+                    let mut dp_out = vec![0.0; n_params]; let mut dy_out = vec![0.0; n]; let mut dydot_out = vec![0.0; n]; let mut lambda_vjp = vec![0.0; n];
                     for &r in &cpr.dense_rows {
                         lambda_vjp[r] = 1.0;
                         unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), lambda_vjp.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()); }
                         lambda_vjp[r] = 0.0;
                         for col in 0..n {
                             let val = dy_out[col] + c_j * dydot_out[col];
-                            if val.abs() > 1e-16 || val.is_nan() {
-                                solver.triplets.push((col, r, val));
-                            }
+                            if val.abs() > 1e-16 || val.is_nan() { solver.triplets.push((col, r, val)); }
                         }
                     }
                 }
-            } else {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err("CPR Data is empty but bandwidth != -1"));
             }
-            
             solver.factorize_from_triplets(&mut diag).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             solver.solve(&mut rhs, &mut diag).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         }
         
         lambda = rhs;
-        
-        let mut dp_out = vec![0.0; n_params];
-        let mut dy_out = vec![0.0; n];
-        let mut dydot_out = vec![0.0; n];
+        let mut dp_out = vec![0.0; n_params]; let mut dy_out = vec![0.0; n]; let mut dydot_out = vec![0.0; n];
         unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
         for p_idx in 0..n_params { p_grad[p_idx] += dp_out[p_idx]; }
-        
-        prev_dydot_vjp = dydot_out;
-        prev_c_j = c_j;
+        prev_dydot_vjp = dydot_out; prev_c_j = c_j;
     }
     Ok(numpy::ndarray::Array1::from_vec(p_grad).to_pyarray(py))
 }
