@@ -1,7 +1,7 @@
 import pytest
 import ion_flux as fx
-from ion_flux.compiler.memory import MemoryLayout
-from ion_flux.compiler.passes.verification import verify_manifold, TopologicalError
+from ion_flux.compiler._1_analysis.memory_layout import MemoryLayout
+from ion_flux.compiler._1_analysis.verification import verify_manifold, TopologicalError
 
 def test_top_down_grid_assembly():
     cell = fx.Domain(bounds=(0.0, 10.0), name="cell")

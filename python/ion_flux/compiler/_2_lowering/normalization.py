@@ -1,7 +1,7 @@
 from typing import Dict, Any, List
-from ion_flux.compiler.codegen.topology import TopologyAnalyzer
-from ion_flux.compiler.passes.semantic import SemanticContext
-from ion_flux.compiler.codegen.ast_analysis import extract_div_child
+from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
+from ion_flux.compiler._1_analysis.semantics import SemanticContext
+from ion_flux.compiler._1_analysis.ast_utils import extract_div_child
 
 class NormalizationPass:
     """

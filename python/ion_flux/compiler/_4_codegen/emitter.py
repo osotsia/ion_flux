@@ -1,4 +1,4 @@
-from ion_flux.compiler.passes.ir import (
+from ion_flux.compiler._2_lowering.ir import (
     IRNode, Literal, Var, ArrayAccess, BinaryOp, UnaryMinus, 
     FuncCall, Ternary, Assign, Loop, RawCpp, UnstructuredRead, Reduction
 )

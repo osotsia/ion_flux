@@ -1,7 +1,7 @@
 # --- File: tests/03_backend_compilation/test_graph_coloring.py ---
 import pytest
 import numpy as np
-from ion_flux.compiler.coloring import HybridGraphColorer
+from ion_flux.compiler._3_optimization.cpr_coloring import HybridGraphColorer
 
 def test_tridiagonal_coloring_efficiency():
     """

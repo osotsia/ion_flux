@@ -4,7 +4,7 @@ import shutil
 import platform
 import ion_flux as fx
 from ion_flux.runtime.engine import Engine
-from ion_flux.compiler.sparsity import SparsityAnalyzer
+from ion_flux.compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
 import math
 
 class Chen2020_DFN(fx.PDE):

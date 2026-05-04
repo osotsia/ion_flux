@@ -1,11 +1,11 @@
 from typing import List, Dict, Any, Tuple
-from ion_flux.compiler.passes.semantic import SemanticContext
-from ion_flux.compiler.passes.spatial import SpatialLoweringVisitor, IndexManager
-from ion_flux.compiler.passes.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
-from ion_flux.compiler.passes.context import SpatialContext
-from ion_flux.compiler.codegen.emitter import CppEmitter
-from .templates import generate_cpp_skeleton
-from .topology import TopologyAnalyzer
+from ion_flux.compiler._1_analysis.semantics import SemanticContext
+from ion_flux.compiler._2_lowering.spatial_visitor import SpatialLoweringVisitor, IndexManager
+from ion_flux.compiler._2_lowering.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
+from ion_flux.compiler._2_lowering.context import SpatialContext
+from ion_flux.compiler._4_codegen.emitter import CppEmitter
+from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
+from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
 
 def emit_assignment(target_state: str, eq_dict: Any, layout, topo, visitor, ctx: SpatialContext,
                     bounds_override=None, is_obs=False) -> List[Any]:

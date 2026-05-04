@@ -14,7 +14,7 @@ import platform
 import numpy as np
 import ion_flux as fx
 from ion_flux.runtime.engine import Engine
-from ion_flux.compiler.invocation import NativeCompiler
+from ion_flux.compiler._5_toolchain.clang_invoker import NativeCompiler
 
 # ==============================================================================
 # Environment Configuration

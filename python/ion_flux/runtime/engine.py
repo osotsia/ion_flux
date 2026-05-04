@@ -12,12 +12,13 @@ import numpy as np
 
 from ion_flux.dsl.core import PDE, State, Parameter, Observable
 from ion_flux.dsl.spatial import Domain, CompositeDomain
-from ion_flux.compiler.memory import MemoryLayout
-from ion_flux.compiler.codegen import generate_cpp, extract_state_name
-from ion_flux.compiler.invocation import NativeCompiler, NativeRuntime
-from ion_flux.compiler.passes.verification import verify_manifold, TopologicalError
-from ion_flux.compiler.sparsity import SparsityAnalyzer
-from ion_flux.compiler.coloring import HybridGraphColorer
+from ion_flux.compiler._1_analysis.memory_layout import MemoryLayout
+from ion_flux.compiler._4_codegen.builder import generate_cpp
+from ion_flux.compiler._5_toolchain.clang_invoker import NativeCompiler
+from ion_flux.compiler._5_toolchain.ffi_runtime import NativeRuntime
+from ion_flux.compiler._1_analysis.verification import verify_manifold, TopologicalError
+from ion_flux.compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
+from ion_flux.compiler._3_optimization.cpr_coloring import HybridGraphColorer
 from ion_flux.runtime.session import Session
 
 try:
@@ -59,9 +60,9 @@ class Engine:
         self.ast_payload: Dict[str, Any] = model.ast() if hasattr(model, "ast") else {}
         
         if self.ast_payload:
-            from ion_flux.compiler.codegen.topology import TopologyAnalyzer
-            from ion_flux.compiler.passes.semantic import SemanticContext
-            from ion_flux.compiler.passes.normalization import NormalizationPass
+            from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
+            from ion_flux.compiler._1_analysis.semantics import SemanticContext
+            from ion_flux.compiler._2_lowering.normalization import NormalizationPass
             
             topo = TopologyAnalyzer(self.ast_payload.get("domains", {}))
             semantic_ctx = SemanticContext(self.ast_payload)
@@ -96,7 +97,7 @@ class Engine:
         for k, v in kwargs.items(): setattr(self, k, v)
 
     def _compute_symbolic_bandwidth(self, states, ast_payload) -> int:
-        from ion_flux.compiler.codegen.ast_analysis import extract_state_names
+        from ion_flux.compiler._1_analysis.ast_utils import extract_state_names
         if any(getattr(s.domain, "coord_sys", "") == "unstructured" for s in states): return -1
         max_bw = 0
         def check_dependencies(target_state: str, node: Dict[str, Any]) -> int:
@@ -212,7 +213,7 @@ class Engine:
         id_arr = [0.0] * self.layout.n_states
         spatial_diag = [0.0] * self.layout.n_states
         
-        from ion_flux.compiler.codegen.topology import TopologyAnalyzer
+        from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
         topo = TopologyAnalyzer(self.ast_payload.get("domains", {}))
         
         all_states = self.model.components(State) if hasattr(self.model, "components") else [attr for attr in self.model.__dict__.values() if isinstance(attr, State)]
