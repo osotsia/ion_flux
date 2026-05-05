@@ -29,7 +29,7 @@ class ExactTSPMe(fx.PDE):
     # -------------------------------------------------------------------------
     # 1. Topology (Fig. 4 Geometry)
     # -------------------------------------------------------------------------
-    cell = fx.Domain(bounds=(0, 172.8e-6), resolution=144)
+    cell = fx.Domain(bounds=(0, 172.8e-6))
     x_n = cell.region(bounds=(0, 85.2e-6), resolution=71, name="x_n")
     x_s = cell.region(bounds=(85.2e-6, 97.2e-6), resolution=10, name="x_s")
     x_p = cell.region(bounds=(97.2e-6, 172.8e-6), resolution=63, name="x_p")

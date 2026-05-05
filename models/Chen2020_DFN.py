@@ -22,7 +22,7 @@ class Chen2020_DFN(fx.PDE):
     # 1. Topological Sub-Meshing (Table II & Table VII)
     # =========================================================================
     # L_cell = 172.8 um (Total thickness). Discretized into 72 macro nodes.
-    cell = fx.Domain(bounds=(0, 172.8e-6), resolution=72)
+    cell = fx.Domain(bounds=(0, 172.8e-6))
     
     # Regional Sub-Domains (L_n = 85.2 um, L_s = 12.0 um, L_p = 75.6 um)
     x_n = cell.region(bounds=(0, 85.2e-6), resolution=35, name="x_n")

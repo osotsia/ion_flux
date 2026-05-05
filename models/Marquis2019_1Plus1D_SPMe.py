@@ -29,7 +29,7 @@ class Marquis1Plus1D_SPMe(fx.PDE):
     z = fx.Domain(bounds=(0, 0.137), resolution=15, name="z")
     
     # Through-Cell Domain (Total Thickness: 225 um)
-    x_cell = fx.Domain(bounds=(0, 225e-6), resolution=25, name="x_cell")
+    x_cell = fx.Domain(bounds=(0, 225e-6), name="x_cell")
     x_n = x_cell.region(bounds=(0, 100e-6), resolution=10, name="x_n")
     x_s = x_cell.region(bounds=(100e-6, 125e-6), resolution=5, name="x_s")
     x_p = x_cell.region(bounds=(125e-6, 225e-6), resolution=10, name="x_p")

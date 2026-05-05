@@ -29,7 +29,9 @@ pub fn run_sequence(
         else if step.s_type == 1 { wk.p[step.p_mode] = 0.0; wk.p[step.p_v] = step.target_val; }
         else if step.s_type == 2 { wk.p[step.p_mode] = 1.0; wk.p[step.p_i] = 0.0; }
         
-        newton::calc_algebraic_roots(prob, wk).unwrap_or(());
+        // Propagate algebraic initialization failures immediately
+        newton::calc_algebraic_roots(prob, wk)?;
+        
         let mut t_elapsed = 0.0;
         
         while t_elapsed < step.t_limit {
@@ -37,7 +39,11 @@ pub fn run_sequence(
             let dt_step = 1.0_f64.min(step.t_limit - t_elapsed);
             let ckpt = wk.clone_state();
             
-            if bdf::step(prob, wk, dt_step, None).is_ok() && check_trigger(prob, wk, &step.trig, &mut step_obs) {
+            // FIX 2: Explicitly execute the step and propagate any solver crashes.
+            // Only check the protocol triggers if the step was mathematically successful.
+            bdf::step(prob, wk, dt_step, None)?;
+            
+            if check_trigger(prob, wk, &step.trig, &mut step_obs) {
                 let low = execute_bisection(prob, wk, dt_step, &step.trig, ckpt);
                 t_elapsed += low;
                 out_t.push(wk.t);
