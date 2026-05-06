@@ -64,5 +64,5 @@ if __name__ == "__main__":
     print(f"Simulation Complete. Final Voltage: {res['V_cell'].data[-1]:.3f} V")
     print(f"Final Particle Radius: {res['R_particle'].data[-1]*1e6:.3f} um")
 
-    print("Launching Dashboard.")
-    res.plot_dashboard()
+    # print("Launching Dashboard.")
+    # res.plot_dashboard()

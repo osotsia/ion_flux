@@ -85,4 +85,4 @@ if __name__ == "__main__":
         "soc",
         ["T_cell", "T_jig"]
     ]
-    res.plot_dashboard(variables=variables_to_plot)
+    # res.plot_dashboard(variables=variables_to_plot)

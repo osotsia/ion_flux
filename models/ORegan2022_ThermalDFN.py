@@ -11,6 +11,7 @@ It leverages Async Task Parallelism to execute multiple state-machine protocols
 concurrently, and extracts internal spatial fields to diagnose rate-limiting transport phenomena.
 
 TODO: change the current uniform mesh to exponential
+TODO: this model doesn't run yet, still in progress
 """
 
 import math

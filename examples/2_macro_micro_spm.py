@@ -101,5 +101,5 @@ if __name__ == "__main__":
     res = engine.solve(protocol=protocol)
     print(f"Simulation Complete. Final Voltage: {res['V_cell'].data[-1]:.3f} V")
 
-    print("Launching Dashboard.")
-    res.plot_dashboard()
+    # print("Launching Dashboard.")
+    # res.plot_dashboard()

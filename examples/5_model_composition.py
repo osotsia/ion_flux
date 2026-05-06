@@ -77,4 +77,4 @@ if __name__ == "__main__":
     ])
 
     res = engine.solve(protocol=protocol)
-    res.plot_dashboard(variables=["V_cell"])
+    # res.plot_dashboard(variables=["V_cell"])
