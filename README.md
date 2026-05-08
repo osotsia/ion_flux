@@ -50,6 +50,9 @@ python examples/6_demo.py
 
 # Run a full DFN model
 python models/Chen2020_DFN.py
+
+# Optimize the same model
+python models/Gitt_inversion_demo.py
 ```
 
 ---

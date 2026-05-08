@@ -34,7 +34,6 @@ def run_gitt_inversion_demo():
     engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial", solver_backend="native")
     
     # Define a standard GITT protocol: 10 min 1C discharge, followed by 1 hour rest.
-    # We use t_eval to ensure identical array shapes for the RMSE loss function.
     t_pulse = 600
     t_rest = 3600
     protocol = Sequence([
