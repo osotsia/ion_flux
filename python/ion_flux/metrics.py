@@ -98,15 +98,16 @@ class Loss:
                     self.grads[p_name] = float(np.random.uniform(-0.1, 0.1))
             return self.grads
             
-        t_eval = self._trajectory["_micro_t"]
-        y_traj = self._trajectory["_micro_y"]
-        ydot_traj = self._trajectory["_micro_ydot"]
-        
-        p_list_default = self._engine._pack_parameters(self._parameters)
-        p_traj = self._trajectory.get("_p_traj", [p_list_default] * len(y_traj))
-        
         macro_t = self._trajectory["Time [s]"]
         dl_dy_macro = self._dl_dy_mapped if self._dl_dy_mapped is not None else np.zeros_like(self._trajectory["_y_raw"])
+        
+        # Enforce C-Contiguous arrays to enable zero-copy PyReadonlyArray mappings across the Rust FFI
+        y_traj = np.ascontiguousarray(self._trajectory["_micro_y"], dtype=np.float64)
+        ydot_traj = np.ascontiguousarray(self._trajectory["_micro_ydot"], dtype=np.float64)
+        t_eval = np.ascontiguousarray(self._trajectory["_micro_t"], dtype=np.float64)
+        
+        p_list_default = self._engine._pack_parameters(self._parameters)
+        p_traj = np.ascontiguousarray(self._trajectory.get("_p_traj", [p_list_default] * len(y_traj)), dtype=np.float64)
         
         dl_dy = np.zeros_like(y_traj)
         macro_idx = 0
@@ -114,22 +115,27 @@ class Loss:
             if macro_idx < len(macro_t) and abs(t - macro_t[macro_idx]) < 1e-8:
                 dl_dy[i] = dl_dy_macro[macro_idx]
                 macro_idx += 1
+                
+        dl_dy = np.ascontiguousarray(dl_dy, dtype=np.float64)
+        m_list = np.ascontiguousarray(m_list, dtype=np.float64)
         
-        y0, ydot0, id_arr, spatial_diag, _ = self._engine._extract_metadata()
+        # Extract topology metadata BEFORE casting it to a contiguous array
+        y0, ydot0, id_arr_raw, spatial_diag, _ = self._engine._extract_metadata()
+        id_arr = np.ascontiguousarray(id_arr_raw, dtype=np.float64)
+        
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
-        
         c_seeds, c_ptrs, c_rows, c_cols, c_dense = self._engine._cpr_cache
         
         p_grad = discrete_adjoint_native(
-            self._engine.runtime.lib_path, y_traj.tolist(), ydot_traj.tolist(), 
-            t_eval.tolist(), id_arr, p_traj, m_list, dl_dy.tolist(), bw,
+            self._engine.runtime.lib_path, y_traj, ydot_traj, 
+            t_eval, id_arr, p_traj, m_list, dl_dy, bw,
             c_seeds, c_ptrs, c_rows, c_cols, c_dense
         )
         
         for p_name in req_grad:
             if p_name in self._engine.layout.param_offsets:
                 offset = self._engine.layout.param_offsets[p_name][0]
-                self.grads[p_name] = p_grad[offset]
+                self.grads[p_name] = float(p_grad[offset])
                 
         return self.grads
 

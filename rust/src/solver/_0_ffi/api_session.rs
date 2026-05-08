@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use numpy::{PyArray1, ToPyArray};
+use numpy::{PyArray1, PyArray2, ToPyArray};
 use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::solver::shared::workspace::Workspace;
 use crate::solver::_2_stepper::bdf;
@@ -41,6 +41,34 @@ impl SolverHandle {
 
     pub fn step(&mut self, dt: f64) -> PyResult<()> {
         bdf::step(&self.prob, &mut self.wk, dt, None).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    }
+
+    pub fn step_history<'py>(&mut self, py: Python<'py>, dt: f64) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let mut history = vec![];
+        bdf::step(&self.prob, &mut self.wk, dt, Some(&mut history)).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        
+        let h_len = history.len();
+        let mut micro_t = vec![0.0; h_len];
+        let mut micro_y = vec![0.0; h_len * self.prob.n];
+        let mut micro_ydot = vec![0.0; h_len * self.prob.n];
+        
+        for (i, (t, y, ydot)) in history.into_iter().enumerate() {
+            micro_t[i] = t;
+            for j in 0..self.prob.n {
+                micro_y[i * self.prob.n + j] = y[j];
+                micro_ydot[i * self.prob.n + j] = ydot[j];
+            }
+        }
+        
+        Ok((
+            numpy::ndarray::Array1::from_vec(micro_t).to_pyarray(py),
+            numpy::ndarray::Array2::from_shape_vec((h_len, self.prob.n), micro_y).unwrap().to_pyarray(py),
+            numpy::ndarray::Array2::from_shape_vec((h_len, self.prob.n), micro_ydot).unwrap().to_pyarray(py)
+        ))
+    }
+
+    pub fn get_time(&self) -> f64 { 
+        self.wk.t 
     }
 
     pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {

@@ -216,10 +216,16 @@ class Engine:
 
         if requires_grad:
             session.record_history = True
-            session.micro_t = [0.0]
-            session.micro_y = [session.handle.get_state().tolist() if session.handle else session._mock_y.tolist()]
-            session.micro_ydot = [np.zeros(self.manifest.layout.n_states).tolist()]
-            session.micro_p = [self.manifest.pack_parameters(session.parameters)]
+            
+            # Start with explicitly dimensioned arrays to prevent np.vstack shape mismatches
+            y0 = session.handle.get_state() if session.handle else session._mock_y
+            ydot0 = np.zeros(self.manifest.layout.n_states)
+            p0 = self.manifest.pack_parameters(session.parameters)
+            
+            session.micro_t = [np.array([0.0])]
+            session.micro_y = [y0[np.newaxis, :]]
+            session.micro_ydot = [ydot0[np.newaxis, :]]
+            session.micro_p = [np.array(p0)[np.newaxis, :]]
 
         for step in protocol.steps:
             target_condition = getattr(step, "until", None)
@@ -244,7 +250,7 @@ class Engine:
                     if "i_target" in self.parameters: inputs["i_target"] = 0.0
                     elif "i_app" in self.parameters: inputs["i_app"] = 0.0
             
-            dt_step = 0.5 if requires_grad else 1.0 
+            dt_step = 1.0
             t_max = getattr(step, "time", float('inf'))
             t_elapsed = 0.0
             
@@ -254,13 +260,18 @@ class Engine:
                 
                 if target_condition and session.triggered(target_condition):
                     session.restore()
-                    low, high = 0.0, dt_step
-                    for _ in range(15):
-                        mid = (low + high) / 2.0
-                        session.step(mid, inputs=inputs)
-                        if session.triggered(target_condition): high = mid
-                        else: low = mid
-                        session.restore()
+                    
+                    # Prevent speculative bisection steps from recording false branches into the AD Tape
+                    with session.suspend_history():
+                        low, high = 0.0, dt_step
+                        for _ in range(15):
+                            mid = (low + high) / 2.0
+                            session.step(mid, inputs=inputs)
+                            if session.triggered(target_condition): high = mid
+                            else: low = mid
+                            session.restore()
+                    
+                    # Re-enable the AD tape implicitly through the context manager exit, and take the accepted step
                     session.step(low, inputs=inputs)
                     t_elapsed += low
                     self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
@@ -291,9 +302,13 @@ class Engine:
         trajectory = None
         if requires_grad:
             trajectory = {
-                "Time [s]": data_hist["Time [s]"], "_y_raw": np.array(raw_y_hist), 
-                "_micro_t": np.array(session.micro_t), "_micro_y": np.array(session.micro_y),
-                "_micro_ydot": np.array(session.micro_ydot), "_p_traj": session.micro_p, "requires_grad": requires_grad
+                "Time [s]": data_hist["Time [s]"], 
+                "_y_raw": np.array(raw_y_hist), 
+                "_micro_t": np.concatenate(session.micro_t), 
+                "_micro_y": np.vstack(session.micro_y),
+                "_micro_ydot": np.vstack(session.micro_ydot), 
+                "_p_traj": np.vstack(session.micro_p), 
+                "requires_grad": requires_grad
             }
         return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
 

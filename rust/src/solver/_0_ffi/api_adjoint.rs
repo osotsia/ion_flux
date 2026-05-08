@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use numpy::{PyArray1, ToPyArray};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 use crate::solver::shared::callbacks::{NativeJvpFn, NativeVjpFn};
 use crate::solver::shared::problem::CprData;
 use crate::solver::_4_linear::sparse_lu::NativeSparseLuSolver;
@@ -8,13 +8,25 @@ use crate::solver::shared::diagnostics::Diagnostics;
 
 #[pyfunction]
 pub fn discrete_adjoint_native<'py>(
-    py: Python<'py>, lib_path: String, y_traj: Vec<Vec<f64>>, ydot_traj: Vec<Vec<f64>>,
-    t_eval: Vec<f64>, id_arr: Vec<f64>, p_traj: Vec<Vec<f64>>, m_list: Vec<f64>, dl_dy: Vec<Vec<f64>>, bandwidth: isize,
+    py: Python<'py>, lib_path: String, 
+    y_traj: PyReadonlyArray2<f64>, ydot_traj: PyReadonlyArray2<f64>,
+    t_eval: PyReadonlyArray1<f64>, id_arr: PyReadonlyArray1<f64>, 
+    p_traj: PyReadonlyArray2<f64>, m_list: PyReadonlyArray1<f64>, 
+    dl_dy: PyReadonlyArray2<f64>, bandwidth: isize,
     cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let n_steps = y_traj.len();
-    let n = y_traj[0].len();
-    let n_params = p_traj[0].len();
+    
+    let y_arr = y_traj.as_array();
+    let ydot_arr = ydot_traj.as_array();
+    let t_arr = t_eval.as_array();
+    let id_slice = id_arr.as_slice().expect("id_arr must be contiguous");
+    let p_arr = p_traj.as_array();
+    let m_slice = m_list.as_slice().expect("m_list must be contiguous");
+    let dl_dy_arr = dl_dy.as_array();
+
+    let n_steps = y_arr.nrows();
+    let n = y_arr.ncols();
+    let n_params = p_arr.ncols();
     let mut p_grad = vec![0.0; n_params];
 
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
@@ -29,31 +41,33 @@ pub fn discrete_adjoint_native<'py>(
     let mut solver = NativeSparseLuSolver::new(n, bandwidth);
     
     for step in (1..n_steps).rev() {
-        let dt = t_eval[step] - t_eval[step - 1];
+        let dt = t_arr[step] - t_arr[step - 1];
         if dt <= 1e-12 { continue; }
         
         let c_j = 1.0 / dt; 
-        let y = &y_traj[step];
-        let ydot = &ydot_traj[step];
-        let p_list = &p_traj[step];
+        let y = y_arr.row(step).to_slice().expect("y_traj must be contiguous");
+        let ydot = ydot_arr.row(step).to_slice().expect("ydot_traj must be contiguous");
+        let p_list = p_arr.row(step).to_slice().expect("p_traj must be contiguous");
+        let dl_dy_step = dl_dy_arr.row(step).to_slice().expect("dl_dy must be contiguous");
+        
         let mut rhs = vec![0.0; n];
-        for i in 0..n { rhs[i] = -dl_dy[step][i] + prev_dydot_vjp[i] * prev_c_j; }
+        for i in 0..n { rhs[i] = -dl_dy_step[i] + prev_dydot_vjp[i] * prev_c_j; }
         
         if bandwidth == -1 {
-            let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p_list.as_ptr(); let m_ptr = m_list.as_ptr();
+            let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p_list.as_ptr(); let m_ptr = m_slice.as_ptr();
             let jvp_t = |v: &[f64], out: &mut [f64]| {
                 let mut dp_dummy = vec![0.0; n_params]; let mut dy_out = vec![0.0; n]; let mut dydot_out = vec![0.0; n];
                 unsafe { vjp_fn(y_ptr, ydot_ptr, p_ptr, m_ptr, v.as_ptr(), dp_dummy.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
                 for i in 0..n { out[i] = dy_out[i] + c_j * dydot_out[i]; }
             };
-            let precond = |v: &[f64], out: &mut[f64]| { for i in 0..n { out[i] = v[i] / (c_j * id_arr[i] + 1.0); } };
+            let precond = |v: &[f64], out: &mut[f64]| { for i in 0..n { out[i] = v[i] / (c_j * id_slice[i] + 1.0); } };
             solve_gmres(n, &mut rhs, jvp_t, precond).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         } else {
             solver.triplets.clear();
             if !cpr.color_seeds.is_empty() {
                 for (c_idx, seed) in cpr.color_seeds.iter().enumerate() {
                     let mut jvp_out = vec![0.0; n];
-                    unsafe { jvp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), c_j, seed.as_ptr(), jvp_out.as_mut_ptr()); }
+                    unsafe { jvp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_slice.as_ptr(), c_j, seed.as_ptr(), jvp_out.as_mut_ptr()); }
                     for i in cpr.color_ptrs[c_idx]..cpr.color_ptrs[c_idx + 1] {
                         solver.triplets.push((cpr.color_cols[i], cpr.color_rows[i], jvp_out[cpr.color_rows[i]]));
                     }
@@ -62,7 +76,7 @@ pub fn discrete_adjoint_native<'py>(
                     let mut dp_out = vec![0.0; n_params]; let mut dy_out = vec![0.0; n]; let mut dydot_out = vec![0.0; n]; let mut lambda_vjp = vec![0.0; n];
                     for &r in &cpr.dense_rows {
                         lambda_vjp[r] = 1.0;
-                        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), lambda_vjp.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()); }
+                        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_slice.as_ptr(), lambda_vjp.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()); }
                         lambda_vjp[r] = 0.0;
                         for col in 0..n {
                             let val = dy_out[col] + c_j * dydot_out[col];
@@ -77,7 +91,7 @@ pub fn discrete_adjoint_native<'py>(
         
         lambda = rhs;
         let mut dp_out = vec![0.0; n_params]; let mut dy_out = vec![0.0; n]; let mut dydot_out = vec![0.0; n];
-        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_list.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
+        unsafe { vjp_fn(y.as_ptr(), ydot.as_ptr(), p_list.as_ptr(), m_slice.as_ptr(), lambda.as_ptr(), dp_out.as_mut_ptr(), dy_out.as_mut_ptr(), dydot_out.as_mut_ptr()) };
         for p_idx in 0..n_params { p_grad[p_idx] += dp_out[p_idx]; }
         prev_dydot_vjp = dydot_out; prev_c_j = c_j;
     }

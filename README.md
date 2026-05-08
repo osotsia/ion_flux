@@ -159,7 +159,7 @@ res = engine.solve(protocol=fast_charge, requires_grad=["anode_D_s"])
 # Compute a differentiable loss metric against experimental lab data
 loss = fx.metrics.rmse(predicted=res["V_cell"], target=experimental_csv)
 
-# Reverse pass: Exact, continuous analytical gradients in O(1) memory!
+# Reverse pass: Exact, continuous analytical gradients
 grads = loss.backward()
 
 # Hand the exact gradients directly to L-BFGS-B or Adam optimizers

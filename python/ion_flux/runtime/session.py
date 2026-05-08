@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.linalg
 from typing import Dict, Any, Optional
+from contextlib import contextmanager
 
 from ion_flux.runtime.eis import solve_eis
 from ion_flux.runtime._2_initializers import evaluate_ic
@@ -56,6 +57,16 @@ class Session:
             self.handle = None
             self._mock_y = np.array(y0)
 
+    @contextmanager
+    def suspend_history(self):
+        """Safely suspends trajectory recording, guaranteeing restoration via try/finally block."""
+        was_recording = getattr(self, "record_history", False)
+        self.record_history = False
+        try:
+            yield
+        finally:
+            self.record_history = was_recording
+
     def set_parameter(self, param_name: str, value: float) -> None:
         self.parameters[param_name] = value 
         if self.handle:
@@ -102,11 +113,14 @@ class Session:
                         raise format_native_crash(e, self.manifest) from None
                         
                     if len(mt) > 0:
-                        self.micro_t.extend(mt.tolist())
-                        self.micro_y.extend(my.tolist())
-                        self.micro_ydot.extend(mydot.tolist())
-                        p_list = self.manifest.pack_parameters(self.parameters)
-                        self.micro_p.extend([p_list] * len(mt))
+                        # Append raw NumPy arrays directly, avoiding tolist() serialization overhead
+                        self.micro_t.append(mt)
+                        self.micro_y.append(my)
+                        self.micro_ydot.append(mydot)
+                        
+                        # Tile the exact parameters associated with this time-step
+                        p_arr = np.tile(self.manifest.pack_parameters(self.parameters), (len(mt), 1))
+                        self.micro_p.append(p_arr)
                 else:
                     try:
                         self.handle.step(dt) 
@@ -117,8 +131,14 @@ class Session:
                     self.handle.step(dt)
                 except RuntimeError as e:
                     raise format_native_crash(e, self.manifest) from None
-                    
-        self.time += dt
+            
+            if hasattr(self.handle, "get_time"):
+                self.time = self.handle.get_time()
+            else:
+                self.time += dt
+        else:
+            self.time += dt
+            
         self._history["Time [s]"].append(self.time)
 
     def checkpoint(self) -> None:
