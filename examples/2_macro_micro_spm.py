@@ -88,6 +88,8 @@ class MacroMicroSPM(fx.PDE):
         }
 
 if __name__ == "__main__":
+    import numpy as np
+    import matplotlib.pyplot as plt
 
     model=MacroMicroSPM()
     engine = fx.Engine(model, target="cpu:serial", solver_backend="native")
@@ -101,5 +103,23 @@ if __name__ == "__main__":
     res = engine.solve(protocol=protocol)
     print(f"Simulation Complete. Final Voltage: {res['V_cell'].data[-1]:.3f} V")
 
-    # print("Launching Dashboard.")
-    # res.plot_dashboard()
+
+    t_hours = res["Time [s]"].data / 3600.0
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("1D-1D Macro-Micro SPM (30A Discharge)", fontsize=14, fontweight="bold")
+    
+    ax1.plot(t_hours, res["V_cell"].data, linewidth=2)
+    ax1.set(xlabel="Time [h]", ylabel="Voltage [V]", title="Terminal Voltage")
+    ax1.grid(True, linestyle="--", alpha=0.6)
+    
+    # Extract the final spatial solid potentials across the macro axes
+    x_n = np.linspace(0, 40, 10)
+    x_p = np.linspace(60, 100, 10)
+    ax2.plot(x_n, res["phi_s_n"].data[-1], marker='o', label="Anode $\\Phi_s$", color="tab:blue")
+    ax2.plot(x_p, res["phi_s_p"].data[-1], marker='s', label="Cathode $\\Phi_s$", color="tab:orange")
+    ax2.set(xlabel="Position [µm]", ylabel="Solid Potential [V]", title="Final Solid Potentials")
+    ax2.grid(True, linestyle="--", alpha=0.6)
+    ax2.legend(loc="center right")
+    
+    plt.tight_layout()
+    plt.show()

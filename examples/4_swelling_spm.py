@@ -50,7 +50,8 @@ class SwellingSPM(fx.PDE):
         }
 
 if __name__ == "__main__":
-    
+    import matplotlib.pyplot as plt
+
     model=SwellingSPM()
     engine = fx.Engine(model, target="cpu:serial")
     
@@ -64,5 +65,18 @@ if __name__ == "__main__":
     print(f"Simulation Complete. Final Voltage: {res['V_cell'].data[-1]:.3f} V")
     print(f"Final Particle Radius: {res['R_particle'].data[-1]*1e6:.3f} um")
 
-    # print("Launching Dashboard.")
-    # res.plot_dashboard()
+    t_hours = res["Time [s]"].data / 3600.0
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("SPM with Particle Swelling (Moving Boundary Kinematics)", fontsize=14, fontweight="bold")
+    
+    ax1.plot(t_hours, res["V_cell"].data, linewidth=2, color="tab:purple")
+    ax1.set(xlabel="Time [h]", ylabel="Voltage [V]", title="Discharge Voltage")
+    ax1.grid(True, linestyle="--", alpha=0.6)
+    
+    r_um = res["R_particle"].data * 1e6
+    ax2.plot(t_hours, r_um, linewidth=2, color="tab:red")
+    ax2.set(xlabel="Time [h]", ylabel="Particle Radius [µm]", title="Cathode Particle Physical Swelling")
+    ax2.grid(True, linestyle="--", alpha=0.6)
+    
+    plt.tight_layout()
+    plt.show()

@@ -69,6 +69,8 @@ class ThermoCoupledECM(fx.PDE):
         }
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
     model = ThermoCoupledECM()
     engine = fx.Engine(model=model, target="cpu:serial", solver_backend="native")
     
@@ -77,12 +79,31 @@ if __name__ == "__main__":
         CC(rate=100.0, until=model.V_cell <= 3.2, time=3600)
     ])
     
+    print("Executing Thermo-Coupled ECM protocol...")
     res = engine.solve(protocol=protocol)
     
-    variables_to_plot = [
-        "i_app",
-        ["V_cell"], 
-        "soc",
-        ["T_cell", "T_jig"]
-    ]
-    # res.plot_dashboard(variables=variables_to_plot)
+    
+    t_hours = res["Time [s]"].data / 3600.0
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle("Thermo-Coupled Equivalent Circuit Model (100A Discharge)", fontsize=14, fontweight="bold")
+    
+    axs[0, 0].plot(t_hours, res["V_cell"].data, linewidth=2)
+    axs[0, 0].set(ylabel="Voltage [V]", title="Terminal Voltage")
+    
+    axs[0, 1].plot(t_hours, res["i_app"].data, color="tab:orange", linewidth=2)
+    axs[0, 1].set(ylabel="Current [A]", title="Applied Current")
+    
+    axs[1, 0].plot(t_hours, res["soc"].data, color="tab:green", linewidth=2)
+    axs[1, 0].set(xlabel="Time [h]", ylabel="State of Charge", title="Cell SOC")
+    
+    axs[1, 1].plot(t_hours, res["T_cell"].data, label="Cell Core", linewidth=2)
+    axs[1, 1].plot(t_hours, res["T_jig"].data, label="Jig/Casing", linestyle="--", linewidth=2)
+    axs[1, 1].set(xlabel="Time [h]", ylabel="Temperature [°C]", title="Thermal Dynamics")
+    
+    for ax in axs.flat:
+        ax.grid(True, linestyle="--", alpha=0.6)
+        if ax.get_legend_handles_labels()[1]:
+            ax.legend(loc="best")
+            
+    plt.tight_layout()
+    plt.show()

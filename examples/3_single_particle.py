@@ -56,6 +56,8 @@ class SingleParticleModel(fx.PDE):
         }
 
 if __name__ == "__main__":
+    import numpy as np
+    import matplotlib.pyplot as plt
 
     model=SingleParticleModel()
     engine = fx.Engine(model, target="cpu:serial")
@@ -69,5 +71,24 @@ if __name__ == "__main__":
     res = engine.solve(protocol=protocol)
     print(f"Simulation Complete. Final Voltage: {res['V_cell'].data[-1]:.3f} V")
 
-    # print("Launching Dashboard.")
-    # res.plot_dashboard()
+    t_hours = res["Time [s]"].data / 3600.0
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Lumped Single Particle Model (10A Discharge)", fontsize=14, fontweight="bold")
+    
+    ax1.plot(t_hours, res["V_cell"].data, linewidth=2, color="tab:blue")
+    ax1.set(xlabel="Time [h]", ylabel="Voltage [V]", title="Terminal Voltage")
+    ax1.grid(True, linestyle="--", alpha=0.6)
+    
+    # Extract the internal solid concentrations at the end of the discharge step
+    discharge_end_idx = np.searchsorted(t_hours, 1.0) - 1 # Roughly 1 hour mark
+    r_n = np.linspace(0, 10, 15)
+    r_p = np.linspace(0, 10, 15)
+    
+    ax2.plot(r_n, res["c_s_n"].data[discharge_end_idx], label="Anode $c_s$", color="tab:orange", linewidth=2)
+    ax2.plot(r_p, res["c_s_p"].data[discharge_end_idx], label="Cathode $c_s$", color="tab:green", linewidth=2)
+    ax2.set(xlabel="Radius [µm] (0 = Core)", ylabel="Concentration [mol/m³]", title="End of Discharge Concentrations")
+    ax2.grid(True, linestyle="--", alpha=0.6)
+    ax2.legend(loc="best")
+    
+    plt.tight_layout()
+    plt.show()

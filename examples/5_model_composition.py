@@ -67,6 +67,8 @@ class ModularSPM(fx.PDE):
         )
     
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
     # Standard compilation and execution payload
     model=ModularSPM()
     engine = fx.Engine(model, target="cpu:serial")
@@ -76,5 +78,15 @@ if __name__ == "__main__":
         Rest(time=600)
     ])
 
+    print("Executing Modular Composition SPM...")
     res = engine.solve(protocol=protocol)
-    # res.plot_dashboard(variables=["V_cell"])
+    
+    t_hours = res["Time [s]"].data / 3600.0
+    plt.figure(figsize=(8, 5))
+    plt.plot(t_hours, res["V_cell"].data, linewidth=2, color="tab:brown")
+    plt.title("Modular SPM Composition (1A Discharge)", fontsize=14, fontweight="bold")
+    plt.xlabel("Time [h]", fontsize=12)
+    plt.ylabel("Voltage [V]", fontsize=12)
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.tight_layout()
+    plt.show()
