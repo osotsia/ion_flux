@@ -95,6 +95,20 @@ class Engine:
         return TelemetryReport(self.manifest.layout.n_states, self.manifest.jacobian_bandwidth)
 
     def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None) -> Session:
+        """
+        Instantiates a persistent native solver session.
+
+        Enables Hardware-in-the-Loop (HIL) and Real-Time control logic. BDF history 
+        vectors, Nordsieck arrays, and sparse LU factorizations remain "hot" in hardware memory, 
+        avoiding allocation overhead during continuous micro-stepping.
+
+        Args:
+            parameters (Dict[str, float], optional): Base parameter initialization for the session.
+            soc (float, optional): Initial State of Charge.
+
+        Returns:
+            Session: A stateful object holding the active FFI integration pointer.
+        """
         return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug)
 
     # --- Primary Dispatch Hooks ---
@@ -111,6 +125,28 @@ class Engine:
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
                 t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
+        """
+        Executes a single continuous simulation trajectory.
+
+        The primary execution boundary bridging Python to the Native Solver. Maps user 
+        parameters directly into C-ABI flat arrays, dynamically evaluates Initial Conditions, 
+        and drives the implicit BDF integration without Python GIL interference.
+
+        Args:
+            t_span (tuple): A tuple of (start_time, end_time) in seconds.
+            protocol (Any, optional): Defines dynamic algebraic boundary constraints (e.g., Constant 
+                Current, Constant Voltage sequences). Overrides `t_span` if provided.
+            parameters (Dict[str, float], optional): Dictionary of parameter overrides.
+            t_eval (np.ndarray, optional): Specific time points to record the solution.
+            requires_grad (List[str], optional): Declares parameters for sensitivity analysis. 
+                Instructs the native solver to record the forward integration trajectory, enabling 
+                continuous reverse-mode Automatic Differentiation (AD).
+            threads (int): Number of OpenMP threads to allocate natively if using a data-parallel target.
+            show_progress (bool): Whether to display a terminal progress bar.
+
+        Returns:
+            SimulationResult: A data object containing the multidimensional trajectory arrays.
+        """
         if threads > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = str(threads)
             if getattr(self.manifest, "runtime", None): 
@@ -158,6 +194,24 @@ class Engine:
         return SimulationResult(data, current_params, status="completed", engine=self, trajectory=trajectory)
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), protocols: Any = None, max_workers: int = 1, show_progress: bool = False) -> List[SimulationResult]:
+        """
+        Executes an array of independent models across multiple vCPUs concurrently.
+
+        Resolves Python's multi-processing bottlenecks. Pushes the entire task matrix 
+        down into the compiled Rust Rayon thread-pool, achieving near-linear scaling.
+
+        Args:
+            parameters (List[Dict[str, float]]): List of parameter dictionary permutations to solve.
+            t_span (tuple): A tuple of (start_time, end_time) in seconds.
+            protocols (Any, optional): Can be a single `Sequence` (which is automatically broadcast 
+                to every parameter payload in the batch) or a `List[Sequence]` mapping exactly 1:1 
+                with the `parameters` list to run unique, isolated protocols per model.
+            max_workers (int): Size of the Native thread-pool. Completely bypasses the Python GIL.
+            show_progress (bool): Whether to display a terminal progress bar.
+
+        Returns:
+            List[SimulationResult]: A list of result objects corresponding to the input parameters.
+        """
         from ion_flux.protocols.profiles import Sequence
         if protocols:
             if isinstance(protocols, Sequence): protocols = [protocols] * len(parameters)
@@ -201,13 +255,36 @@ class Engine:
         return results
 
     async def solve_async(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, t_eval: Optional[np.ndarray] = None, scheduler: Any = None) -> SimulationResult:
+        """
+        Asynchronous wrapper for `solve`.
+
+        Prevents blocking the event loop in high-throughput environments (e.g., FastAPI, 
+        WebSockets) while waiting for the native executable. 
+
+        Args:
+            t_span (tuple): A tuple of (start_time, end_time) in seconds.
+            protocol (Any, optional): Defines dynamic algebraic boundary constraints.
+            parameters (Dict[str, float], optional): Dictionary of parameter overrides.
+            t_eval (np.ndarray, optional): Specific time points to record the solution.
+            scheduler (Any, optional): A `MultiTenantScheduler` or asyncio Semaphore to limit 
+                concurrent native solver invocations and prevent host OOM conditions.
+
+        Returns:
+            SimulationResult: A data object containing the multidimensional trajectory arrays.
+        """
         if scheduler:
             async with scheduler: 
                 return await asyncio.to_thread(self.solve, t_span, protocol, parameters, t_eval)
         return await asyncio.to_thread(self.solve, t_span, protocol, parameters, t_eval)
 
+    # --- Internal Sequence Orchestration ---
+
     def _orchestrate_sequence(self, protocol, parameters, requires_grad, show_progress) -> SimulationResult:
-        """Maintains Python control flow to handle Bisection Root triggers across Sequence boundaries."""
+        """
+        Drives piece-wise protocols natively. Preserves Python control flow specifically 
+        to execute exact algebraic Bisection Root triggers across Sequence boundaries, allowing 
+        events like 'voltage == 4.2V' to be met exactly.
+        """
         session = self.start_session(parameters)
         data_hist = {"Time [s]": []}
         for k in self.manifest.layout.state_offsets.keys(): data_hist[k] = []
@@ -215,40 +292,12 @@ class Engine:
         raw_y_hist, raw_p_hist = [], []
 
         if requires_grad:
-            session.record_history = True
-            
-            # Start with explicitly dimensioned arrays to prevent np.vstack shape mismatches
-            y0 = session.handle.get_state() if session.handle else session._mock_y
-            ydot0 = np.zeros(self.manifest.layout.n_states)
-            p0 = self.manifest.pack_parameters(session.parameters)
-            
-            session.micro_t = [np.array([0.0])]
-            session.micro_y = [y0[np.newaxis, :]]
-            session.micro_ydot = [ydot0[np.newaxis, :]]
-            session.micro_p = [np.array(p0)[np.newaxis, :]]
+            self._initialize_ad_history(session)
 
         for step in protocol.steps:
             target_condition = getattr(step, "until", None)
-            inputs = {}
             step_name = type(step).__name__
-            
-            if step_name == "CC":
-                if "_term_mode" in self.parameters: inputs["_term_mode"], inputs["_term_i_target"] = 1.0, step.rate
-                else: 
-                    if "mode" in self.parameters: inputs["mode"] = 1.0
-                    if "i_target" in self.parameters: inputs["i_target"] = step.rate
-                    elif "i_app" in self.parameters: inputs["i_app"] = step.rate
-            elif step_name == "CV":
-                if "_term_mode" in self.parameters: inputs["_term_mode"], inputs["_term_v_target"] = 0.0, step.voltage
-                else: 
-                    if "mode" in self.parameters: inputs["mode"] = 0.0
-                    if "v_target" in self.parameters: inputs["v_target"] = step.voltage
-            elif step_name == "Rest":
-                if "_term_mode" in self.parameters: inputs["_term_mode"], inputs["_term_i_target"] = 1.0, 0.0
-                else: 
-                    if "mode" in self.parameters: inputs["mode"] = 1.0
-                    if "i_target" in self.parameters: inputs["i_target"] = 0.0
-                    elif "i_app" in self.parameters: inputs["i_app"] = 0.0
+            inputs = self._map_protocol_inputs(step, step_name)
             
             dt_step = 1.0
             t_max = getattr(step, "time", float('inf'))
@@ -259,20 +308,7 @@ class Engine:
                 session.step(dt_step, inputs=inputs)
                 
                 if target_condition and session.triggered(target_condition):
-                    session.restore()
-                    
-                    # Prevent speculative bisection steps from recording false branches into the AD Tape
-                    with session.suspend_history():
-                        low, high = 0.0, dt_step
-                        for _ in range(15):
-                            mid = (low + high) / 2.0
-                            session.step(mid, inputs=inputs)
-                            if session.triggered(target_condition): high = mid
-                            else: low = mid
-                            session.restore()
-                    
-                    # Re-enable the AD tape implicitly through the context manager exit, and take the accepted step
-                    session.step(low, inputs=inputs)
+                    low = self._find_trigger_root(session, target_condition, inputs, dt_step)
                     t_elapsed += low
                     self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
                     break
@@ -281,21 +317,10 @@ class Engine:
                 self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
 
                 if show_progress:
-                    try: v_str = f" | V: {session.get('V_cell'):.3f}V"
-                    except KeyError: v_str = ""
-                    if t_max == float('inf'): sys.stdout.write(f"\r▶ {step_name:<4} ⏳ t: {session.time:.1f}s{v_str}   ")
-                    else:
-                        pct = min(t_elapsed / t_max, 1.0)
-                        filled = int(pct * 30)
-                        bar = "█" * filled + "-" * (30 - filled)
-                        sys.stdout.write(f"\r▶ {step_name:<4} [{bar}] {pct*100:.1f}% | t: {session.time:.1f}s{v_str}   ")
-                    sys.stdout.flush()
+                    self._print_progress(session, step_name, t_elapsed, t_max)
 
             if show_progress:
-                try: v_str = f" | V: {session.get('V_cell'):.3f}V"
-                except KeyError: v_str = ""
-                sys.stdout.write(f"\r▶ {step_name:<4} [██████████████████████████████] 100.0% | t: {session.time:.1f}s{v_str}   \n")
-                sys.stdout.flush()
+                self._print_progress(session, step_name, t_elapsed, t_max, is_final=True)
 
         for k in data_hist: data_hist[k] = np.array(data_hist[k])
         
@@ -312,11 +337,64 @@ class Engine:
             }
         return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
 
-    def _append_to_hist(self, session, data_hist, raw_y_hist, raw_p_hist, requires_grad):
+    def _map_protocol_inputs(self, step: Any, step_name: str) -> Dict[str, float]:
+        """Maps sequence parameters to algebraic terminal constraints."""
+        inputs = {}
+        if step_name == "CC":
+            if "_term_mode" in self.parameters: inputs.update({"_term_mode": 1.0, "_term_i_target": step.rate})
+            else: 
+                if "mode" in self.parameters: inputs["mode"] = 1.0
+                if "i_target" in self.parameters: inputs["i_target"] = step.rate
+                elif "i_app" in self.parameters: inputs["i_app"] = step.rate
+        elif step_name == "CV":
+            if "_term_mode" in self.parameters: inputs.update({"_term_mode": 0.0, "_term_v_target": step.voltage})
+            else: 
+                if "mode" in self.parameters: inputs["mode"] = 0.0
+                if "v_target" in self.parameters: inputs["v_target"] = step.voltage
+        elif step_name == "Rest":
+            if "_term_mode" in self.parameters: inputs.update({"_term_mode": 1.0, "_term_i_target": 0.0})
+            else: 
+                if "mode" in self.parameters: inputs["mode"] = 1.0
+                if "i_target" in self.parameters: inputs["i_target"] = 0.0
+                elif "i_app" in self.parameters: inputs["i_app"] = 0.0
+        return inputs
+
+    def _find_trigger_root(self, session: Session, target_condition: Any, inputs: Dict[str, float], dt_step: float) -> float:
+        """Executes a dense bisection to land mathematically exactly on discontinuous sequence triggers."""
+        session.restore()
+        
+        # Prevent speculative bisection steps from writing false branches to the AD tape
+        with session.suspend_history():
+            low, high = 0.0, dt_step
+            for _ in range(15):
+                mid = (low + high) / 2.0
+                session.step(mid, inputs=inputs)
+                if session.triggered(target_condition): high = mid
+                else: low = mid
+                session.restore()
+                
+        # Tape automatically resumes after context exit
+        session.step(low, inputs=inputs)
+        return low
+
+    def _initialize_ad_history(self, session: Session) -> None:
+        """Pre-allocates strictly dimensioned arrays to prevent np.vstack shape errors."""
+        session.record_history = True
+        y0 = session.handle.get_state() if session.handle else session._mock_y
+        ydot0 = np.zeros(self.manifest.layout.n_states)
+        p0 = self.manifest.pack_parameters(session.parameters)
+        
+        session.micro_t = [np.array([0.0])]
+        session.micro_y = [y0[np.newaxis, :]]
+        session.micro_ydot = [ydot0[np.newaxis, :]]
+        session.micro_p = [np.array(p0)[np.newaxis, :]]
+
+    def _append_to_hist(self, session: Session, data_hist: Dict, raw_y_hist: List, raw_p_hist: List, requires_grad: bool) -> None:
         data_hist["Time [s]"].append(session.time)
         y = session.handle.get_state() if session.handle else session._mock_y
         obs = session.handle.get_observables_py() if session.handle else np.zeros(self.manifest.layout.n_obs)
         raw_y_hist.append(y)
+        
         if requires_grad: 
             raw_p_hist.append(self.manifest.pack_parameters(session.parameters))
             
@@ -324,3 +402,19 @@ class Engine:
             data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
         for k, (offset, size) in self.manifest.layout.obs_offsets.items(): 
             data_hist[k].append(obs[offset:offset+size] if size > 1 else obs[offset])
+
+    def _print_progress(self, session: Session, step_name: str, t_elapsed: float, t_max: float, is_final: bool = False) -> None:
+        try: v_str = f" | V: {session.get('V_cell'):.3f}V"
+        except KeyError: v_str = ""
+        
+        if is_final:
+            sys.stdout.write(f"\r▶ {step_name:<4} [██████████████████████████████] 100.0% | t: {session.time:.1f}s{v_str}   \n")
+        elif t_max == float('inf'): 
+            sys.stdout.write(f"\r▶ {step_name:<4} ⏳ t: {session.time:.1f}s{v_str}   ")
+        else:
+            pct = min(t_elapsed / t_max, 1.0)
+            filled = int(pct * 30)
+            bar = "█" * filled + "-" * (30 - filled)
+            sys.stdout.write(f"\r▶ {step_name:<4} [{bar}] {pct*100:.1f}% | t: {session.time:.1f}s{v_str}   ")
+            
+        sys.stdout.flush()

@@ -52,7 +52,7 @@ python examples/6_demo.py
 python models/Chen2020_DFN.py
 
 # Optimize the same model
-python models/Gitt_inversion_demo.py
+python examples/7_Gitt_inversion_demo.py
 ```
 
 ---

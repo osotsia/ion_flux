@@ -386,15 +386,19 @@ pub fn solve_ida_sundials<'py>(
         for i in 0..n_obs { out_obs[step * n_obs + i] = step_obs[i]; }
         
         if show_progress && total_steps > 0 {
-            let pct = (step as f64 / total_steps as f64) * 100.0;
-            let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
-            let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+            let is_final = step == total_steps;
+            let pct = (step as f64 / total_steps as f64).clamp(0.0, 1.0);
             let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", handle._y_data[v_idx as usize]) } else { String::new() };
-            print!("\r▶ Sundials [{}] {:.1}% | t: {:.1}s{}   ", bar, pct, t_eval[step], v_str);
+            if is_final {
+                print!("\r▶ {:<4} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", "Sund", t_eval[step], v_str);
+            } else {
+                let filled = (pct * 30.0) as usize;
+                let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                print!("\r▶ {:<4} [{}] {:.1}% | t: {:.1}s{}   ", "Sund", bar, pct * 100.0, t_eval[step], v_str);
+            }
             std::io::stdout().flush().unwrap();
         }
     }
-    if show_progress && total_steps > 0 { println!(); }
     
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), handle.n), out_traj).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);
     let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?.to_pyarray(py);

@@ -16,15 +16,18 @@ It calculates the exact, continuous Vector-Jacobian Product (VJP) of the entire
 voltage relaxation curve in a single backward pass. 
 This allows hyper-fast fitting using first-order optimizers like L-BFGS-B.
 """
-
+import os
+import sys
 import time
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
+# Add the 'models' directory to the path so we can import Chen2020_DFN
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'models'))
+
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
-
 from Chen2020_DFN import Chen2020_DFN
 
 def run_gitt_inversion_demo():

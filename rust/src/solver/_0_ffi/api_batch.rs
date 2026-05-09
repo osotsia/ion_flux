@@ -60,15 +60,19 @@ pub fn solve_ida_native<'py>(
         }
         
         if show_progress && total_steps > 0 {
-            let pct = (step as f64 / total_steps as f64) * 100.0;
-            let filled = ((step as f64 / total_steps as f64) * 30.0) as usize;
-            let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+            let is_final = step == total_steps;
+            let pct = (step as f64 / total_steps as f64).clamp(0.0, 1.0);
             let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", wk.y[v_idx as usize]) } else { String::new() };
-            print!("\r▶ Native [{}] {:.1}% | t: {:.1}s{}   ", bar, pct, t_eval[step], v_str);
+            if is_final {
+                print!("\r▶ {:<4} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", "Natv", t_eval[step], v_str);
+            } else {
+                let filled = (pct * 30.0) as usize;
+                let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                print!("\r▶ {:<4} [{}] {:.1}% | t: {:.1}s{}   ", "Natv", bar, pct * 100.0, t_eval[step], v_str);
+            }
             std::io::stdout().flush().unwrap();
         }
     }
-    if show_progress && total_steps > 0 { println!(); }
     
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n), out_traj).unwrap().to_pyarray(py);
     let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).unwrap().to_pyarray(py);
@@ -168,17 +172,21 @@ pub fn solve_batch_native<'py>(
                 
                 let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if show_progress {
-                    let pct = (c as f64 / total as f64) * 100.0;
-                    let filled = ((c as f64 / total as f64) * 30.0) as usize;
-                    let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-                    print!("\r▶ Batch  [{}] {:.1}% | {}/{} models   ", bar, pct, c, total);
+                    let is_final = c == total;
+                    let pct = (c as f64 / total as f64).clamp(0.0, 1.0);
+                    if is_final {
+                        print!("\r▶ {:<4} [██████████████████████████████] 100.0% | {}/{} models   \n", "Btch", c, total);
+                    } else {
+                        let filled = (pct * 30.0) as usize;
+                        let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                        print!("\r▶ {:<4} [{}] {:.1}% | {}/{} models   ", "Btch", bar, pct * 100.0, c, total);
+                    }
                     std::io::stdout().flush().unwrap();
                 }
                 Ok((out_t, out_traj, out_obs))
             }).collect()
         })
     });
-    if show_progress { println!(); }
 
     let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let mut py_results = Vec::new();

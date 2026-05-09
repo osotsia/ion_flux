@@ -39,7 +39,7 @@ pub fn run_sequence(
             let dt_step = 1.0_f64.min(step.t_limit - t_elapsed);
             let ckpt = wk.clone_state();
             
-            // FIX 2: Explicitly execute the step and propagate any solver crashes.
+            // Explicitly execute the step and propagate any solver crashes.
             // Only check the protocol triggers if the step was mathematically successful.
             bdf::step(prob, wk, dt_step, None)?;
             
@@ -54,7 +54,7 @@ pub fn run_sequence(
                         out_obs.extend_from_slice(&step_obs);
                     }
                 }
-                if show_progress { print_progress(step.s_type, wk.t, 1.0, v_idx, &wk.y); }
+                if show_progress { print_progress(step.s_type, wk.t, 1.0, v_idx, &wk.y, true); }
                 break;
             }
             
@@ -67,26 +67,28 @@ pub fn run_sequence(
                     out_obs.extend_from_slice(&step_obs);
                 }
             }
-            if show_progress { print_progress(step.s_type, wk.t, t_elapsed / step.t_limit, v_idx, &wk.y); }
+            if show_progress { print_progress(step.s_type, wk.t, t_elapsed / step.t_limit, v_idx, &wk.y, false); }
         }
         if show_progress && t_elapsed >= step.t_limit && step.t_limit != std::f64::INFINITY {
-            print_progress(step.s_type, wk.t, 1.0, v_idx, &wk.y);
+            print_progress(step.s_type, wk.t, 1.0, v_idx, &wk.y, true);
         }
     }
     Ok(())
 }
 
-fn print_progress(s_type: i32, t: f64, pct: f64, v_idx: i32, y: &[f64]) {
-    let name = match s_type { 0 => "CC  ", 1 => "CV  ", 2 => "Rest", _ => "Step" };
+fn print_progress(s_type: i32, t: f64, pct: f64, v_idx: i32, y: &[f64], is_final: bool) {
+    let name = match s_type { 0 => "CC", 1 => "CV", 2 => "Rest", _ => "Step" };
     let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", y[v_idx as usize]) } else { String::new() };
-    if pct.is_nan() || pct.is_infinite() {
-        print!("\r▶ {} ⏳ t: {:.1}s{}   ", name, t, v_str);
+    
+    if is_final {
+        print!("\r▶ {:<4} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", name, t, v_str);
+    } else if pct.is_nan() || pct.is_infinite() {
+        print!("\r▶ {:<4} ⏳ t: {:.1}s{}   ", name, t, v_str);
     } else {
         let p = pct.clamp(0.0, 1.0);
         let filled = (p * 30.0) as usize;
         let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-        print!("\r▶ {} [{}] {:.1}% | t: {:.1}s{}   ", name, bar, p * 100.0, t, v_str);
-        if p >= 1.0 { println!(); }
+        print!("\r▶ {:<4} [{}] {:.1}% | t: {:.1}s{}   ", name, bar, p * 100.0, t, v_str);
     }
     std::io::stdout().flush().unwrap();
 }
