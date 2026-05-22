@@ -2,7 +2,7 @@ use crate::solver::shared::problem::Problem;
 use crate::solver::shared::workspace::Workspace;
 use crate::solver::_3_nonlinear::newton;
 use crate::solver::_3_nonlinear::constraints;
-use crate::solver::shared::diagnostics::dump_crash_report;
+use crate::solver::shared::diagnostics::build_crash_report_json;
 
 pub fn step(
     prob: &Problem,
@@ -69,8 +69,9 @@ pub fn step(
                     } else { wk.history.h *= 0.25; wk.history.order = 1; }
                     
                     if wk.history.h <= prob.config.min_dt {
-                        dump_crash_report(&wk.diag, &wk.y, &wk.ydot, &prob.id, "Tolerance Starvation");
-                        return Err(format!("Step collapsed below min_dt. t={}", abs_t + t_local));
+                        let reason = format!("Tolerance Starvation (Step collapsed below min_dt). t={}", abs_t + t_local);
+                        let crash_json = build_crash_report_json(&wk.diag, &wk.y, &wk.ydot, &prob.id, &reason);
+                        return Err(crash_json);
                     }
                     continue;
                 }
@@ -96,8 +97,9 @@ pub fn step(
             newton::NewtonResult::DivergedStaleJac(_) | newton::NewtonResult::DivergedFatal(_) => {
                 wk.diag.rejected_steps += 1; wk.history.restore(); wk.history.h *= 0.25; wk.lu_solver.mark_stale();
                 if wk.history.h <= prob.config.min_dt {
-                    dump_crash_report(&wk.diag, &wk.y, &wk.ydot, &prob.id, "Nonlinear Divergence / Constraint Starvation");
-                    return Err(format!("Step collapsed below min_dt. t={}", abs_t + t_local));
+                    let reason = format!("Nonlinear Divergence / Constraint Starvation (Step collapsed below min_dt). t={}", abs_t + t_local);
+                    let crash_json = build_crash_report_json(&wk.diag, &wk.y, &wk.ydot, &prob.id, &reason);
+                    return Err(crash_json);
                 }
             }
         }

@@ -5,8 +5,6 @@ use faer::sparse::linalg::solvers::{SymbolicLu, Lu};
 use faer::sparse::SparseColMat;
 use faer::col::from_slice_mut;
 use faer::prelude::SpSolver;
-use std::fs::File;
-use std::io::Write;
 
 pub struct NativeSparseLuSolver {
     pub is_stale: bool,
@@ -28,15 +26,6 @@ impl NativeSparseLuSolver {
             triplets: Vec::with_capacity(estimated_nnz),
             cached_pattern: Vec::with_capacity(estimated_nnz),
             row_scales: vec![1.0; n],
-        }
-    }
-
-    pub fn dump_matrix_market(&self, filename: &str) {
-        if let Ok(mut file) = File::create(filename) {
-            writeln!(file, "%%MatrixMarket matrix coordinate real general").unwrap();
-            writeln!(file, "% Dumped during native solver panic").unwrap();
-            writeln!(file, "{} {} {}", self.n, self.n, self.triplets.len()).unwrap();
-            for &(r, c, val) in &self.triplets { writeln!(file, "{} {} {:.16e}", r + 1, c + 1, val).unwrap(); }
         }
     }
 
@@ -89,11 +78,7 @@ impl NativeSparseLuSolver {
         let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| { SparseColMat::try_new_from_triplets(self.n, self.n, &self.triplets) }));
         let jac_sparse = match jac_sparse_res {
             Ok(Ok(mat)) => mat,
-            _ => {
-                std::fs::create_dir_all("ion_flux_diagnostics").ok();
-                self.dump_matrix_market("ion_flux_diagnostics/faer_panic_assembly.mtx");
-                return Err("Sparse matrix assembly panicked.".to_string());
-            }
+            _ => return Err("Sparse matrix assembly panicked.".to_string()),
         };
 
         if self.symbolic.is_none() {

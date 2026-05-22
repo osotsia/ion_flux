@@ -1,21 +1,32 @@
-import glob
-import os
 import json
 from ion_flux.runtime.manifest import ExecutableManifest
 
 def format_native_crash(original_error: Exception, manifest: ExecutableManifest) -> Exception:
     """
-    Recovers Native Rust Crash JSONs and maps physical Python AST variable names 
+    Parses Native Rust Crash JSONs (embedded in the error message) and maps physical Python AST variable names 
     back to the faulty flat C-arrays that caused the crash.
     """
-    crash_files = glob.glob("ion_flux_diagnostics/crash_*.json")
-    if not crash_files: raise original_error
-        
-    latest_crash = max(crash_files, key=os.path.getctime)
     try:
-        with open(latest_crash, "r") as f: 
-            crash_data = json.load(f)
+        err_str = str(original_error)
         
+        # Try to parse the embedded JSON from the Rust panic message
+        start_idx = err_str.find('{')
+        end_idx = err_str.rfind('}')
+        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
+            raise ValueError("No JSON payload found in the Native Rust Error string.")
+            
+        json_str = err_str[start_idx:end_idx+1]
+        
+        # Rust's f64 formatter produces 'inf', '-inf', and 'NaN' for floating point extremities. 
+        # Python's strict json parser requires 'Infinity', '-Infinity', and 'NaN'.
+        json_str = json_str.replace(": inf", ": Infinity")
+        json_str = json_str.replace(": -inf", ": -Infinity")
+        
+        crash_data = json.loads(json_str)
+        
+        if crash_data.get("status") != "CRASH":
+            raise ValueError("Valid JSON found, but it is not a solver crash report.")
+            
         idx_to_name = {}
         for name, (offset, size) in manifest.layout.state_offsets.items():
             for i in range(size): 
@@ -27,10 +38,8 @@ def format_native_crash(original_error: Exception, manifest: ExecutableManifest)
         if "initialization_health" in crash_data:
             idx = crash_data["initialization_health"].get("t0_max_residual_index", -1)
             crash_data["initialization_health"]["t0_max_residual_name"] = idx_to_name.get(idx, f"Unknown[{idx}]")
-        
-        with open(latest_crash, "w") as f: json.dump(crash_data, f, indent=2)
                 
-        msg = f"\n{'-'*100}\n🔥 NATIVE SOLVER CRASH: {str(original_error)}\n{'-'*100}\n"
+        msg = f"\n{'-'*100}\n🔥 NATIVE SOLVER CRASH\n{'-'*100}\n"
         msg += f"Reason: {crash_data.get('reason', 'Unknown')}\n"
         msg += f"Accepted Steps: {crash_data.get('accepted_steps', 0)}\n"
         
@@ -60,5 +69,7 @@ def format_native_crash(original_error: Exception, manifest: ExecutableManifest)
             
         msg += f"{'-'*100}\n"
         return RuntimeError(msg)
-    except Exception:
-        raise original_error from None
+    except Exception as e:
+        # Gracefully fallback to the original error if JSON parsing or string processing fails,
+        # but append the parsing error for diagnostic context.
+        return RuntimeError(f"{str(original_error)}\n\n[Diagnostic Formatting Failed: {e}]")

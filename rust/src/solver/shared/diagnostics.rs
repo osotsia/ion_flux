@@ -1,7 +1,3 @@
-use std::time::SystemTime;
-use std::fs::File;
-use std::io::Write;
-
 #[derive(Clone)]
 pub struct Diagnostics {
     pub total_steps: usize,
@@ -44,15 +40,9 @@ impl Diagnostics {
             jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0, recent_newton_norms: std::collections::VecDeque::new(),
         }
     }
-
-    pub fn generate_timestamp() -> u64 {
-        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
-    }
 }
 
-pub fn dump_crash_report(diag: &Diagnostics, y: &[f64], ydot: &[f64], id: &[f64], reason: &str) {
-    std::fs::create_dir_all("ion_flux_diagnostics").ok();
-    
+pub fn build_crash_report_json(diag: &Diagnostics, y: &[f64], ydot: &[f64], id: &[f64], reason: &str) -> String {
     let mut offenders: Vec<(usize, f64, f64, f64, f64, f64, f64, bool)> = diag.last_res.iter().enumerate()
         .map(|(i, &res)| {
             let weight = diag.last_weights.get(i).copied().unwrap_or(0.0);
@@ -88,28 +78,10 @@ pub fn dump_crash_report(diag: &Diagnostics, y: &[f64], ydot: &[f64], id: &[f64]
     }
 
     let cond_warning = diag.jac_max > 0.0 && diag.jac_min > 0.0 && (diag.jac_max / diag.jac_min) > 1e12;
-    let ts = Diagnostics::generate_timestamp();
     
-    if let Ok(mut file) = File::create(format!("ion_flux_diagnostics/crash_{}.json", ts)) {
-        let json = format!(
-            "{{\n  \"status\": \"CRASH\",\n  \"reason\": \"{}\",\n  \"accepted_steps\": {},\n  \"initialization_health\": {{\n    \"t0_max_residual\": {:.3e},\n    \"t0_max_residual_index\": {}\n  }},\n  \"jacobian_health\": {{\n    \"max_element\": {:.3e},\n    \"min_nonzero_element\": {:.3e},\n    \"condition_warning\": {}\n  }},\n  \"newton_thrashing_trace\": [\n    {}\n  ],\n  \"top_offenders\": [\n    {}\n  ]\n}}",
-            reason, diag.accepted_steps, diag.t0_max_res, diag.t0_max_res_idx,
-            diag.jac_max, diag.jac_min, cond_warning, trace_str, top_offenders.join(",\n    ")
-        );
-        file.write_all(json.as_bytes()).ok();
-    }
-}
-
-pub fn dump_diagnostics(diag: &Diagnostics) {
-    std::fs::create_dir_all("ion_flux_diagnostics").ok();
-    let ts = Diagnostics::generate_timestamp();
-    if let Ok(mut file) = File::create(format!("ion_flux_diagnostics/profile_{}.json", ts)) {
-        let json = format!(
-            "{{\n  \"status\": \"SUCCESS\",\n  \"accepted_steps\": {},\n  \"rejected_steps\": {},\n  \"newton_iterations\": {},\n  \"jacobian_evals\": {},\n  \"numeric_lus\": {},\n  \"timers_us\": {{\n    \"residual\": {},\n    \"jac_assembly\": {},\n    \"lu_solve\": {}\n  }}\n}}",
-            diag.accepted_steps, diag.rejected_steps, diag.newton_iterations,
-            diag.jacobian_evaluations, diag.numeric_factorizations,
-            diag.residual_time_us, diag.jacobian_assembly_time_us, diag.linear_solve_time_us
-        );
-        file.write_all(json.as_bytes()).ok();
-    }
+    format!(
+        "{{\n  \"status\": \"CRASH\",\n  \"reason\": \"{}\",\n  \"accepted_steps\": {},\n  \"initialization_health\": {{\n    \"t0_max_residual\": {:.3e},\n    \"t0_max_residual_index\": {}\n  }},\n  \"jacobian_health\": {{\n    \"max_element\": {:.3e},\n    \"min_nonzero_element\": {:.3e},\n    \"condition_warning\": {}\n  }},\n  \"newton_thrashing_trace\": [\n    {}\n  ],\n  \"top_offenders\": [\n    {}\n  ]\n}}",
+        reason, diag.accepted_steps, diag.t0_max_res, diag.t0_max_res_idx,
+        diag.jac_max, diag.jac_min, cond_warning, trace_str, top_offenders.join(",\n    ")
+    )
 }

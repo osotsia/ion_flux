@@ -96,6 +96,8 @@ class ModularSPM(fx.PDE):
     
     V_cell = fx.State(domain=None)
     i_app = fx.State(domain=None)
+    
+    # Binds these specific states to external cycler protocols (CC, CV, Rest). 
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
     def math(self):
@@ -118,6 +120,10 @@ class ModularSPM(fx.PDE):
             self.anode.math(j_n), 
             self.cathode.math(j_p)
         )
+
+# Compile the unified physics and execute a 1-hour simulation
+engine = fx.Engine(model=ModularSPM())
+result = engine.solve(t_span=(0, 3600))
 ```
 
 ### 3. Native Multi-Scale Meshes & DAEs
