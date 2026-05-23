@@ -51,7 +51,7 @@ python examples/6_demo.py
 # Run a full DFN model
 python models/Chen2020_DFN.py
 
-# Optimize the same model
+# Optimize the same model to recover parameters
 python examples/7_Gitt_inversion_demo.py
 ```
 

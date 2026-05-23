@@ -45,10 +45,10 @@ class MeshConfig:
     res_cell = res_n + res_s + res_p
 
     # Micro-Scale Resolutions 
-    # Set to 50 to mitigate the absence of an exponential mesh, 
+    # Set to 150 to try mitigate the absence of an exponential mesh, 
     # resolving steep surface concentration gradients at > 1C rates.
-    res_r_n = 50
-    res_r_p = 50
+    res_r_n = 150
+    res_r_p = 150
 
 
 class ThermalDFN(fx.PDE):
@@ -303,10 +303,10 @@ class ThermalDFN(fx.PDE):
         }
     
 
-def run_parallel_processes():
+def run_parallel_processes(model):
     print("Compiling Exact Thermal DFN Math to Native C++ Binary...")
     start_time = time.perf_counter()
-    compiler_engine = fx.Engine(model=ThermalDFN(), target="cpu:serial", solver_backend="native")
+    engine = fx.Engine(model=model, target="cpu:serial", solver_backend="native")
     print(f"\nCompilation completed in {time.perf_counter() - start_time:.2f}s")
     
     rates = {"0.5C": 2.5, "1C": 5.0, "2C": 10.0}
@@ -318,13 +318,13 @@ def run_parallel_processes():
         keys_order.append(name)
         params_list.append({}) 
         protocols_list.append(Sequence([
-            CC(rate=current, until=compiler_engine.model.V_cell <= 2.5, time=15000),
+            CC(rate=current, until=engine.model.V_cell <= 2.5, time=15000),
             Rest(time=7200)
         ]))
     
     print("\nInitiating Native Rayon Batch Execution...")
     start_time = time.perf_counter()
-    batch_results = compiler_engine.solve_batch(
+    batch_results = engine.solve_batch(
         parameters=params_list, 
         protocols=protocols_list, 
         max_workers=3, 
@@ -336,7 +336,7 @@ def run_parallel_processes():
 
 
 if __name__ == "__main__":
-    results = run_parallel_processes()
+    results = run_parallel_processes(ThermalDFN())
 
     res_2c = results["2C"]
     t_2c = res_2c["Time [s]"].data
@@ -364,8 +364,8 @@ if __name__ == "__main__":
         axs[0, 0].plot(t_sec, res["V_cell"].data, label=name, color=c, linewidth=2)
         axs[0, 1].plot(t_sec, res["T_cell"].data - 273.15, label=name, color=c, linewidth=2)
 
-    axs[0, 0].set(title="Terminal Voltage Profiles", xlabel="Time [s]", ylabel="Voltage [V]")
-    axs[0, 1].set(title="Lumped Temperature Profiles", xlabel="Time [s]", ylabel="Temperature [°C]")
+    axs[0, 0].set(title="Terminal Voltage Profiles (Rep: Fig 15)", xlabel="Time [s]", ylabel="Voltage [V]")
+    axs[0, 1].set(title="Lumped Temperature Profiles (Rep: Fig 15)", xlabel="Time [s]", ylabel="Temperature [°C]")
 
     # --- ROW 1 & 2 Setup: Spatial Diagnostics (2C Discharge) ---
     x_cell = np.linspace(0, MeshConfig.L_cell * 1e6, MeshConfig.res_cell)
