@@ -115,8 +115,8 @@ class ExactTSPMe(fx.PDE):
         j_vol_p = -i_den / L_p
         
         # Surface concentrations clamped for numerical safety
-        c_surf_n = fx.min(fx.max(self.c_s_n.boundary("right", domain=self.r_n), 10.0), c_max_n - 10.0)
-        c_surf_p = fx.min(fx.max(self.c_s_p.boundary("right", domain=self.r_p), 10.0), c_max_p - 10.0)
+        c_surf_n = fx.clamp(self.c_s_n.boundary("right", domain=self.r_n), lower=10.0, upper=c_max_n - 10.0)
+        c_surf_p = fx.clamp(self.c_s_p.boundary("right", domain=self.r_p), lower=10.0, upper=c_max_p - 10.0)
         ce_safe = fx.max(self.c_e, 1.0)
         
         x_n = c_surf_n / c_max_n

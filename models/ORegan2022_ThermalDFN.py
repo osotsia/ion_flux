@@ -112,18 +112,18 @@ class ThermalDFN(fx.PDE):
         def sq(x): return x * x
         def cb(x): return x * x * x
             
-        T_safe = fx.min(fx.max(self.T_cell, 250.0), 380.0)
+        T_safe = fx.clamp(self.T_cell, lower=250.0, upper=380.0)
         def arrh(Ea): return fx.exp((Ea / R_const) * (1.0 / T_ref - 1.0 / T_safe))
 
         # =====================================================================
         # 5. State Extraction & Interpolation Boundaries
         # =====================================================================
-        c_surf_n = fx.min(fx.max(self.c_s_n.boundary("right", domain=self.r_n), 10.0), c_max_n - 10.0)
-        c_surf_p = fx.min(fx.max(self.c_s_p.boundary("right", domain=self.r_p), 10.0), c_max_p - 10.0)
+        c_surf_n = fx.clamp(self.c_s_n.boundary("right", domain=self.r_n), lower=10.0, upper=c_max_n - 10.0)
+        c_surf_p = fx.clamp(self.c_s_p.boundary("right", domain=self.r_p), lower=10.0, upper=c_max_p - 10.0)
         
-        x_n = fx.min(fx.max(c_surf_n / c_max_n, 1e-4), 0.9999)
-        x_p = fx.min(fx.max(c_surf_p / c_max_p, 1e-4), 0.9999)
-        ce_safe = fx.min(fx.max(self.c_e, 10.0), 5000.0)
+        x_n = fx.clamp(c_surf_n / c_max_n, lower=1e-4, upper=0.9999)
+        x_p = fx.clamp(c_surf_p / c_max_p, lower=1e-4, upper=0.9999)
+        ce_safe = fx.clamp(self.c_e, lower=10.0, upper=5000.0)
         
         # =====================================================================
         # 6. Thermodynamics: OCV & Entropic Heat (Eq. S7, S8, 16, 17)
@@ -156,8 +156,8 @@ class ThermalDFN(fx.PDE):
         F_RT = F / (R_const * T_safe)
         
         # Bound overpotentials to prevent exponential overflow during early Newton iterations
-        eta_n_safe = fx.min(fx.max(eta_n, -0.5), 0.5)
-        eta_p_safe = fx.min(fx.max(eta_p, -0.5), 0.5)
+        eta_n_safe = fx.clamp(eta_n, lower=-0.5, upper=0.5)
+        eta_p_safe = fx.clamp(eta_p, lower=-0.5, upper=0.5)
         
         j_n = a_n * i0_n * (fx.exp(alpha_n * F_RT * eta_n_safe) - fx.exp(-(1.0 - alpha_n) * F_RT * eta_n_safe))
         j_p = a_p * i0_p * (fx.exp(alpha_p * F_RT * eta_p_safe) - fx.exp(-(1.0 - alpha_p) * F_RT * eta_p_safe))
@@ -166,8 +166,8 @@ class ThermalDFN(fx.PDE):
         # 8. Solid Transport: Stoichiometry-Dependent Diffusion (Eq. 10)
         # =====================================================================
         ln10 = math.log(10.0)
-        x_bulk_n = fx.min(fx.max(self.c_s_n / c_max_n, 1e-4), 0.9999)
-        x_bulk_p = fx.min(fx.max(self.c_s_p / c_max_p, 1e-4), 0.9999)
+        x_bulk_n = fx.clamp(self.c_s_n / c_max_n, lower=1e-4, upper=0.9999)
+        x_bulk_p = fx.clamp(self.c_s_p / c_max_p, lower=1e-4, upper=0.9999)
         
         D_ref_n = fx.exp((
             11.17 * x_bulk_n - 15.11
@@ -238,7 +238,7 @@ class ThermalDFN(fx.PDE):
         
         Q_total_area = Q_irr_area + Q_rev_area
         Q_vol = Q_total_area / MeshConfig.L_cell
-        Q_vol_safe = fx.min(fx.max(Q_vol, -1e8), 1e8)
+        Q_vol_safe = fx.clamp(Q_vol, lower=-1e8, upper=1e8)
         
         # Convective Newton Cooling
         # Effective Cell Area (5.31e-3) / Volume (2.42e-5) = ~219.42 m^-1 (Table 8)

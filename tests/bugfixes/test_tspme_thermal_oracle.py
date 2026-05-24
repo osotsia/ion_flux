@@ -78,8 +78,8 @@ class ThermalSourceProbe(fx.PDE):
         A_elec = 0.1024 
         i_den = i_app / A_elec
         
-        c_surf_n = fx.min(fx.max(self.c_s_n.boundary("right", domain=self.r_n), 10.0), c_max_n - 10.0)
-        c_surf_p = fx.min(fx.max(self.c_s_p.boundary("right", domain=self.r_p), 10.0), c_max_p - 10.0)
+        c_surf_n = fx.clamp(self.c_s_n.boundary("right", domain=self.r_n), lower=10, upper=c_max_n-10.0)
+        c_surf_p = fx.clamp(self.c_s_p.boundary("right", domain=self.r_p), lower=10, upper=c_max_p-10.0)
         
         ce_safe_n = fx.max(self.c_e_n, 1.0)
         ce_safe_p = fx.max(self.c_e_p, 1.0)

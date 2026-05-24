@@ -104,14 +104,14 @@ class Marquis1Plus1D_SPMe(fx.PDE):
         # Arrhenius multiplier for thermal feedback (Table 6 & 7)
         def arrh(E_a):
             # Bound T_cell to prevent exponential NaN explosions during Newton stepping
-            T_safe = fx.min(fx.max(self.T_cell, 200.0), 400.0)
+            T_safe = fx.clamp(self.T_cell, lower=200.0, upper=400.0)
             return fx.exp((E_a / R_g) * (1.0 / T_inf - 1.0 / T_safe))
 
         # =====================================================================
         # 5. Thermodynamics & Non-Linear Transport (Table 7)
         # =====================================================================
-        c_sn_surf = fx.min(fx.max(self.c_sn.boundary("right", domain=self.r_n), 10.0), c_n_max - 10.0)
-        c_sp_surf = fx.min(fx.max(self.c_sp.boundary("right", domain=self.r_p), 10.0), c_p_max - 10.0)
+        c_sn_surf = fx.clamp(self.c_sn.boundary("right", domain=self.r_n), lower=10.0, upper=c_n_max - 10.0)
+        c_sp_surf = fx.clamp(self.c_sp.boundary("right", domain=self.r_p), lower=10.0, upper=c_p_max - 10.0)
         
         # Boundaries for electrolyte concentration overpotential (Eq 3.25)
         ce_x0 = fx.max(self.c_e.boundary("left", domain=self.x_cell), 10.0)

@@ -98,7 +98,7 @@ class Chen2020_DFN(fx.PDE):
             # from annihilating the mass conservation equations during speculative Newton steps.
             x_max = 5.0 
             cosh_max = 0.5 * (np.exp(x_max) + np.exp(-x_max))
-            x_safe = fx.min(fx.max(x, -x_max), x_max)
+            x_safe = fx.clamp(x, lower=-x_max, upper=x_max)            
             bulk_sinh = 0.5 * (fx.exp(x_safe) - fx.exp(-x_safe))
             return bulk_sinh + cosh_max * (x - x_safe)
 
@@ -106,15 +106,15 @@ class Chen2020_DFN(fx.PDE):
         # 5. Thermodynamics & Kinetics
         # =====================================================================
         # Extract surface concentrations natively from the Micro-Domains
-        c_surf_n = fx.min(fx.max(self.c_s_n.boundary("right", domain=self.r_n), 10.0), c_max_n - 10.0)
-        c_surf_p = fx.min(fx.max(self.c_s_p.boundary("right", domain=self.r_p), 10.0), c_max_p - 10.0)
+        c_surf_n = fx.clamp(self.c_s_n.boundary("right", domain=self.r_n), lower=10.0, upper=c_max_n - 10.0)
+        c_surf_p = fx.clamp(self.c_s_p.boundary("right", domain=self.r_p), lower=10.0, upper=c_max_p - 10.0)
         
         # Active particle stoichiometries
         x_n = c_surf_n / c_max_n
         x_p = c_surf_p / c_max_p
         
         # Bound electrolyte concentration to prevent log singularities AND runaway Newton feedback loops
-        ce_safe = fx.min(fx.max(self.c_e, 10.0), 5000.0)
+        ce_safe = fx.clamp(self.c_e, lower=10.0, upper=5000.0)
         
         # Equilibrium Open Circuit Potentials [V] (Equations 8 & 9)
         U_n = (1.9793 * fx.exp(-39.3631 * x_n) + 0.2482 
