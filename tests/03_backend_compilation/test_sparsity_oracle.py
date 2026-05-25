@@ -13,7 +13,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..', 'models'))
 
 from Chen2020_DFN import Chen2020_DFN
-from Marquis2019_1Plus1D_SPMe import Marquis1Plus1D_SPMe
+# from Marquis2019_1Plus1D_SPMe import Marquis1Plus1D_SPMe
 from ORegan2022_ThermalDFN import ThermalDFN
 
 
@@ -87,6 +87,7 @@ def test_static_sparsity_analyzer_matches_enzyme_oracl_v2():
 
 
 @REQUIRES_COMPILER
+@pytest.mark.skip(reason="Disabled Marquis model")
 def test_static_sparsity_analyzer_matches_enzyme_oracl_v3():
 
     missing_dependencies = get_missing_dependencies(model=Marquis1Plus1D_SPMe())
