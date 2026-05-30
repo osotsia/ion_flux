@@ -70,7 +70,7 @@ class ProgressBar:
             bar = "".join(bar_list)
             
             spinner = spinner_chars[ticks % 10]
-            sys.stdout.write(f"\r▶ {self.name:<4} [{bar}]  ---.-% | {spinner} {suffix:<43}")
+            sys.stdout.write(f"\r▶ {self.name:<4} [{bar}] ---.-% | {spinner} {suffix:<43}")
             sys.stdout.flush()
             
             time.sleep(0.05)
