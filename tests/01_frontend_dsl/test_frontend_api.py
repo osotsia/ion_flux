@@ -315,3 +315,99 @@ def test_failure_poke_malformed_dictionary_payload():
             
     with pytest.raises(ValueError, match="Unconstrained state detected"):
         Engine(BadPayloadModel(), mock_execution=True)
+
+
+# ==============================================================================
+# Model 4: The Leakage Oracle (Testing Shared Node Prevention)
+# ==============================================================================
+
+class SharedFluxLeakageModel(fx.PDE):
+    """
+    Intentionally poorly-designed model.
+    A single AST node (`shared_flux`) is evaluated in two distinct equations, 
+    but a boundary condition is applied to it.
+    """
+    x = fx.Domain(bounds=(0, 1), resolution=5, name="x")
+    c1 = fx.State(domain=x, name="c1")
+    c2 = fx.State(domain=x, name="c2")
+
+    def math(self):
+        # INTENTIONAL ANTI-PATTERN: 
+        # Instantiating a single object reference in memory and sharing it.
+        shared_flux = -1.0 * fx.grad(self.c1) + 0.5 * fx.grad(self.c2)
+
+        return {
+            "equations": {
+                self.c1: fx.dt(self.c1) == -fx.div(shared_flux),
+                self.c2: fx.dt(self.c2) == -fx.div(shared_flux)
+            },
+            "boundaries": {
+                # Applying a boundary to the shared node causes silent leakage into BOTH c1 and c2.
+                shared_flux: {"left": 100.0, "right": 0.0}
+            },
+            "initial_conditions": {self.c1: 0.0, self.c2: 0.0}
+        }
+
+
+class IsolatedFluxFactoryModel(fx.PDE):
+    """
+    Correctly designed model.
+    Uses a factory pattern to instantiate structurally identical but physically 
+    isolated AST nodes, safely preventing boundary leakage.
+    """
+    x = fx.Domain(bounds=(0, 1), resolution=5, name="x")
+    c1 = fx.State(domain=x, name="c1")
+    c2 = fx.State(domain=x, name="c2")
+
+    def math(self):
+        # CORRECT PATTERN: 
+        # A factory function generates fresh AST nodes for each usage.
+        def get_complex_flux():
+            return -1.0 * fx.grad(self.c1) + 0.5 * fx.grad(self.c2)
+
+        flux_for_c1 = get_complex_flux()
+        flux_for_c2 = get_complex_flux()
+
+        return {
+            "equations": {
+                self.c1: fx.dt(self.c1) == -fx.div(flux_for_c1),
+                self.c2: fx.dt(self.c2) == -fx.div(flux_for_c2)
+            },
+            "boundaries": {
+                # Safely applies ONLY to the c1 equation without leaking into c2
+                flux_for_c1: {"left": 100.0, "right": 0.0},
+                flux_for_c2: {"left": 0.0, "right": 0.0}
+            },
+            "initial_conditions": {self.c1: 0.0, self.c2: 0.0}
+        }
+
+# ==============================================================================
+# Tests for Mathematical Leakage
+# ==============================================================================
+
+def test_failure_poke_mathematical_leakage_rejection():
+    """
+    FAILURE POKE: Mathematical Leakage via Shared AST Nodes.
+    If a user shares a single flux node across multiple equations and applies 
+    a boundary condition to it, the compiler must explicitly reject it.
+    """
+    with pytest.raises(ValueError, match="Mathematical Leakage Detected"):
+        # The engine should crash during the verify_manifold() pass
+        Engine(SharedFluxLeakageModel(), mock_execution=True)
+
+
+def test_factory_pattern_prevents_leakage():
+    """
+    SUCCESS POKE: Factory Pattern Isolation.
+    Using a helper function to return fresh AST nodes allows boundaries to be 
+    safely and distinctly applied without cross-contamination.
+    """
+    try:
+        # The engine should successfully compile the isolated nodes
+        Engine(IsolatedFluxFactoryModel(), mock_execution=True)
+    except Exception as e:
+        pytest.fail(f"Correct factory pattern unexpectedly failed compilation: {e}")
+
+
+if __name__ == "__main__":
+    pytest.main(["-v", "-s", __file__])

@@ -118,7 +118,19 @@ def _verify_boundaries(ast_payload: Dict[str, Any]) -> None:
         elif bc_data["type"] == "neumann":
             node_id = bc_data.get("node_id")
             if node_id in bc_id_to_states:
-                bound_states.update(bc_id_to_states[node_id])
+                affected_states = bc_id_to_states[node_id]
+                
+                # PREVENT MATHEMATICAL LEAKAGE
+                if len(affected_states) > 1:
+                    states_str = ", ".join(sorted(affected_states))
+                    raise ValueError(
+                        f"Mathematical Leakage Detected: A single Neumann boundary condition is inadvertently "
+                        f"shared across multiple equations ({states_str}). "
+                        f"This occurs when you share the same AST flux object. "
+                        f"Use a factory function to instantiate isolated nodes."
+                    )
+                    
+                bound_states.update(affected_states)
 
     # 3. Manifold Closure Check
     # We do not strictly enforce `spatial_states == bound_states` because 0D states 
