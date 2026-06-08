@@ -299,11 +299,13 @@ class Engine:
             step_name = type(step).__name__
             inputs = self._map_protocol_inputs(step, step_name)
             
-            dt_step = 1.0
             t_max = getattr(step, "time", float('inf'))
             t_elapsed = 0.0
             
             while t_elapsed < t_max:
+                # FIX: Clamp the evaluation step to exactly the remaining time limit
+                dt_step = min(1.0, t_max - t_elapsed)
+                
                 session.checkpoint()
                 session.step(dt_step, inputs=inputs)
                 
