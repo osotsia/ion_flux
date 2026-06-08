@@ -216,15 +216,20 @@ class ThermalDFN(fx.PDE):
         
         ce_diff_term = (2.0 * R_const * T_safe / F) * (1.0 - t_plus) * TDF * (fx.grad(ce_safe) / ce_safe)
         
-        # 1. Evaluate electrolyte current fluxes first
-        flux_phie_n = -ke_eff_n * fx.grad(self.phi_e) + ke_eff_n * ce_diff_term
-        flux_phie_s = -ke_eff_s * fx.grad(self.phi_e) + ke_eff_s * ce_diff_term
-        flux_phie_p = -ke_eff_p * fx.grad(self.phi_e) + ke_eff_p * ce_diff_term
+        # 1. Helper to isolate AST nodes and prevent mathematical leakage
+        def get_flux_phie(ke_eff):
+            return -ke_eff * fx.grad(self.phi_e) + ke_eff * ce_diff_term
 
-        # 2. Strict conservative Li+ fluxes incorporating migration (t_plus * i_e / F)
-        flux_ce_n = -De_eff_n * fx.grad(self.c_e) + (t_plus * flux_phie_n) / F
-        flux_ce_s = -De_eff_s * fx.grad(self.c_e) + (t_plus * flux_phie_s) / F
-        flux_ce_p = -De_eff_p * fx.grad(self.c_e) + (t_plus * flux_phie_p) / F
+        # 2. Instances bound to phi_e (Targeted safely by Neumann boundaries)
+        flux_phie_n = get_flux_phie(ke_eff_n)
+        flux_phie_s = get_flux_phie(ke_eff_s)
+        flux_phie_p = get_flux_phie(ke_eff_p)
+
+        # 3. Strict conservative Li+ fluxes incorporating migration (t_plus * i_e / F)
+        # Using fresh AST instances to isolate c_e boundaries from phi_e boundaries
+        flux_ce_n = -De_eff_n * fx.grad(self.c_e) + (t_plus * get_flux_phie(ke_eff_n)) / F
+        flux_ce_s = -De_eff_s * fx.grad(self.c_e) + (t_plus * get_flux_phie(ke_eff_s)) / F
+        flux_ce_p = -De_eff_p * fx.grad(self.c_e) + (t_plus * get_flux_phie(ke_eff_p)) / F
         
         i_den = self.i_app / A_elec
 
