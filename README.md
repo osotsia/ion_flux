@@ -111,7 +111,10 @@ class ModularSPM(fx.PDE):
                                           - (0.1 - 0.001 * self.anode.c_s.right)
             },
             "boundaries": {},
-            "initial_conditions": {self.V_cell: 4.1, self.i_app: 0.0}
+            "initial_conditions": {
+                self.V_cell: 4.1, 
+                self.i_app: 0.0
+            }
         }
         
         # Seamlessly merge all sub-graphs into one unified implicit solve
