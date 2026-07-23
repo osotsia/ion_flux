@@ -51,7 +51,6 @@ ion_flux/
 │
 ├── python/                         
 │   └── ion_flux/
-│       ├── __init__.py             
 │       ├── cli.py                  # Automates hermetic fetching/building of LLVM 19 + Enzyme.
 │       ├── metrics.py              # Bridges Python loss functions to Rust's VJP adjoint solvers.
 │       ├── dsl/                    # --- FRONTEND ---
@@ -60,6 +59,8 @@ ion_flux/
 │       │   ├── operators.py        # Topology-agnostic math operators (grad, div, dt).
 │       │   ├── pde.py              # Handles hierarchical submodel merging and AST namespace isolation.
 │       │   └── spatial.py          # Domain topologies and moving-mesh bindings.
+│       ├── protocols/              # --- STATE MACHINES ---
+│       │   └── profiles.py         # Declarative sequence protocols (CC, CV, Rest) mapped to the Native Orchestrator.
 │       ├── runtime/                # --- PYTHON EXECUTION ORCHESTRATION ---
 │       │   ├── engine.py           # 1. Facade. Unifies User API (solve, solve_batch, load, export).
 │       │   ├── manifest.py         # 2. Immutable Data Target. Holds MemoryLayout & Topological Constants.

@@ -382,16 +382,16 @@ class IsolatedFluxFactoryModel(fx.PDE):
         }
 
 # ==============================================================================
-# Tests for Mathematical Leakage
+# Tests for Math Leaks
 # ==============================================================================
 
 def test_failure_poke_mathematical_leakage_rejection():
     """
-    FAILURE POKE: Mathematical Leakage via Shared AST Nodes.
+    FAILURE POKE: Math Leak via Shared AST Nodes.
     If a user shares a single flux node across multiple equations and applies 
     a boundary condition to it, the compiler must explicitly reject it.
     """
-    with pytest.raises(ValueError, match="Mathematical Leakage Detected"):
+    with pytest.raises(ValueError, match="Math Leak Detected"):
         # The engine should crash during the verify_manifold() pass
         Engine(SharedFluxLeakageModel(), mock_execution=True)
 

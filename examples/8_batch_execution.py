@@ -19,18 +19,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'models'))
 
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
-from Chen2020_DFN import Chen2020_DFN
+from Chen2020_DFN import Chen2020_DFN # type: ignore
 
-def run_batch_demo():
-    print("Compiling Chen2020_DFN to Native C++ Binary...")
-    # Bypassing Python overhead; translating AST -> C++ -> LLVM -> Rust FFI
-    engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial")
 
-    # Define a test matrix of varying C-rates
-    # 1C for the LG M50 cell is roughly 5.0A
-    c_rates = [0.5, 1.0, 1.5, 2.0]
-    base_D_s_n = 3.3e-14
-    
+def prepare_batch_payloads(engine: fx.Engine, c_rates: list, base_D_s_n: float):
+    """Generates the parameter and protocol payloads for each battery in the batch."""
     param_payloads = []
     protocol_payloads = []
 
@@ -48,18 +41,11 @@ def run_batch_demo():
         ])
         protocol_payloads.append(prot)
 
-    print(f"\nExecuting {len(param_payloads)} independent models concurrently...")
-    print("Dropping into Rust Rayon thread-pool (Bypassing Python GIL).")
-    
-    # --- THE BATCH DISPATCH ---
-    # max_workers dictates the size of the native thread pool.
-    results = engine.solve_batch(
-        parameters=param_payloads,
-        protocols=protocol_payloads,
-        max_workers=os.cpu_count(),
-        show_progress=True
-    )
+    return param_payloads, protocol_payloads
 
+
+def visualize_results(c_rates: list, results: list):
+    """Renders the diagnostic dashboards for the batch results."""
     print("\nBatch execution complete. Generating plots...")
 
     # =========================================================================
@@ -100,5 +86,31 @@ def run_batch_demo():
     plt.tight_layout()
     plt.show()
 
+
+def main():
+    print("Compiling Chen2020_DFN to Native C++ Binary...")
+    # Bypassing Python overhead; translating AST -> C++ -> LLVM -> Rust FFI
+    engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial")
+
+    # Define a test matrix of varying C-rates
+    # 1C for the LG M50 cell is roughly 5.0A
+    c_rates = [0.5, 1.0, 1.5, 2.0]
+    base_D_s_n = 3.3e-14
+    
+    param_payloads, protocol_payloads = prepare_batch_payloads(engine, c_rates, base_D_s_n)
+    
+    print(f"\nExecuting {len(param_payloads)} independent models concurrently...")
+    print("Dropping into Rust Rayon thread-pool (Bypassing Python GIL).")
+    
+    results = engine.solve_batch(
+        parameters=param_payloads,
+        protocols=protocol_payloads,
+        max_workers=os.cpu_count(),
+        show_progress=True
+    )
+    
+    visualize_results(c_rates, results)
+
+
 if __name__ == "__main__":
-    run_batch_demo()
+    main()

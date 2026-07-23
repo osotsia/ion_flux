@@ -28,43 +28,28 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'models'))
 
 import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
-from Chen2020_DFN import Chen2020_DFN
+from Chen2020_DFN import Chen2020_DFN # type: ignore
 
-def run_gitt_inversion_demo():
-    print("Initializing ion_flux DFN Engine...")
-    
-    # 1. Compile the DFN to a native binary (bypassing Python overhead)
-    engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial", solver_backend="native")
-    
-    # Define a standard GITT protocol: 10 min 1C discharge, followed by 1 hour rest.
-    t_pulse = 600
-    t_rest = 3600
-    protocol = Sequence([
-        CC(rate=5.0, time=t_pulse),  # ~1C for the 5Ah M50 cell
-        Rest(time=t_rest)
-    ])
 
-    # ==============================================================================
-    # STEP 1: Generate Synthetic "Ground Truth" Experimental Data
-    # ==============================================================================
+def generate_ground_truth(engine: fx.Engine, protocol: Sequence, true_params: dict):
     print("\n[Step 1] Generating Synthetic GITT Lab Data...")
-    true_D_s_n = 3.3e-14  # Ground truth anode diffusion coefficient
     
     res_true = engine.solve(
         protocol=protocol, 
-        parameters={"D_s_n": true_D_s_n}, 
+        parameters=true_params, 
         show_progress=False
     )
     v_target = res_true["V_cell"].data
     t_target = res_true["Time [s]"].data
 
-    # ==============================================================================
-    # STEP 2: The Exact-Gradient Optimization Loop
-    # ==============================================================================
+    return t_target, v_target
+
+
+def execute_parameter_inversion(engine: fx.Engine, protocol: Sequence, v_target: np.ndarray, init_params: dict, true_params: dict):
+
     print("\n[Step 2] Running L-BFGS-B Optimizer with Exact Analytical Adjoints...")
     
-    # We start with a deliberately poor guess (almost an order of magnitude off)
-    init_D_s_n = 0.5e-14  
+    init_D_s_n = init_params["D_s_n"]
     
     # Normalization scale to keep the optimizer mathematically stable
     SCALE_D = 1e-14
@@ -117,16 +102,18 @@ def run_gitt_inversion_demo():
     elapsed = time.perf_counter() - start_time
     final_D_s_n = res_opt.x[0] * SCALE_D
 
-    # ==============================================================================
-    # STEP 3: Results & Visualization
-    # ==============================================================================
     print(f"\n✅ Optimization converged in {elapsed:.2f} seconds ({res_opt.nit} iterations).")
     print(f"   Initial Guess : {init_D_s_n:.3e}")
     print(f"   Recovered     : {final_D_s_n:.3e}")
-    print(f"   Ground Truth  : {true_D_s_n:.3e}")
+    print(f"   Ground Truth  : {true_params['D_s_n']:.3e}")
 
-    res_init = engine.solve(protocol=protocol, parameters={"D_s_n": init_D_s_n}, show_progress=False)
-    res_final = engine.solve(protocol=protocol, parameters={"D_s_n": final_D_s_n}, show_progress=False)
+    return {"D_s_n": final_D_s_n}
+
+
+def visualize_results(t_target: np.ndarray, v_target: np.ndarray, res_init, res_final, init_params: dict, final_params: dict, t_pulse: float):
+
+    init_D_s_n = init_params["D_s_n"]
+    final_D_s_n = final_params["D_s_n"]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
     fig.suptitle("GITT Parameter Inversion via Analytical Adjoints (Chen2020 DFN)", fontsize=14, fontweight="bold")
@@ -160,5 +147,35 @@ def run_gitt_inversion_demo():
     plt.tight_layout()
     plt.show()
 
+
+def main():
+    print("Initializing ion_flux DFN Engine...")
+    
+    # 1. Compile the DFN to a native binary (bypassing Python overhead)
+    engine = fx.Engine(model=Chen2020_DFN(), target="cpu:serial", solver_backend="native")
+    
+    # Define a standard GITT protocol: 10 min 1C discharge, followed by 1 hour rest.
+    t_pulse = 600
+    t_rest = 3600
+    protocol = Sequence([
+        CC(rate=5.0, time=t_pulse),  # ~1C for the 5Ah M50 cell
+        Rest(time=t_rest)
+    ])
+
+    true_params = {"D_s_n": 3.3e-14} # Ground truth anode diffusion coefficient
+    # We start with a deliberately poor guess (almost an order of magnitude off)
+    init_params = {"D_s_n": 0.5e-14}  
+
+    t_target, v_target = generate_ground_truth(engine, protocol, true_params)
+    
+    final_params = execute_parameter_inversion(engine, protocol, v_target, init_params, true_params)
+
+    # Generate final trajectories for visualization
+    res_init = engine.solve(protocol=protocol, parameters=init_params, show_progress=False)
+    res_final = engine.solve(protocol=protocol, parameters=final_params, show_progress=False)
+
+    visualize_results(t_target, v_target, res_init, res_final, init_params, final_params, t_pulse)
+
+
 if __name__ == "__main__":
-    run_gitt_inversion_demo()
+    main()

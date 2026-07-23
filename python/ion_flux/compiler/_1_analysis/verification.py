@@ -120,11 +120,11 @@ def _verify_boundaries(ast_payload: Dict[str, Any]) -> None:
             if node_id in bc_id_to_states:
                 affected_states = bc_id_to_states[node_id]
                 
-                # PREVENT MATHEMATICAL LEAKAGE
+                # PREVENT MATH LEAKS
                 if len(affected_states) > 1:
                     states_str = ", ".join(sorted(affected_states))
                     raise ValueError(
-                        f"Mathematical Leakage Detected: A single Neumann boundary condition is inadvertently "
+                        f"Math Leak Detected: A single Neumann boundary condition is inadvertently "
                         f"shared across multiple equations ({states_str}). "
                         f"This occurs when you share the same AST flux object. "
                         f"Use a factory function to instantiate isolated nodes."

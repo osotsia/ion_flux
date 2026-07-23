@@ -216,7 +216,7 @@ class ThermalDFN(fx.PDE):
         
         ce_diff_term = (2.0 * R_const * T_safe / F) * (1.0 - t_plus) * TDF * (fx.grad(ce_safe) / ce_safe)
         
-        # 1. Helper to isolate AST nodes and prevent mathematical leakage
+        # 1. Helper to isolate AST nodes and prevent math leak
         def get_flux_phie(ke_eff):
             return -ke_eff * fx.grad(self.phi_e) + ke_eff * ce_diff_term
 

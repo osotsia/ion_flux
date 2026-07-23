@@ -1,4 +1,3 @@
-# --- File: python/ion_flux/compiler/coloring.py ---
 from typing import Set, Tuple, List, Dict
 from collections import defaultdict
 

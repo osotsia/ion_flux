@@ -30,11 +30,11 @@ class Fe_Redox_CV_Differentiable(fx.PDE):
     """
     
     # --- 1. Topology ---
-    # The diffusion layer is < 5 um at 200 mV/s. We pack 150 nodes into the first 
-    # 15 um to prevent numerical confinement of Fe2+, and use 50 nodes for the bulk.
+    # The diffusion layer extends to ~60 um at 200 mV/s. 
+    # Envelop the entire active gradient in the dense mesh to prevent FVM truncation error.
     x = fx.Domain(bounds=(0, 2e-3), name="x")
-    x_dense = x.region(bounds=(0, 15e-6), resolution=150, name="x_dense")
-    x_sparse = x.region(bounds=(15e-6, 2e-3), resolution=50, name="x_sparse")
+    x_dense = x.region(bounds=(0, 100e-6), resolution=150, name="x_dense")
+    x_sparse = x.region(bounds=(100e-6, 2e-3), resolution=50, name="x_sparse")
     
     # --- 2. States ---
     c_ox  = fx.State(domain=x, name="c_ox")
@@ -82,6 +82,12 @@ class Fe_Redox_CV_Differentiable(fx.PDE):
             fx.exp( self.beta  * f_RT * overpotential) * self.c_red.left
         )
         
+        # --- Nernstian Equilibrium Initial Condition ---
+        # Dynamically calculate the exact concentration of C_red required to force J_BV = 0.0 at t=0.
+        # This eliminates the non-equilibrium cold-start transient ("lip").
+        initial_eta = E_start - E_ref
+        c_red_eq = 4.85 * fx.exp(-(self.alpha + self.beta) * f_RT * initial_eta)
+        
         return {
             "equations": {
                 # 1 second per second. This is necessary to get E_app working above in that continuous formulation.
@@ -100,8 +106,8 @@ class Fe_Redox_CV_Differentiable(fx.PDE):
             "initial_conditions": {
                 self.time_s: 0.0,
                 self.c_ox:   4.85, 
-                self.c_red:  0.0,
-                self.I_CV_uA: -1e6 * F * Area * J_BV 
+                self.c_red:  c_red_eq,
+                self.I_CV_uA: 0.0
             }
         }
 
@@ -260,19 +266,30 @@ def visualize_results(plot_data: list, scan_rates_mV: list):
     axs[1, 0].axhline(0, color='k', lw=1.5, alpha=0.8)
     axs[1, 0].legend(loc='upper right')
 
-    # Panel [1, 1]: Boundary Layer Depletion Zone at Peak Current (200 mV/s)
+    # Panel [1, 1]: Boundary Layer Depletion Zone at Peak Current (0.38V)
     res_obj = rep["res_opt_obj"]
+    engine = res_obj.engine
     peak_idx = np.argmin(res_obj["I_CV_uA"].data)
     
-    # Extract the concentration profiles for the x_dense region (first 150 nodes: 0 to 15um)
-    x_um = np.linspace(0.05, 14.95, 150) 
-    c_ox = res_obj["c_ox"].data[peak_idx, :150]
-    c_red = res_obj["c_red"].data[peak_idx, :150]
+    # 1. Extract the exact normalized node centers from the engine's memory cache
+    # and scale them by the physical domain length (2e-3 meters = 2000 um)
+    n_nodes = 200
+    centers_offset = engine.layout.mesh_offsets["x"]["w_centers"]
+    x_exact_um = np.array([
+        engine.layout.mesh_cache[centers_offset + i] for i in range(n_nodes)
+    ]) * 2000.0
     
-    axs[1, 1].plot(x_um, c_ox, 'b-', lw=2, label=r"Reactant ($Fe^{3+}$)")
-    axs[1, 1].plot(x_um, c_red, 'r-', lw=2, label=r"Product ($Fe^{2+}$)")
+    # 2. Extract the full concentration profiles
+    c_ox = res_obj["c_ox"].data[peak_idx, :]
+    c_red = res_obj["c_red"].data[peak_idx, :]
+    
+    # 3. Plot using the exact mesh coordinates
+    axs[1, 1].plot(x_exact_um, c_ox, 'b-', lw=2, label=r"Reactant ($Fe^{3+}$)")
+    axs[1, 1].plot(x_exact_um, c_red, 'r-', lw=2, label=r"Product ($Fe^{2+}$)")
+    
     axs[1, 1].axvline(0, color='k', lw=2, label='Electrode Surface')
     axs[1, 1].legend(loc='center right')
+    axs[1, 1].set_xlim(-2, 60)
     
     axs[1, 1].text(0.05, 0.08, 
                    "Tafel approximations fail here\nbecause the reactant is\nseverely depleted at the surface.", 

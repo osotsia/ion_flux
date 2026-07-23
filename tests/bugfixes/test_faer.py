@@ -1,4 +1,3 @@
-# --- File: tests/bugfixes/test_unfixed_zero_pivot_panic.py ---
 """
 Compiler Bug Oracle: Permutation-Invariant Zero Pivot Panic
 

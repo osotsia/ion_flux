@@ -226,3 +226,13 @@ Here is the exact lifecycle of your physics:
    * Python loads the compiled binary via FFI into a memory-safe Rust orchestrator. This completely bypasses the Python Global Interpreter Lock (GIL) to unlock massive task parallelism.
    * To solve stiff battery dynamics efficiently, Rust feeds Enzyme's exact Jacobians into adaptive BDF integrators backed by Sparse LU or Matrix-Free GMRES linear solvers.
    * The engine also interfaces with the LLNL SUNDIALS suite (IDA) as an alternative solver.
+
+
+## 🧪 Testing & Verification
+
+The framework is verified through an automated CI pipeline running across macOS and Linux (Python 3.10–3.14). The testing architecture relies on the following methodologies:
+
+*   **Literature Validation:** We reproduce discharge curves, temperature profiles, etc from benchmark battery literature (e.g., the LG M50 parameterizations by Chen *et al.* 2020 and O'Regan *et al.* 2022, and asymptotic reductions by Brosa Planella *et al.* 2021).
+*   **Oracle Validation:** The LLNL SUNDIALS suite (IDA) is compiled and embedded as a reference C-ABI oracle. The custom Rust implicit solver (BDF/Newton-Raphson/Sparse LU) is checked against SUNDIALS.
+*   **Method of Manufactured Solutions (MMS):** Spatial FVM discretization, topological mapping, and dynamic Arbitrary Lagrangian-Eulerian (ALE) kinematics are verified on PDEs with known analytical solutions.
+*   **Adjoint Exactness:** Compile-time Enzyme Automatic Differentiation sensitivities (VJPs) are tested against central finite-difference perturbations.
