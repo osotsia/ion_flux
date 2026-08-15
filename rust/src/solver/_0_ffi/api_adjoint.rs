@@ -7,13 +7,15 @@ use crate::solver::_4_linear::gmres::solve_gmres;
 use crate::solver::shared::diagnostics::Diagnostics;
 
 #[pyfunction]
+#[pyo3(signature = (lib_path, y_traj, ydot_traj, t_eval, id_arr, p_traj, m_list, dl_dy, bandwidth, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, event_trigger_idx=-1))]
 pub fn discrete_adjoint_native<'py>(
     py: Python<'py>, lib_path: String, 
     y_traj: PyReadonlyArray2<f64>, ydot_traj: PyReadonlyArray2<f64>,
     t_eval: PyReadonlyArray1<f64>, id_arr: PyReadonlyArray1<f64>, 
     p_traj: PyReadonlyArray2<f64>, m_list: PyReadonlyArray1<f64>, 
     dl_dy: PyReadonlyArray2<f64>, bandwidth: isize,
-    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>
+    cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+    event_trigger_idx: isize
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     
     let y_arr = y_traj.as_array();
@@ -52,6 +54,15 @@ pub fn discrete_adjoint_native<'py>(
         
         let mut rhs = vec![0.0; n];
         for i in 0..n { rhs[i] = -dl_dy_step[i] + prev_dydot_vjp[i] * prev_c_j; }
+        
+        // Inject Exact Continuous Adjoint Terminal Condition for Boundary Event Sensitivities
+        if event_trigger_idx >= 0 && step == n_steps - 1 {
+            let idx = event_trigger_idx as usize;
+            let mut ydot_val = ydot[idx];
+            if ydot_val.abs() < 1e-12 { ydot_val = 1e-12 * ydot_val.signum().max(1.0); }
+            
+            rhs[idx] += 1.0 / ydot_val;
+        }
         
         if bandwidth == -1 {
             let y_ptr = y.as_ptr(); let ydot_ptr = ydot.as_ptr(); let p_ptr = p_list.as_ptr(); let m_ptr = m_slice.as_ptr();

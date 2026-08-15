@@ -126,10 +126,16 @@ class Loss:
         bw = getattr(self._engine, "jacobian_bandwidth", 0)
         c_seeds, c_ptrs, c_rows, c_cols, c_dense = self._engine._cpr_cache
         
+        event_trigger_idx = -1
+        if "_event_trigger_state" in self._trajectory:
+            trigger_state = self._trajectory["_event_trigger_state"]
+            event_trigger_idx = self._engine.layout.state_offsets[trigger_state][0]
+        
         p_grad = discrete_adjoint_native(
             self._engine.runtime.lib_path, y_traj, ydot_traj, 
             t_eval, id_arr, p_traj, m_list, dl_dy, bw,
-            c_seeds, c_ptrs, c_rows, c_cols, c_dense
+            c_seeds, c_ptrs, c_rows, c_cols, c_dense,
+            event_trigger_idx
         )
         
         for p_name in req_grad:
@@ -138,6 +144,42 @@ class Loss:
                 self.grads[p_name] = float(p_grad[offset])
                 
         return self.grads
+
+
+def runtime_to_event(trajectory_result: Any, trigger_state: str) -> Loss:
+    """
+    Computes exact gradients for the RUNTIME required to hit a specific event target.
+    (e.g., "How many extra seconds of discharge do I get if I increase the diffusion parameter?")
+    
+    Intuition:
+    If a parameter tweak increases the final cell voltage by 1 mV, and the cell voltage 
+    is currently plunging at a speed of 10 mV/second, then that parameter buys us an 
+    extra 0.1 seconds of runtime. 
+    Math: Delta Time = - (Delta Voltage) / (Speed of Voltage Drop)
+    
+    This function instructs the Native Rust solver to automatically calculate 
+    (1.0 / ydot) at the exact final time-step, and uses it as the "seed" to backpropagate 
+    through the entire simulation trajectory via Enzyme AD.
+    """
+    if hasattr(trajectory_result, "trajectory"):
+        engine = trajectory_result.engine
+        trajectory = trajectory_result.trajectory
+        parameters = trajectory_result.parameters
+    else:
+        raise TypeError("Expected a SimulationResult object.")
+        
+    if not trajectory:
+        raise ValueError("Trajectory result missing history. Ensure `requires_grad` was enabled during solve.")
+        
+    val = float(trajectory["Time [s]"][-1])
+    
+    # Flags the Rust `api_adjoint.rs` to apply the terminal condition: lambda(T) = 1.0 / ydot
+    trajectory["_event_trigger_state"] = trigger_state
+    dl_dy_mapped = np.zeros_like(trajectory["_y_raw"])
+    
+    return Loss(val, engine=engine, trajectory=trajectory, dl_dy_mapped=dl_dy_mapped, parameters=parameters)
+
+
 
 
 def rmse(predicted: Union[np.ndarray, Any], target: np.ndarray, engine: Optional[Any] = None, state_name: str = "Voltage") -> Loss:
