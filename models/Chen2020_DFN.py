@@ -51,8 +51,11 @@ class Chen2020_DFN(fx.PDE):
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
-    # Tunable parameter (Table IX) to match discharge final voltage curves
+    # Tunable parameters
     D_s_n = fx.Parameter(default=3.3e-14, name="D_s_n")
+    D_s_p = fx.Parameter(default=4.0e-15, name="D_s_p") # Cathode solid diffusivity [m^2/s]
+    k_n = fx.Parameter(default=6.48e-7, name="k_n") # Reaction rate constants [A/m^2 (m^3/mol)^1.5]
+    k_p = fx.Parameter(default=3.42e-6, name="k_p")
 
     # Analytical Telemetry Trackers for Volumetric Current Densities (J_k) [A/m^3]
     J_n_obs = fx.Observable(domain=x_n, name="J_n_obs")
@@ -82,9 +85,7 @@ class Chen2020_DFN(fx.PDE):
         
         # Transport & Kinetic Constants
         sig_n, sig_p = 215.0, 0.18    # Electronic conductivities [S/m]
-        D_s_p = 4.0e-15               # Cathode solid diffusivity [m^2/s]
         t_plus = 0.2594               # Transference number
-        k_n, k_p = 6.48e-7, 3.42e-6   # Reaction rate constants [A/m^2 (m^3/mol)^1.5]
 
         # =====================================================================
         # 4. Helper AST Functions
@@ -128,8 +129,8 @@ class Chen2020_DFN(fx.PDE):
                + 17.5842 * tanh_ast(15.9308 * (x_p - 0.3120)))
 
         # Exchange Current Densities [A/m^2] (Table I: Reaction Kinetics)
-        j0_n = k_n * (ce_safe * c_surf_n * (c_max_n - c_surf_n))**0.5
-        j0_p = k_p * (ce_safe * c_surf_p * (c_max_p - c_surf_p))**0.5
+        j0_n = self.k_n * (ce_safe * c_surf_n * (c_max_n - c_surf_n))**0.5
+        j0_p = self.k_p * (ce_safe * c_surf_p * (c_max_p - c_surf_p))**0.5
         
         # Local Overpotentials [V] (Table I)
         eta_n = self.phi_s_n - self.phi_e - U_n
@@ -145,7 +146,7 @@ class Chen2020_DFN(fx.PDE):
         # =====================================================================
         # Solid Fickian Diffusion Fluxes [mol/m^2 s] (Table I: Mass Conservation)
         N_s_n = -self.D_s_n * fx.grad(self.c_s_n, axis=self.r_n)
-        N_s_p = -D_s_p * fx.grad(self.c_s_p, axis=self.r_p)
+        N_s_p = -self.D_s_p * fx.grad(self.c_s_p, axis=self.r_p)
         
         # Solid Ohmic Current Fluxes [A/m^2] (Table I: Charge Conservation)
         i_s_n = -sig_n * fx.grad(self.phi_s_n)
