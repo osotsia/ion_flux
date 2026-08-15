@@ -29,6 +29,7 @@ sudo apt install cmake ninja-build
 **2. Install and Configure `ion_flux`**
 ```bash
 # Create a virtual environment (recommended)
+# Requires python 3.10–3.14
 mkdir my_battery_project && cd my_battery_project
 python -m venv .venv && source .venv/bin/activate
 
@@ -53,6 +54,9 @@ python models/Chen2020_DFN.py
 
 # Optimize the same model to recover parameters
 python examples/7_Gitt_inversion_demo.py
+
+# Run sensitivity analyses on the same model
+python examples/9_sensitivity_analysis.py
 ```
 
 ---

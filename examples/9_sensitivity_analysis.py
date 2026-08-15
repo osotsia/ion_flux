@@ -26,7 +26,7 @@ from ion_flux.protocols import Sequence, CC
 
 CONFIG = {
     "c_rates": [0.5, 1.0, 2.0], # 3x3 Grid Multipliers
-    "v_cutoff": 3.0,            # End-of-Discharge Voltage
+    "v_cutoff": 2.5,            # End-of-Discharge Voltage
     "sobol_n": 64,              # Power of 2 (Total evaluations = N * (D + 2))
     "variance": 0.20,           # +/- 20% uniform variance for global sweep
     "target": "cpu:serial"      # JIT Compilation Target
