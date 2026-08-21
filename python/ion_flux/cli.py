@@ -9,6 +9,7 @@ import stat
 import re
 import time
 import threading
+import urllib.error
 from typing import Tuple
 
 # =============================================================================
@@ -141,8 +142,62 @@ class ToolchainInstaller:
         self._create_compiler_wrapper()
         self._prune_sysroot()
         self._scrub_symlinks()
+        
+        print("Verifying toolchain integrity...")
+        self._verify_toolchain()
 
-        print(f"\n✅ Successfully installed hermetic C++ toolchain to {self.target_dir}")
+        print(f"\n✅ Successfully installed and verified hermetic C++ toolchain to {self.target_dir}")
+
+    def _verify_toolchain(self) -> None:
+        """
+        Compiles a trivial C++ file utilizing the Enzyme plugin to ensure the 
+        toolchain is executable and the dynamic linker can resolve all dependencies.
+        """
+        import tempfile
+        import glob
+        
+        compiler_path = os.path.join(self.target_dir, "bin", "clang++")
+        
+        ext = ".dylib" if sys.platform == "darwin" else ".so"
+        plugin_matches = glob.glob(os.path.join(self.target_dir, "lib", f"ClangEnzyme*{ext}"))
+        
+        if not plugin_matches:
+            print("\nVerification Error: Could not locate the installed Enzyme plugin.")
+            sys.exit(1)
+            
+        plugin_path = plugin_matches[0]
+        
+        test_cpp = """
+        extern "C" {
+            double test_function(double x) { return x * 2.0; }
+        }
+        """
+        
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_path = os.path.join(tmp_dir, "test.cpp")
+            out_path = os.path.join(tmp_dir, f"test_out{ext}")
+            
+            with open(src_path, "w") as f:
+                f.write(test_cpp)
+                
+            cmd = [
+                compiler_path, 
+                f"-fplugin={plugin_path}", 
+                "-shared", 
+                "-fPIC",
+                "-o", out_path, 
+                src_path
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as e:
+                print("\n\nToolchain Verification Failed!")
+                print("The compiler was installed but cannot execute properly on this host.")
+                print("--- Diagnostics ---")
+                print(e.stderr)
+                print("-------------------")
+                sys.exit(1)
 
     # --- Verification & Setup ---
 
@@ -204,7 +259,7 @@ class ToolchainInstaller:
                 
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (ion_flux installer)'})
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=15) as response:
                 total_size = int(response.info().get("Content-Length", -1))
                 
                 with open(dest_path, 'wb') as out_file:
@@ -220,6 +275,9 @@ class ToolchainInstaller:
                         reporthook(downloaded // 16384, 16384, total_size)
                         
             pb.finish("Complete")
+        except urllib.error.URLError as e:
+            print(f"\nNetwork error downloading {bar_name}: {e}")
+            sys.exit(1)
         except Exception as e:
             print(f"\nError downloading {bar_name}: {e}")
             sys.exit(1)
@@ -287,6 +345,7 @@ class ToolchainInstaller:
         """
         Executes the Ninja build while intercepting stdout line-by-line to drive the progress bar.
         Extracts step fractions (e.g., [42/96]) and truncates the active task description.
+        Tracks non-matching stdout/stderr to dump upon compilation failure.
         """
         pb = ProgressBar("Comp")
         ninja_pattern = re.compile(r"^\[\s*(\d+)/\s*(\d+)\]\s*(.*)")
@@ -298,6 +357,8 @@ class ToolchainInstaller:
             text=True,
             bufsize=1 # Request line buffering
         )
+        
+        error_buffer = []
         
         for line in iter(process.stdout.readline, ''):
             match = ninja_pattern.search(line)
@@ -313,11 +374,21 @@ class ToolchainInstaller:
                 # Force draw on the last item to guarantee 100% rendering before finish()
                 force = (current == total)
                 pb.update(pct, f"{current}/{total} | {display_task}", force=force)
+            else:
+                line_stripped = line.strip()
+                if line_stripped:
+                    error_buffer.append(line_stripped)
+                    if len(error_buffer) > 50:
+                        error_buffer.pop(0)
                 
         process.wait()
         
         if process.returncode != 0:
-            print("\nEnzyme Compilation failed!")
+            print("\n\nEnzyme Compilation failed!")
+            print("--- Compiler Output (Last 50 lines) ---")
+            for err_line in error_buffer:
+                print(err_line)
+            print("---------------------------------------")
             sys.exit(1)
             
         pb.finish("Compiled")
@@ -326,11 +397,17 @@ class ToolchainInstaller:
 
     def _install_plugin_binaries(self) -> None:
         """Hunts down the compiled shared object and relocates it to our lib bin."""
+        copied_count = 0
         for root, dirs, files in os.walk(self.enzyme_build_dir):
             for file in files:
                 if file.startswith("ClangEnzyme") and (file.endswith(".so") or file.endswith(".dylib")):
                     shutil.copy(os.path.join(root, file), os.path.join(self.target_dir, "lib", file))
+                    copied_count += 1
         
+        if copied_count == 0:
+            print("\nError: Compilation succeeded but the ClangEnzyme plugin binary could not be found.")
+            sys.exit(1)
+            
         shutil.rmtree(self.enzyme_src_dir)
 
     def _create_compiler_wrapper(self) -> None:
@@ -341,24 +418,28 @@ class ToolchainInstaller:
         upon every invocation, ensuring the hermetic LLVM can always find the host's Apple headers.
         """
         wrapper_path = os.path.join(self.target_dir, "bin", "clang++")
-        with open(wrapper_path, "w") as f:
-            f.write("#!/bin/bash\n")
-            f.write('DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"\n')
-            f.write('OS=$(uname -s)\n')
-            f.write('if [ "$OS" = "Darwin" ]; then\n')
-            f.write('  SDK_PATH=$(xcrun --show-sdk-path 2>/dev/null || echo "")\n')
-            f.write('  if [ -n "$SDK_PATH" ]; then\n')
-            f.write('    SYSROOT_FLAG="-isysroot $SDK_PATH"\n')
-            f.write('  else\n')
-            f.write('    SYSROOT_FLAG=""\n')
-            f.write('  fi\n')
-            f.write('  exec "$DIR/../llvm/bin/clang++" $SYSROOT_FLAG "$@"\n')
-            f.write('else\n')
-            f.write('  exec "$DIR/../llvm/bin/clang++" "$@"\n')
-            f.write('fi\n')
-            
-        st = os.stat(wrapper_path)
-        os.chmod(wrapper_path, st.st_mode | stat.S_IEXEC)
+        try:
+            with open(wrapper_path, "w") as f:
+                f.write("#!/bin/bash\n")
+                f.write('DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"\n')
+                f.write('OS=$(uname -s)\n')
+                f.write('if [ "$OS" = "Darwin" ]; then\n')
+                f.write('  SDK_PATH=$(xcrun --show-sdk-path 2>/dev/null || echo "")\n')
+                f.write('  if [ -n "$SDK_PATH" ]; then\n')
+                f.write('    SYSROOT_FLAG="-isysroot $SDK_PATH"\n')
+                f.write('  else\n')
+                f.write('    SYSROOT_FLAG=""\n')
+                f.write('  fi\n')
+                f.write('  exec "$DIR/../llvm/bin/clang++" $SYSROOT_FLAG "$@"\n')
+                f.write('else\n')
+                f.write('  exec "$DIR/../llvm/bin/clang++" "$@"\n')
+                f.write('fi\n')
+                
+            st = os.stat(wrapper_path)
+            os.chmod(wrapper_path, st.st_mode | stat.S_IEXEC)
+        except OSError as e:
+            print(f"\nError creating compiler wrapper: {e}")
+            sys.exit(1)
 
     def _prune_sysroot(self) -> None:
         """Aggressively drops the disk footprint of LLVM by deleting unrelated build tools/docs."""
@@ -401,7 +482,11 @@ def main():
     
     if args.command == "install-toolchain":
         installer = ToolchainInstaller()
-        installer.install()
+        try:
+            installer.install()
+        except KeyboardInterrupt:
+            print("\n\nInstallation aborted by user.")
+            sys.exit(130)
 
 if __name__ == "__main__":
     main()
