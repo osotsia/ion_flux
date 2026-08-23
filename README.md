@@ -205,32 +205,29 @@ while session.time < 3600.0:
 ```
 
 ---
-
 ## 🧠 How it Works Under the Hood
 
-`ion_flux` discards the traditional "Symbolic-to-Numeric" approach (which builds massive, memory-heavy Python computation graphs) in favor of a **Compiler-and-Runtime** architecture. This pushes the heavy lifting down to the LLVM systems level.
+`ion_flux` replaces the traditional symbolic-to-numeric computation graph paradigm with a strictly staged Compiler-and-Runtime architecture. It works like a pipeline 1 -> 2 -> 3 -> 4
 
-Here is the exact lifecycle of your physics:
+**Stage 1: Intent Capture (Frontend)**
+*   **Elements:** Python DSL (`fx.PDE`, `fx.grad`, `fx.div`, etc).
+*   **How:** Pure Python operator overloading intercepts mathematical syntax and constructs an Abstract Syntax Tree (AST) in memory. No numerical execution occurs here.
+*   **Why:** Enforces the separation of physical intent from computational execution. Researchers define equations without hardcoding loop indices, memory strides, or geometric boilerplate.
 
-1. **Frontend (The DSL)**
-   * First, we capture your physics in a lightweight Abstract Syntax Tree (AST) using pure Python operator overloading, cleanly separating mathematical intent from execution.
-   * You don't have to write geometric boilerplate. Topology-agnostic operators (`fx.grad`, `fx.div`) dynamically adapt to 1D lines, spherical particles, or unstructured 3D graphs without altering the mathematical syntax.
+**Stage 2: Staged Lowering (Middle-end)**
+*   **Elements:** AST-to-C++ Compiler (`_1_analysis` through `_4_codegen`).
+*   **How:** A unidirectional visitor passes an immutable `SpatialContext` down the AST. It translates topology-agnostic operators into explicit Finite Volume Method (FVM) Intermediate Representation (MIR), unrolls syntactic sugar (e.g., piecewise domains), and stringifies the result to C++. Once the C++ source is generated, the Python AST is completely left out of the numerical execution loop.
+*   **Why:** Flattens hierarchical, multi-scale domains (like a micro-particle mesh nested inside a macro-electrode mesh) into strictly contiguous 1D C-arrays. This guarantees CPU cache locality and enables SIMD vectorization.
 
-2. **Middle-end (The Compiler)**
-   * The compiler automatically handles numerical discretization, lowering your continuous PDEs into a mass-conservative C++ residual (FVM).
-   * It flattens complex hierarchical domains (like micro-particles inside a macro-electrode) into contiguous 1D C-arrays. This maximizes CPU cache locality and enables fast SIMD vectorization.
-   * Once the C++ source is generated, we completely discard the Python AST. Because the numerical execution loop never touches Python objects, the engine avoids interpreter overhead and memory bloat.
+**Stage 3: Compile-Time Automatic Differentiation (Backend)**
+*   **Elements:** Clang/LLVM, Enzyme AD Plugin (`_5_toolchain`).
+*   **How:** Python invokes `clang++` to compile the generated C++ source into a `.so` shared library. The Enzyme plugin differentiates the highly optimized LLVM IR natively.
+*   **Why:** Bypasses the Out-Of-Memory (OOM) crashes typical of symbolic frameworks that build massive "tape" graphs in RAM. Generates exact analytical Vector-Jacobian Products (VJPs) with $O(1)$ memory overhead and enables 0ms cold-start serverless deployments.
 
-3. **Backend (The AD Compiler)**
-   * Instead of differentiating slow math in Python, we pass the C++ to `clang++` and let the Enzyme AD plugin differentiate the highly optimized machine code (LLVM IR) natively.
-   * This generates exact analytical gradients as compiled functions. Because we don't build massive "tape" computation graphs in RAM to track gradients, `ion_flux` avoids the Out-Of-Memory (OOM) crashes typical of standard machine learning frameworks.
-   * Everything compiles Ahead-of-Time (AOT) into a portable `.so` shared library, giving you instantaneous 0ms cold-starts for serverless cloud deployments.
-
-4. **Runtime (The Native Solver)**
-   * Python loads the compiled binary via FFI into a memory-safe Rust orchestrator. This completely bypasses the Python Global Interpreter Lock (GIL) to unlock massive task parallelism.
-   * To solve stiff battery dynamics efficiently, Rust feeds Enzyme's exact Jacobians into adaptive BDF integrators backed by Sparse LU or Matrix-Free GMRES linear solvers.
-   * The engine also interfaces with the LLNL SUNDIALS suite (IDA) as an alternative solver.
-
+**Stage 4: FFI Boundary & Native Execution (Runtime)**
+*   **Elements:** Rust Implicit Solver (`_0_ffi` -> `bdf` -> `newton` -> `sparse_lu`).
+*   **How:** Python packs the numerical data (initial conditions, parameters, and mesh geometry) into flat 1D C-ABI pointers and yields control. The Rust solver loads the compiled `.so` binary to fetch the exact residuals, Jacobians, and VJPs. It integrates stiff non-linear Differential-Algebraic Equations (DAEs) by passing a pre-allocated memory arena (`Workspace`) down the call stack, mutating state without reallocation. 
+*   **Why:** Completely bypasses the Python Global Interpreter Lock (GIL). Eliminating memory fragmentation and hot-loop allocations sustains microsecond-latency control loops for Hardware-in-the-Loop (HIL) testing, and unlocks massive task-parallel batching across all vCPUs via Rayon.
 
 ## 🧪 Testing & Verification
 
