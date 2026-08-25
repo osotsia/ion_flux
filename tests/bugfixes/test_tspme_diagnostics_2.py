@@ -11,7 +11,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -84,7 +83,7 @@ def test_depletion_rate_scaling():
     PROBE: Proves that the geometric calculation of `a_n` forces the particle 
     to deplete ~3x faster than the paper's tabulated value, causing the 1.6 Ah crash.
     """
-    engine = Engine(model=DepletionRateProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=DepletionRateProbe(), target="cpu", mock_execution=False)
 
     # 1.8 Ah at 1C (5 Amps) takes 1.8 Ah / 5 A = 0.36 hours.
     t_eval = np.linspace(0, 0.36 * 3600, 50)
@@ -136,7 +135,7 @@ def test_ast_1d_to_0d_broadcasting_behavior():
     when broadcasting 1D to 0D. This proves why the overpotential in the previous 
     script produced wild jumps, as it only tracked the boundary node of the electrolyte.
     """
-    engine = Engine(model=DimensionalBroadcastingProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=DimensionalBroadcastingProbe(), target="cpu", mock_execution=False)
     
     y0, ydot0, _, _, _ = engine._extract_metadata()
     res = engine.evaluate_residual(y0, ydot0)
@@ -207,7 +206,7 @@ def test_electrolyte_depletion_at_2c():
     discharge. If it does, it explains the catastrophic jump in reaction heating 
     and validates why SPMe models generally fail at high C-rates.
     """
-    engine = Engine(model=ElectrolyteDepletionProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ElectrolyteDepletionProbe(), target="cpu", mock_execution=False)
     
     # Run for 15 minutes (0.5 Ah at 2C, exactly where the jump occurred in the plot)
     t_eval = np.linspace(0, 900, 50)

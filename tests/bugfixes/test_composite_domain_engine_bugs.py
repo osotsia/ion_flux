@@ -12,7 +12,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -65,7 +64,7 @@ def test_piecewise_composite_loop_unrolling():
     PROBE: Proves that Piecewise blocks on a 2D state emit a 1D loop that 
     orphans the outer dimension.
     """
-    engine = Engine(model=PiecewiseCompositeOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=PiecewiseCompositeOracle(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()
@@ -118,7 +117,7 @@ def test_partial_integral_outer_index_dropping():
     PROBE: Proves that `fx.integral` over a 1D sub-domain drops the outer loop index, 
     evaluating the first slice repeatedly for every iteration.
     """
-    engine = Engine(model=PartialIntegrationOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=PartialIntegrationOracle(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y_arr, ydot_arr = np.zeros(N), np.zeros(N)

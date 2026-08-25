@@ -13,7 +13,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 from ion_flux.protocols import Sequence, CC, CV, Rest, CurrentProfile
 
 # ==============================================================================
@@ -104,8 +103,8 @@ def test_industry_physics_cccv_cross_validation():
     """
     model = ThermallyCoupledSPM()
     
-    engine_native = Engine(model=model, target="cpu", solver_backend="native")
-    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
+    engine_native = fx.Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = fx.Engine(model=model, target="cpu", solver_backend="sundials")
     
     # Aggressive CCCV sequence
     protocol = Sequence([
@@ -151,8 +150,8 @@ def test_extreme_algebraic_discontinuity_t0():
     without suffering from IDACalcIC initialization failures or divergent initial steps.
     """
     model = ThermallyCoupledSPM()
-    engine_native = Engine(model=model, target="cpu", solver_backend="native")
-    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
+    engine_native = fx.Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = fx.Engine(model=model, target="cpu", solver_backend="sundials")
     
     # 10 second instantaneous 100A pulse tests the solver's algebraic snap at t=0
     protocol = Sequence([ CC(rate=100.0, time=10.0) ])

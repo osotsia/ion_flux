@@ -159,10 +159,10 @@ class Session:
     def triggered(self, condition: Any) -> bool:
         if condition is None or isinstance(condition, (int, float)): return False
         if isinstance(condition, str):
-            from ion_flux.dsl.core import Condition
+            from ion_flux.stage1_dsl.core import Condition
             condition = Condition(condition)
         elif hasattr(condition, "expression"):
-            from ion_flux.dsl.core import Condition
+            from ion_flux.stage1_dsl.core import Condition
             condition = Condition(condition.expression)
         return condition.evaluate(self)
 

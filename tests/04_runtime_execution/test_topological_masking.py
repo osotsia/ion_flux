@@ -12,7 +12,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -149,7 +148,7 @@ class ExplicitSurfaceAPIPDE(fx.PDE):
 
 @REQUIRES_COMPILER
 def test_piecewise_index_shadowing():
-    engine = Engine(model=PiecewiseShadowingPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=PiecewiseShadowingPDE(), target="cpu", mock_execution=False)
     N = engine.layout.n_states
     y, ydot = np.zeros(N), np.zeros(N)
     
@@ -173,7 +172,7 @@ def test_piecewise_index_shadowing():
 
 @REQUIRES_COMPILER
 def test_hierarchical_micro_masking():
-    engine = Engine(model=HierarchicalMicroMaskingPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=HierarchicalMicroMaskingPDE(), target="cpu", mock_execution=False)
     N = engine.layout.n_states # x.res(3) * r.res(4) = 12 states
     y, ydot = np.zeros(N), np.zeros(N)
     
@@ -195,7 +194,7 @@ def test_hierarchical_micro_masking():
 
 @REQUIRES_COMPILER
 def test_ast_operator_tag_stripping():
-    engine = Engine(model=ASTTagStrippingPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ASTTagStrippingPDE(), target="cpu", mock_execution=False)
     N = engine.layout.n_states
     y, ydot = np.zeros(N), np.zeros(N)
     
@@ -213,7 +212,7 @@ def test_ast_operator_tag_stripping():
 
 @REQUIRES_COMPILER
 def test_explicit_surface_api_override():
-    engine = Engine(model=ExplicitSurfaceAPIPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ExplicitSurfaceAPIPDE(), target="cpu", mock_execution=False)
     N = engine.layout.n_states
     y, ydot = np.zeros(N), np.zeros(N)
     

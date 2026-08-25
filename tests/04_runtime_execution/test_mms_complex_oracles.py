@@ -22,7 +22,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 from ion_flux.protocols import Sequence, CC, CV
 
 # ==============================================================================
@@ -85,7 +84,7 @@ class SphericalPolynomialMMSOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_spherical_geometry_and_origin_limits():
     """Proves FVM scaling for spherical volumes is analytically exact and L'Hopital safety holds."""
-    engine = Engine(model=SphericalPolynomialMMSOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SphericalPolynomialMMSOracle(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
     
@@ -144,7 +143,7 @@ class CoupledPiecewiseMMSOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_piecewise_stitching_and_dae_coupling():
     """Proves interface flux continuity across piecewise sub-regions and Jacobian DAE masks."""
-    engine = Engine(model=CoupledPiecewiseMMSOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=CoupledPiecewiseMMSOracle(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
     
@@ -205,7 +204,7 @@ class MacroMicroMMSOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_macro_micro_domain_unrolling():
     """Proves hierarchical composite topologies safely evaluate boundaries across dimensions."""
-    engine = Engine(model=MacroMicroMMSOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=MacroMicroMMSOracle(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
     
@@ -256,7 +255,7 @@ class NonLinearTransportMMSOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_nonlinear_state_dependent_ad_chain_rule():
     """Proves Enzyme AD correctly formulates Jacobians for state-dependent parameters (D(c)*grad(c))."""
-    engine = Engine(model=NonLinearTransportMMSOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=NonLinearTransportMMSOracle(), target="cpu", mock_execution=False)
     res = engine.solve(t_span=(0, 2.0), t_eval=np.array([0.0, 2.0]))
     
     x_coords = np.linspace(1.0, 2.0, 11)
@@ -298,7 +297,7 @@ class StatefulMultiplexerMMSOracle(fx.PDE):
 def test_oracle_cccv_state_machine_asymptote_timing():
     """Proves the dense root-finder hits discrete trigger asymptotes exactly and re-inverts the Jacobian."""
     model = StatefulMultiplexerMMSOracle()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     protocol = Sequence([
         CC(rate=1.0, until=model.V >= 5.0), # Phase 1
@@ -375,7 +374,7 @@ class UnstructuredGraphConservationOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_unstructured_csr_mass_conservation():
     """Proves the FVM element volumes and CSR integration weights are perfectly symmetric and conservative."""
-    engine = Engine(model=UnstructuredGraphConservationOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=UnstructuredGraphConservationOracle(), target="cpu", mock_execution=False)
     
     # We solve over 2 seconds. Total injected mass = 10.0 * 2 nodes * 2 seconds = 40.0.
     res = engine.solve(t_span=(0, 2.0), t_eval=np.array([0.0, 2.0]))

@@ -4,17 +4,17 @@ import itertools
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
-from ion_flux.dsl.core import PDE, State, Parameter, Observable
-from ion_flux.dsl.spatial import Domain, CompositeDomain
-from ion_flux.compiler._1_analysis.memory_layout import MemoryLayout
-from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
-from ion_flux.compiler._1_analysis.semantics import SemanticContext
-from ion_flux.compiler._2_lowering.normalization import NormalizationPass
-from ion_flux.compiler._1_analysis.verification import verify_manifold
-from ion_flux.compiler._4_codegen.builder import generate_cpp
-from ion_flux.compiler._5_toolchain.clang_invoker import NativeCompiler
-from ion_flux.compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
-from ion_flux.compiler._3_optimization.cpr_coloring import HybridGraphColorer
+from ion_flux.stage1_dsl.core import PDE, State, Parameter, Observable
+from ion_flux.stage1_dsl.spatial import Domain, CompositeDomain
+from ion_flux.stage2_compiler._1_analysis.memory_layout import MemoryLayout
+from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
+from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
+from ion_flux.stage2_compiler._2_lowering.normalization import NormalizationPass
+from ion_flux.stage2_compiler._1_analysis.verification import verify_manifold
+from ion_flux.stage2_compiler._4_codegen.builder import generate_cpp
+from ion_flux.stage3_backend.clang_invoker import NativeCompiler
+from ion_flux.stage2_compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
+from ion_flux.stage2_compiler._3_optimization.cpr_coloring import HybridGraphColorer
 from ion_flux.runtime.manifest import ExecutableManifest
 
 def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, jacobian_bandwidth: Optional[int] = None, mock_execution: bool = False) -> ExecutableManifest:
@@ -79,7 +79,7 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
     )
 
 def _compute_symbolic_bandwidth(layout: MemoryLayout, states: List[State], ast_payload: Dict[str, Any]) -> int:
-    from ion_flux.compiler._1_analysis.ast_utils import extract_state_names
+    from ion_flux.stage2_compiler._1_analysis.ast_utils import extract_state_names
     if any(getattr(s.domain, "coord_sys", "") == "unstructured" for s in states): return -1
     
     max_bw = 0

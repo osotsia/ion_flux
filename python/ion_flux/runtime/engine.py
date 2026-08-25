@@ -4,7 +4,7 @@ import sys
 import numpy as np
 from typing import Dict, Any, List, Optional
 
-from ion_flux.dsl.core import PDE
+from ion_flux.stage1_dsl.core import PDE
 from ion_flux.runtime.manifest import ExecutableManifest
 from ion_flux.runtime.session import Session
 from ion_flux.runtime.results import SimulationResult
@@ -156,7 +156,7 @@ class Engine:
             from ion_flux.runtime._3_dispatch import execute_mock
             return execute_mock(self.manifest, parameters, protocol)
 
-        from ion_flux.protocols.profiles import Sequence
+        from ion_flux.protocols import Sequence
         if protocol and isinstance(protocol, Sequence):
             return self._orchestrate_sequence(protocol, parameters, requires_grad, show_progress)
             
@@ -212,7 +212,7 @@ class Engine:
         Returns:
             List[SimulationResult]: A list of result objects corresponding to the input parameters.
         """
-        from ion_flux.protocols.profiles import Sequence
+        from ion_flux.protocols import Sequence
         if protocols:
             if isinstance(protocols, Sequence): protocols = [protocols] * len(parameters)
             elif len(protocols) != len(parameters): raise ValueError("Batch length mismatch.")

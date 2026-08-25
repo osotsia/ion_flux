@@ -12,7 +12,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -152,7 +151,7 @@ def test_jacobian_rank_and_interface_continuity():
     Dirichlet equality bounds on a shared interface without colliding or 
     creating singular, rank-deficient Jacobians.
     """
-    engine = Engine(model=InterfaceContinuityPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=InterfaceContinuityPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine.layout.n_states
     np.random.seed(42)
@@ -171,7 +170,7 @@ def test_ale_advection_upwinding_stability():
     Proves that Arbitrary Lagrangian-Eulerian (ALE) moving boundaries natively 
     inject local geometric dilution terms that respect upwind differencing for stability.
     """
-    engine = Engine(model=ALEMovingInterfacePDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ALEMovingInterfacePDE(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y = np.zeros(N)
@@ -206,7 +205,7 @@ def test_dae_masking_and_cj_scaling():
     Proves that spatial arrays governed by algebraic constraints are perfectly 
     masked from implicit scaling parameters (c_j), ensuring stable Newton steps.
     """
-    engine = Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     # 1. Validate Mask Extraction Array
     _, _, id_arr, _, _ = engine._extract_metadata()
@@ -243,7 +242,7 @@ def test_cross_domain_coupling_and_bandwidth():
     Proves that multi-scale meshes correctly compute flat-memory strides and 
     flag the graph for GMRES factorization instead of truncating macro-micro dependencies.
     """
-    engine = Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     assert engine.jacobian_bandwidth <= 0, "Failed to map composite domain to Dense/GMRES factorization."
     
     N = engine.layout.n_states
@@ -279,7 +278,7 @@ def test_spherical_lhopital_and_hermetic_isolation():
     Proves L'Hopital limits prevent 0/0 NaNs at spherical origins, and that 
     composite topologies do not bleed boundary evaluations into adjacent grids.
     """
-    engine = Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()
@@ -308,7 +307,7 @@ def test_csr_graph_traversal_mass_conservation():
     Proves unstructured Sparse CSR generation maps correct graph weights
     independently of traditional N-dimensional compile-time shapes.
     """
-    engine = Engine(model=CSRAndMultiplexerPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=CSRAndMultiplexerPDE(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()
@@ -341,7 +340,7 @@ def test_terminal_multiplexer_hot_swapping():
     Proves the implicit hardware multiplexer can toggle the state-machine (CC/CV) 
     via the Jacobian matrix without rebuilding the C++ source binary.
     """
-    engine = Engine(model=CSRAndMultiplexerPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=CSRAndMultiplexerPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine.layout.n_states
     y, ydot = np.ones(N).tolist(), np.zeros(N).tolist()

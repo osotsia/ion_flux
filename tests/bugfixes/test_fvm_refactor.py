@@ -11,7 +11,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -79,7 +78,7 @@ def test_oracle_integral_jacobian_singularity():
     integral(grad(phi), over=cell) = integral(x) from 0 to 2 = 2.0.
     Thus, dt(T) = 2.0 - T. T should asymptote exactly to 2.0.
     """
-    engine = Engine(model=IntegralJacobianSingularityOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=IntegralJacobianSingularityOracle(), target="cpu", mock_execution=False)
     
     # 1. Assert the Jacobian is strictly full-rank and fully coupled
     y0, ydot0, _, _, _ = engine._extract_metadata()
@@ -146,7 +145,7 @@ def test_oracle_subregion_geometric_scaling():
     will crash violently with a KeyError during code-generation.
     """
     # The instantiation itself is part of the test (verifies the missing KeyError fix)
-    engine = Engine(model=SubregionGeometricScalingOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SubregionGeometricScalingOracle(), target="cpu", mock_execution=False)
     
     # Take a single short step to trigger the algebraic evaluation
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
@@ -205,7 +204,7 @@ def test_oracle_harmonic_mean_discontinuity():
     10.0 * (100 - c_int) / 1.0 = 0.1 * (c_int - 0) / 1.0
     1000 - 10 c_int = 0.1 c_int  ->  10.1 c_int = 1000  -> c_int = 99.0099
     """
-    engine = Engine(model=HarmonicMeanDiscontinuityOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=HarmonicMeanDiscontinuityOracle(), target="cpu", mock_execution=False)
     
     # Integrate to extreme steady state
     res = engine.solve(t_span=(0, 500.0), t_eval=np.array([0.0, 500.0]))

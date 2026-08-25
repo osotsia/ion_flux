@@ -3,8 +3,7 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
-from ion_flux.compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
+from ion_flux.stage2_compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
 import math
 import sys
 import os
@@ -12,9 +11,9 @@ import os
 # Add the 'models' directory to the path so we can import the models
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..', 'models'))
 
-from Chen2020_DFN import Chen2020_DFN
+from Chen2020_DFN import Chen2020_DFN # type: ignore
 # from Marquis2019_1Plus1D_SPMe import Marquis1Plus1D_SPMe
-from ORegan2022_ThermalDFN import ThermalDFN
+from ORegan2022_ThermalDFN import ThermalDFN # type: ignore
 
 
 def _has_compiler() -> bool:
@@ -29,7 +28,7 @@ REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires nat
 
 
 def get_missing_dependencies(model):
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     N = engine.layout.n_states
     
     # 1. Reconstruct the MIR-derived sparsity pattern directly from the Engine's cache

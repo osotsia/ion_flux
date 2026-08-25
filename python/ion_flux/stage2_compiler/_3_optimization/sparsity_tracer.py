@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Set, Tuple, Optional
-from ion_flux.compiler._2_lowering.ir import Loop, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall, Literal, Var, UnaryMinus, UnstructuredRead, Reduction
+from ion_flux.stage2_compiler._2_lowering.ir import Loop, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall, Literal, Var, UnaryMinus, UnstructuredRead, Reduction
 
 class IndexEvaluator:
     """

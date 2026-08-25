@@ -12,7 +12,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Setup
@@ -72,7 +71,7 @@ def test_unbound_subregion_memory_mapping():
     reg_B will fail to add the `start_idx` offset (10). It will silently read 
     indices 0-9 (reg_A) instead of 10-19 (reg_B).
     """
-    engine = Engine(model=MissingParentIntegrationOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=MissingParentIntegrationOracle(), target="cpu", mock_execution=False)
     y = np.zeros(engine.layout.n_states)
     ydot = np.zeros(engine.layout.n_states)
     

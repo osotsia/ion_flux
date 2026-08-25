@@ -13,7 +13,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Setup
@@ -79,7 +78,7 @@ def test_composite_coords_broadcasting_bug():
     If the bug is present, the compiler evaluates `flat_index * dx`, resulting in 
     both arrays reading `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]`.
     """
-    engine = Engine(model=CompositeCoordsOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=CompositeCoordsOracle(), target="cpu", mock_execution=False)
     
     # Extract metadata and create zeroed state arrays
     N = engine.layout.n_states

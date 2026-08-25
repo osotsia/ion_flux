@@ -15,7 +15,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 def _has_compiler() -> bool:
     has_std = bool(shutil.which("clang++") or shutil.which("g++"))
@@ -77,8 +76,7 @@ def test_faraday_mass_conservation_bug():
     mass conservation. The amount of lithium entering the electrolyte will 
     perfectly match the amount leaving the solid particles.
     """
-    model = FaradayBugOracle()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=FaradayBugOracle(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
     

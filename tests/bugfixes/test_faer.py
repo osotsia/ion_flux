@@ -13,7 +13,6 @@ import pytest
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 def _has_compiler() -> bool:
     has_std = bool(shutil.which("clang++") or shutil.which("g++"))
@@ -64,7 +63,7 @@ def test_simplicial_lu_zero_pivot_panic(capfd):
     This guarantees `faer` encounters a zero pivot. Since `faer`'s `simplicial` 
     module lacks partial pivoting, it will hard panic.
     """
-    engine = Engine(model=DefeatAMDZeroPivotOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=DefeatAMDZeroPivotOracle(), target="cpu", mock_execution=False)
     
     try:
         engine.solve(t_span=(0, 1.0))

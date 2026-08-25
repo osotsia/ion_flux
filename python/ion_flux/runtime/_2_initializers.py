@@ -1,7 +1,7 @@
 import math
 from typing import Dict, Any, Tuple, List
 from ion_flux.runtime.manifest import ExecutableManifest
-from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
+from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
 
 def evaluate_ic(manifest: ExecutableManifest, current_parameters: Dict[str, float]) -> Tuple[List[float], List[float]]:
     """

@@ -13,8 +13,7 @@ import shutil
 import platform
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
-from ion_flux.compiler._5_toolchain.clang_invoker import NativeCompiler
+from ion_flux.stage3_backend.clang_invoker import NativeCompiler
 
 # ==============================================================================
 # Environment Configuration
@@ -38,7 +37,7 @@ REQUIRES_ENZYME = pytest.mark.skipif(not _has_compiler() or not _has_enzyme(), r
 # Helper Oracle
 # ==============================================================================
 
-def approx_jacobian(engine: Engine, y: list, ydot: list, p: dict, c_j: float, eps: float = 1e-8) -> np.ndarray:
+def approx_jacobian(engine: fx.Engine, y: list, ydot: list, p: dict, c_j: float, eps: float = 1e-8) -> np.ndarray:
     """
     Computes the numerical Jacobian using central finite differences.
     For an implicit solver, the residual mapping is F(y, ydot).
@@ -121,7 +120,7 @@ def test_clang_so_emission_and_ffi_loading():
     Validates Clang properly compiles the emitted C++ into a portable shared object
     and safely loads it into Python memory via ctypes FFI.
     """
-    engine = Engine(model=MathGauntletPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=MathGauntletPDE(), target="cpu", mock_execution=False)
     
     # Prove the Engine didn't silently fall back to mock execution
     assert getattr(engine, "mock_execution", False) is False
@@ -153,7 +152,7 @@ def test_enzyme_analytical_dense_jacobian_smooth_math():
     Proves Enzyme LLVM Reverse/Forward AD correctly differentiates smooth math 
     (sin, cos, exp) perfectly matching a rigorous Finite Difference oracle.
     """
-    engine = Engine(model=MathGauntletPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=MathGauntletPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine.layout.n_states
     off_s, _ = engine.layout.state_offsets["y_smooth"]
@@ -181,7 +180,7 @@ def test_enzyme_subgradients_and_heaviside_triggers():
     Numerical FD fails at exactly x=0 for abs(x). Enzyme AD returns valid subgradients 
     (preventing NaN/Segfaults) and properly routes Boolean Heavyside step gradients.
     """
-    engine = Engine(model=MathGauntletPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=MathGauntletPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine.layout.n_states
     off_s, _ = engine.layout.state_offsets["y_smooth"]
@@ -223,9 +222,9 @@ def test_cpr_graph_coloring_banded_jacobian():
     compressed Banded Jacobians using minimal forward Enzyme AD sweeps.
     """
     # Force Tridiagonal bandwidth (bw=1)
-    engine_banded = Engine(model=BandedCouplingPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=1)
+    engine_banded = fx.Engine(model=BandedCouplingPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=1)
     # Force Dense bandwidth (bw=0)
-    engine_dense = Engine(model=BandedCouplingPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine_dense = fx.Engine(model=BandedCouplingPDE(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine_banded.layout.n_states
     y = np.random.uniform(0.1, 1.0, size=N).tolist()

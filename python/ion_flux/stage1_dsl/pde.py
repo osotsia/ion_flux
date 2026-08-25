@@ -53,12 +53,12 @@ class Condition:
 class Terminal:
     __slots__ = ["current", "voltage", "name", "_original_name"]
     def __init__(self, current: "State", voltage: "State", name: str = ""):
-        from ion_flux.dsl.nodes import validate_identifier
+        from ion_flux.stage1_dsl.nodes import validate_identifier
         self.current = current
         self.voltage = voltage
         self.name = validate_identifier(name)
     def __set_name__(self, owner, name):
-        from ion_flux.dsl.nodes import validate_identifier
+        from ion_flux.stage1_dsl.nodes import validate_identifier
         if not self.name: self.name = validate_identifier(name)
 
 class PDE:
@@ -91,7 +91,7 @@ class PDE:
             self._term_v_target = Parameter(default=0.0, name="_term_v_target")
 
     def _apply_namespace(self, prefix: str) -> None:
-        from ion_flux.dsl.nodes import validate_identifier
+        from ion_flux.stage1_dsl.nodes import validate_identifier
         for name, attr in self.__dict__.items():
             if isinstance(attr, (State, Parameter, Observable, Domain, CompositeDomain, Terminal)):
                 if not hasattr(attr, "_original_name"): attr._original_name = getattr(attr, "name", "") or name

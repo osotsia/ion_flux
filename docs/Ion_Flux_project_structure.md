@@ -37,7 +37,7 @@
 
 ### **Project Structure: `ion_flux/`**
 
-The directory structure reflects a strict chronological execution flow. The numbered prefixes (`_1_` to `_5_` in the compiler, `_0_` to `_4_` in the solver) explicitly dictate the data dependency and call stack depth. A module is strictly prohibited from importing logic from a "deeper" chronological module.
+The directory structure reflects a strict chronological execution flow. The numbered prefixes (`_1_` to `_4_` in the compiler, `_0_` to `_4_` in the solver) explicitly dictate the data dependency and call stack depth. A module is strictly prohibited from importing logic from a "deeper" chronological module.
 
 ```text
 ion_flux/
@@ -53,14 +53,13 @@ ion_flux/
 │   └── ion_flux/
 │       ├── cli.py                  # Automates hermetic fetching/building of LLVM 19 + Enzyme.
 │       ├── metrics.py              # Bridges Python loss functions to Rust's VJP adjoint solvers.
-│       ├── dsl/                    # --- FRONTEND ---
+│       ├── protocols.py            # Facade exporting protocol definitions.
+│       ├── stage1_dsl/             # --- FRONTEND ---
 │       │   ├── core.py             
 │       │   ├── nodes.py            # Operator-overloaded AST nodes (e.g., BinaryOp, UnaryOp).
 │       │   ├── operators.py        # Topology-agnostic math operators (grad, div, dt).
 │       │   ├── pde.py              # Handles hierarchical submodel merging and AST namespace isolation.
 │       │   └── spatial.py          # Domain topologies and moving-mesh bindings.
-│       ├── protocols/              # --- STATE MACHINES ---
-│       │   └── profiles.py         # Declarative sequence protocols (CC, CV, Rest) mapped to the Native Orchestrator.
 │       ├── runtime/                # --- PYTHON EXECUTION ORCHESTRATION ---
 │       │   ├── engine.py           # 1. Facade. Unifies User API (solve, solve_batch, load, export).
 │       │   ├── manifest.py         # 2. Immutable Data Target. Holds MemoryLayout & Topological Constants.
@@ -72,30 +71,32 @@ ion_flux/
 │       │   ├── results.py          # Wraps flat FFI C-arrays back into multidimensional Python structures.
 │       │   ├── scheduler.py        # Async task batching limits.
 │       │   ├── session.py          # Persistent handles preserving native memory for micro-stepping HIL.
-│       │   └── telemetry.py        # Observability metrics for cache hits/sparsity.
-│       └── compiler/               # --- MIDDLE-END (STAGED LOWERING) ---
-│           ├── _1_analysis/        # Intent: Topological resolution and validation.
-│           │   ├── ast_utils.py    
-│           │   ├── memory_layout.py# Resolves dynamic domains into flat FVM indexing strides and areas/volumes.
-│           │   ├── semantics.py    # Pre-processes implicit boundaries into O(1) lookup tables.
-│           │   ├── topology.py     
-│           │   └── verification.py # Detects topological overlaps/gaps before lowering to prevent silent overwrites.
-│           ├── _2_lowering/        # Intent: Math transformation.
-│           │   ├── context.py      # Immutable context passed down the AST visitor to prevent recursive state bugs.
-│           │   ├── dialects.py     # Dispatches abstract grad/div to specific Cartesian/Spherical/Unstructured Math IR.
-│           │   ├── ir.py           # Strictly typed Intermediate Representation (MIR) for loops and assignments.
-│           │   ├── normalization.py# Unrolls syntactic sugar (e.g., Piecewise domains) into explicit regional equations.
-│           │   └── spatial_visitor.py # Translates topology-agnostic math into explicit MIR arrays.
-│           ├── _3_optimization/    # Intent: Differentiability analysis.
-│           │   ├── cpr_coloring.py # Welsh-Powell column-intersection graph coloring. Minimizes JVP sweeps.
-│           │   └── sparsity_tracer.py # Evaluates the MIR natively in Python to trace Jacobian sparsity triplets.
-│           ├── _4_codegen/         # Intent: Mechanical C++ emission.
-│           │   ├── builder.py      
-│           │   ├── emitter.py      # Stringifies the MIR into C++. Contains zero mathematical logic.
-│           │   └── templates.py    
-│           └── _5_toolchain/       # Intent: Systems invocation.
-│               ├── clang_invoker.py# Subprocesses Clang+Enzyme to emit `.so` binaries.
-│               └── ffi_runtime.py  # `ctypes` wrapper defining the C-ABI boundary for the Rust backend.
+│       │   ├── telemetry.py        # Observability metrics for cache hits/sparsity.
+│       │   └── protocols/
+│       │       └── profiles.py     # Declarative sequence protocols (CC, CV, Rest) mapped to the Native Orchestrator.
+│       ├── stage2_compiler/        # --- MIDDLE-END (STAGED LOWERING) ---
+│       │   ├── _1_analysis/        # Intent: Topological resolution and validation.
+│       │   │   ├── ast_utils.py    
+│       │   │   ├── memory_layout.py# Resolves dynamic domains into flat FVM indexing strides and areas/volumes.
+│       │   │   ├── semantics.py    # Pre-processes implicit boundaries into O(1) lookup tables.
+│       │   │   ├── topology.py     
+│       │   │   └── verification.py # Detects topological overlaps/gaps before lowering to prevent silent overwrites.
+│       │   ├── _2_lowering/        # Intent: Math transformation.
+│       │   │   ├── context.py      # Immutable context passed down the AST visitor to prevent recursive state bugs.
+│       │   │   ├── dialects.py     # Dispatches abstract grad/div to specific Cartesian/Spherical/Unstructured Math IR.
+│       │   │   ├── ir.py           # Strictly typed Intermediate Representation (MIR) for loops and assignments.
+│       │   │   ├── normalization.py# Unrolls syntactic sugar (e.g., Piecewise domains) into explicit regional equations.
+│       │   │   └── spatial_visitor.py # Translates topology-agnostic math into explicit MIR arrays.
+│       │   ├── _3_optimization/    # Intent: Differentiability analysis.
+│       │   │   ├── cpr_coloring.py # Welsh-Powell column-intersection graph coloring. Minimizes JVP sweeps.
+│       │   │   └── sparsity_tracer.py # Evaluates the MIR natively in Python to trace Jacobian sparsity triplets.
+│       │   └── _4_codegen/         # Intent: Mechanical C++ emission.
+│       │       ├── builder.py      
+│       │       ├── emitter.py      # Stringifies the MIR into C++. Contains zero mathematical logic.
+│       │       └── templates.py    
+│       └── stage3_backend/         # --- BACKEND (SYSTEMS & TOOLCHAIN) ---
+│           ├── clang_invoker.py    # Subprocesses Clang+Enzyme to emit `.so` binaries.
+│           └── ffi_runtime.py      # `ctypes` wrapper defining the C-ABI boundary for the Rust backend.
 │
 ├── rust/                           # --- NATIVE BACKEND ---
 │   ├── Cargo.toml                  
@@ -140,4 +141,3 @@ ion_flux/
 │                                   # isolate and prove the absence of specific historical compiler/solver failures.
 ├── pyproject.toml                  
 └── README.md
-```

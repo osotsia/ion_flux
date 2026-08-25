@@ -16,7 +16,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -81,7 +80,7 @@ def test_oracle_piecewise_porosity_conservation():
     PROBE: Ensures the AST compiler correctly handles discontinuous LHS multipliers 
     at FVM faces. A failure here explains capacity drift in full-cell models.
     """
-    engine = Engine(model=PiecewisePorosityOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=PiecewisePorosityOracle(), target="cpu", mock_execution=False)
     
     # Run for 2.0 seconds. Total injected mass = 2.0.
     res = engine.solve(t_span=(0, 2.0), t_eval=np.array([0.0, 2.0]))
@@ -160,7 +159,7 @@ def test_oracle_electrolyte_dae_log_gradient_coupling():
     PROBE: Validates that the implicit algebraic root-finder and the discrete 
     FVM formulations of `grad(c)/c` perfectly align to solve the non-linear potential field.
     """
-    engine = Engine(model=ElectrolytePotentialDAEOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ElectrolytePotentialDAEOracle(), target="cpu", mock_execution=False)
     
     # 1. Take a single minimal time step to force the DAE root evaluation
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
@@ -227,7 +226,7 @@ def test_oracle_butler_volmer_equilibrium_drift():
     PROBE: Ensures the solver's non-linear root finder doesn't introduce 
     floating point "creep" during stiff DAE integration at thermodynamic equilibrium.
     """
-    engine = Engine(model=ButlerVolmerSymmetryOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ButlerVolmerSymmetryOracle(), target="cpu", mock_execution=False)
     
     # Integrate for an extreme duration
     res = engine.solve(t_span=(0, 3600.0), t_eval=np.array([0.0, 3600.0]))
@@ -319,7 +318,7 @@ def test_oracle_integrated_hierarchical_dfn():
     PROBE: Proves the compiler correctly merges piecewise logic, hierarchical boundaries, 
     spatial DAEs, and spherical geometric dilution into a stable native execution graph.
     """
-    engine = Engine(model=HierarchicalDFNCrucibleOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=HierarchicalDFNCrucibleOracle(), target="cpu", mock_execution=False)
     
     # Assert analytical exactness over a 1.0 second integration window
     # We pass "dummy" bc the engine only populates the res.trajectory metadata dictionary 

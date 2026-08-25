@@ -131,6 +131,9 @@ class ModularSPM(fx.PDE):
 # Compile the unified physics and execute a 1-hour simulation
 engine = fx.Engine(model=ModularSPM())
 result = engine.solve(t_span=(0, 3600))
+
+# Export the compiled native C++ binary for zero-overhead deployments
+engine.export_binary("models/spm_prod.so")
 ```
 
 ### 3. Native Multi-Scale Meshes & DAEs
@@ -224,10 +227,12 @@ while session.time < 3600.0:
 *   **How:** Python invokes `clang++` to compile the generated C++ source into a `.so` shared library. The Enzyme plugin differentiates the highly optimized LLVM IR natively.
 *   **Why:** Bypasses the Out-Of-Memory (OOM) crashes typical of symbolic frameworks that build massive "tape" graphs in RAM. Generates exact analytical Vector-Jacobian Products (VJPs) with $O(1)$ memory overhead and enables 0ms cold-start serverless deployments.
 
-**Stage 4: FFI Boundary & Native Execution (Runtime)**
+**Stage 4: FFI Boundary & Native Solver (Backend)**
 *   **Elements:** Rust Implicit Solver (`_0_ffi` -> `bdf` -> `newton` -> `sparse_lu`).
 *   **How:** Python packs the numerical data (initial conditions, parameters, and mesh geometry) into flat 1D C-ABI pointers and yields control. The Rust solver loads the compiled `.so` binary to fetch the exact residuals, Jacobians, and VJPs. It integrates stiff non-linear Differential-Algebraic Equations (DAEs) by passing a pre-allocated memory arena (`Workspace`) down the call stack, mutating state without reallocation. 
 *   **Why:** Completely bypasses the Python Global Interpreter Lock (GIL). Eliminating memory fragmentation and hot-loop allocations sustains microsecond-latency control loops for Hardware-in-the-Loop (HIL) testing, and unlocks massive task-parallel batching across all vCPUs via Rayon.
+
+For more details, see the [Project Structure Documentation](/docs/Ion_Flux_project_structure.md).
 
 ## 🧪 Testing & Verification
 

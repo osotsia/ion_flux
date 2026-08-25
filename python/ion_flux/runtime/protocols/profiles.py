@@ -1,6 +1,6 @@
 import numpy as np
 from typing import List, Any
-from ion_flux.dsl.core import Condition
+from ion_flux.stage1_dsl.core import Condition
 
 class ConstantCurrent:
     __slots__ = ["c_rate", "until_voltage"]

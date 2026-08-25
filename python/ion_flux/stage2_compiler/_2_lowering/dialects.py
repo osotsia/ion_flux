@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional
-from ion_flux.compiler._2_lowering.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, RawCpp, UnstructuredRead
+from ion_flux.stage2_compiler._2_lowering.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, RawCpp, UnstructuredRead
 
 class TopologyDialect:
     """Base interface for abstracting spatial geometries."""
@@ -113,7 +113,7 @@ class StructuredDialect(TopologyDialect):
 class UnstructuredDialect(TopologyDialect):
     """Emits explicit CSR pointers for 3D unstructured meshes."""
     def divergence(self, visitor, child: Dict[str, Any], idx_mgr, ctx) -> Expr:
-        from ion_flux.compiler._1_analysis.ast_utils import extract_state_name
+        from ion_flux.stage2_compiler._1_analysis.ast_utils import extract_state_name
         
         offsets = self.layout.mesh_offsets[self.axis_name]
         rp_off = Literal(offsets["row_ptr"])

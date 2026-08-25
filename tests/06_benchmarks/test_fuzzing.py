@@ -24,15 +24,14 @@ import platform
 from hypothesis import given, settings, strategies as st
 
 import ion_flux as fx
-from ion_flux.dsl.nodes import Scalar, BinaryOp, UnaryOp
-from ion_flux.compiler._1_analysis.memory_layout import MemoryLayout
-from ion_flux.compiler._1_analysis.topology import TopologyAnalyzer
-from ion_flux.compiler._1_analysis.semantics import SemanticContext
-from ion_flux.compiler._2_lowering.normalization import NormalizationPass
-from ion_flux.compiler._1_analysis.verification import verify_manifold, TopologicalError
-from ion_flux.compiler._3_optimization.cpr_coloring import HybridGraphColorer
-from ion_flux.runtime.engine import Engine
-from ion_flux.compiler._4_codegen.builder import generate_cpp
+from ion_flux.stage1_dsl.nodes import Scalar, BinaryOp, UnaryOp
+from ion_flux.stage2_compiler._1_analysis.memory_layout import MemoryLayout
+from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
+from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
+from ion_flux.stage2_compiler._2_lowering.normalization import NormalizationPass
+from ion_flux.stage2_compiler._1_analysis.verification import verify_manifold, TopologicalError
+from ion_flux.stage2_compiler._3_optimization.cpr_coloring import HybridGraphColorer
+from ion_flux.stage2_compiler._4_codegen.builder import generate_cpp
 
 # ==============================================================================
 # Environment Configuration
@@ -380,7 +379,7 @@ class StiffNonLinearDAE(fx.PDE):
 
 try:
     if _has_compiler() and RUST_FFI_AVAILABLE:
-        _STIFF_ENGINE = Engine(model=StiffNonLinearDAE(), target="cpu", mock_execution=False)
+        _STIFF_ENGINE = fx.Engine(model=StiffNonLinearDAE(), target="cpu", mock_execution=False)
     else:
         _STIFF_ENGINE = None
 except Exception:

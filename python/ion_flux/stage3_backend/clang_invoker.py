@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import uuid
 import logging
-from ion_flux.compiler._5_toolchain.ffi_runtime import NativeRuntime
+from ion_flux.stage3_backend.ffi_runtime import NativeRuntime
 
 logger = logging.getLogger(__name__)
 

@@ -451,10 +451,22 @@ class ToolchainInstaller:
             if os.path.isfile(path) and not any(f.startswith(k) for k in keep_bins):
                 os.remove(path)
                 
-        for d in ["share", "libexec", "docs"]:
+        # Drop development headers, docs, and tools no longer needed after Enzyme is built
+        for d in ["share", "libexec", "docs", "include"]:
             path = os.path.join(self.llvm_dir, d)
             if os.path.exists(path):
                 shutil.rmtree(path)
+                
+        # Drop massive LLVM/Clang static framework libraries and CMake configs
+        llvm_lib = os.path.join(self.llvm_dir, "lib")
+        if os.path.exists(llvm_lib):
+            for f in os.listdir(llvm_lib):
+                if f.endswith(".a"):
+                    os.remove(os.path.join(llvm_lib, f))
+                    
+            cmake_dir = os.path.join(llvm_lib, "cmake")
+            if os.path.exists(cmake_dir):
+                shutil.rmtree(cmake_dir)
 
     def _scrub_symlinks(self) -> None:
         """

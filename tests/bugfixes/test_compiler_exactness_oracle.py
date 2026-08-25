@@ -9,7 +9,6 @@ off-by-one errors or volume distortions.
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 class SphericalFVMOracle(fx.PDE):
     """
@@ -54,7 +53,7 @@ class SphericalFVMOracle(fx.PDE):
         }
 
 def test_spherical_fvm_and_boundary_extraction_exactness():
-    engine = Engine(model=SphericalFVMOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SphericalFVMOracle(), target="cpu", mock_execution=False)
     
     # We want to check the instantaneous residual at t=0.
     y0, ydot0, _, _, _ = engine._extract_metadata()

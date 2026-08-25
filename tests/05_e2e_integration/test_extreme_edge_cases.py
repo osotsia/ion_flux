@@ -20,7 +20,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -90,7 +89,7 @@ class InternalDirichletOracle(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_oracle_internal_dirichlet_manifold_severing():
-    engine = Engine(model=InternalDirichletOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=InternalDirichletOracle(), target="cpu", mock_execution=False)
     
     try:
         # A steady-state gradient of c(x) = x perfectly satisfies the diffusion 
@@ -150,7 +149,7 @@ class IntegroDifferentialOracle(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_oracle_integro_differential_dense_coupling():
-    engine = Engine(model=IntegroDifferentialOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=IntegroDifferentialOracle(), target="cpu", mock_execution=False)
     
     # 1. Assert the Graph Colorer correctly identified the Dense Spatial Coupling
     # By forcing resolution > dense_threshold (30 > 20), the integral's dependency 
@@ -205,7 +204,7 @@ class CircularTranscendentDAEOracle(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_oracle_transcendent_circular_dae_initialization():
-    engine = Engine(model=CircularTranscendentDAEOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=CircularTranscendentDAEOracle(), target="cpu", mock_execution=False)
     
     try:
         res = engine.solve(t_span=(0, 3.0), t_eval=np.array([0.0, 3.0]))
@@ -277,7 +276,7 @@ class IllConditionedAsymmetryOracle(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_oracle_ill_conditioned_multiscale_asymmetry():
-    engine = Engine(model=IllConditionedAsymmetryOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=IllConditionedAsymmetryOracle(), target="cpu", mock_execution=False)
     
     try:
         res = engine.solve(t_span=(0, 2.0), t_eval=np.array([0.0, 2.0]))

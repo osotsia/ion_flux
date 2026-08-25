@@ -8,7 +8,6 @@ is exhibiting "Infinite Reservoir" and "Reversed Voltage" anomalies.
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # ORACLE 1: FVM Spherical Volume Scaling
@@ -51,7 +50,7 @@ def test_spherical_volume_depletion_rate():
     dc_avg/dt = - (3 / R) * Flux_boundary
     dc_avg/dt = - (3 / 5e-6) * 1.0 = -600,000 mol/m^3 per second
     """
-    engine = Engine(model=SphericalFaradayProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SphericalFaradayProbe(), target="cpu", mock_execution=False)
     
     # Simulate a tiny 1 microsecond step to test the initial derivative
     res = engine.solve(t_span=(0, 1e-6), t_eval=np.array([0, 1e-6]))
@@ -96,7 +95,7 @@ def test_ast_boundary_node_extraction():
     PROBE: If this fails, V_cell in the TSPMe is evaluating the wrong concentration 
     (e.g., the average instead of the surface), hiding the boundary depletion.
     """
-    engine = Engine(model=BoundaryExtractionProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=BoundaryExtractionProbe(), target="cpu", mock_execution=False)
     
     # Evaluate instantaneous residual at t=0
     N = engine.layout.n_states
@@ -190,7 +189,7 @@ def test_initial_thermodynamic_signs():
     During discharge (i_app > 0), Ohmic drops and Overpotentials MUST be negative 
     to pull the terminal voltage below the OCV.
     """
-    engine = Engine(model=ThermodynamicSignProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ThermodynamicSignProbe(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y0, ydot0, _, _, _ = engine._extract_metadata()

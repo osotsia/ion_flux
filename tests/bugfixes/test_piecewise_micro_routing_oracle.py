@@ -14,7 +14,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 def _has_compiler() -> bool:
     has_std = bool(shutil.which("clang++") or shutil.which("g++"))
@@ -69,7 +68,7 @@ class PiecewiseMicroRoutingOracle(fx.PDE):
 @REQUIRES_COMPILER
 def test_piecewise_micro_domain_routing():
     model = PiecewiseMicroRoutingOracle()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y0, ydot0, _, _, _ = engine._extract_metadata()

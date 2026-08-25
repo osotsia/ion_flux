@@ -12,7 +12,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -62,7 +61,7 @@ def test_session_restore_bdf_history_corruption():
     If unfixed, the massive `ydot` from the `dt=5.0` step will bleed into the 
     prediction for the subsequent `dt=0.1` step, causing a massive overshoot.
     """
-    engine = Engine(model=ExponentialGrowth(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ExponentialGrowth(), target="cpu", mock_execution=False)
     session = engine.start_session()
     
     # 1. Step to t=1.0. Exact analytical y(1.0) = exp(1.0)
@@ -137,7 +136,7 @@ def test_unstructured_integral_volume_mapping():
     If unfixed, `fx.integral` over an unstructured mesh defaults to a 1D Cartesian 
     loop with `dx=1.0`, resulting in a volume of ~3.0 to 4.0 instead of 1/6.
     """
-    engine = Engine(model=UnstructuredVolumeOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=UnstructuredVolumeOracle(), target="cpu", mock_execution=False)
     
     # Take one arbitrary step so the solver evaluates the algebraic integral equation
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))

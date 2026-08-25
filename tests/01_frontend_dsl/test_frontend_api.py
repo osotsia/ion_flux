@@ -13,7 +13,6 @@ and Namespace Bleeding across submodels.
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Model 1: The Heavyweight (Piecewise, Hierarchical Domains, DAEs)
@@ -217,7 +216,7 @@ def test_model_composition_and_namespacing():
     assert "r" not in ast["domains"]
     
     # Parameters should be prefixed and extracted successfully
-    engine = Engine(model, target="cpu", mock_execution=True)
+    engine = fx.Engine(model, target="cpu", mock_execution=True)
     assert "anode_D" in engine.layout.param_offsets
     assert "cathode_D" in engine.layout.param_offsets
 
@@ -267,7 +266,7 @@ def test_dae_masking_extraction_and_dirichlet():
     Dirichlet boundary is applied.
     """
     model = ComprehensiveBatteryModel()
-    engine = Engine(model=model, target="cpu", mock_execution=True)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=True)
     
     _, _, id_arr, _, _ = engine._extract_metadata()
     id_arr = np.array(id_arr)
@@ -298,7 +297,7 @@ def test_failure_poke_rank_deficiency_rejection():
             return {"equations": {self.x: fx.dt(self.x) == 1.0}}
             
     with pytest.raises(ValueError, match="Unconstrained state detected"):
-        Engine(MissingEqModel(), mock_execution=True)
+        fx.Engine(MissingEqModel(), mock_execution=True)
 
 
 def test_failure_poke_malformed_dictionary_payload():
@@ -314,7 +313,7 @@ def test_failure_poke_malformed_dictionary_payload():
             return {"eqs": {self.x: fx.dt(self.x) == 1.0}} 
             
     with pytest.raises(ValueError, match="Unconstrained state detected"):
-        Engine(BadPayloadModel(), mock_execution=True)
+        fx.Engine(BadPayloadModel(), mock_execution=True)
 
 
 # ==============================================================================
@@ -393,7 +392,7 @@ def test_failure_poke_mathematical_leakage_rejection():
     """
     with pytest.raises(ValueError, match="Math Leak Detected"):
         # The engine should crash during the verify_manifold() pass
-        Engine(SharedFluxLeakageModel(), mock_execution=True)
+        fx.Engine(SharedFluxLeakageModel(), mock_execution=True)
 
 
 def test_factory_pattern_prevents_leakage():
@@ -404,7 +403,7 @@ def test_factory_pattern_prevents_leakage():
     """
     try:
         # The engine should successfully compile the isolated nodes
-        Engine(IsolatedFluxFactoryModel(), mock_execution=True)
+        fx.Engine(IsolatedFluxFactoryModel(), mock_execution=True)
     except Exception as e:
         pytest.fail(f"Correct factory pattern unexpectedly failed compilation: {e}")
 

@@ -11,7 +11,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -147,7 +146,7 @@ def test_thermal_source_magnitudes():
     If Q_irr drops below 50,000 W/m3 while eta_r remains negative, fx.abs() 
     is silently casting the overpotential to an integer 0 in the C++ layer.
     """
-    engine = Engine(model=ThermalSourceProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=ThermalSourceProbe(), target="cpu", mock_execution=False)
     
     y0, ydot0, _, _, _ = engine._extract_metadata()
     # Evaluate instantaneous residual (Res = ydot - rhs = 0.0 - rhs -> rhs = -Res)

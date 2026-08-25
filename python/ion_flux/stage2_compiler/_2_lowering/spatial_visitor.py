@@ -1,8 +1,8 @@
 from typing import Dict, Any, Optional, List, Tuple
-from ion_flux.compiler._2_lowering.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus, Reduction
-from ion_flux.compiler._1_analysis.semantics import SemanticContext
-from ion_flux.compiler._2_lowering.context import SpatialContext
-from ion_flux.compiler._2_lowering.dialects import get_dialect
+from ion_flux.stage2_compiler._2_lowering.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus, Reduction
+from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
+from ion_flux.stage2_compiler._2_lowering.context import SpatialContext
+from ion_flux.stage2_compiler._2_lowering.dialects import get_dialect
 
 class IndexManager:
     """
@@ -153,7 +153,7 @@ class SpatialLoweringVisitor:
 
     def _lower_boundary(self, node: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
         idx_bnd = idx_mgr.clone()
-        from ion_flux.compiler._1_analysis.ast_utils import extract_state_names
+        from ion_flux.stage2_compiler._1_analysis.ast_utils import extract_state_names
         state_names = extract_state_names(node["child"])
         
         if state_names:
@@ -219,7 +219,7 @@ class SpatialLoweringVisitor:
         return BinaryOp("+", Literal(bounds[0]), BinaryOp("*", l_phys_ir, w_center))
 
     def _lower_integral(self, node: Dict[str, Any], child: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
-        from ion_flux.compiler._4_codegen.emitter import CppEmitter
+        from ion_flux.stage2_compiler._4_codegen.emitter import CppEmitter
         target_domain = node.get("over")
         axes = self.topo.get_axes(target_domain)
         

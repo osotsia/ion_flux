@@ -12,7 +12,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -144,11 +143,11 @@ def test_ale_coordinate_dilution_scaling():
     """
     # 1D Cartesian (Linear scaling)
     model_1d = ALECoordinateScaling(coord_sys="cartesian")
-    eng_1d = Engine(model=model_1d, target="cpu", mock_execution=False)
+    eng_1d = fx.Engine(model=model_1d, target="cpu", mock_execution=False)
     
     # 3D Spherical (Cubic scaling)
     model_3d = ALECoordinateScaling(coord_sys="spherical")
-    eng_3d = Engine(model=model_3d, target="cpu", mock_execution=False)
+    eng_3d = fx.Engine(model=model_3d, target="cpu", mock_execution=False)
     
     t_eval = np.linspace(0, 5.0, 50)
     res_1d = eng_1d.solve(t_eval=t_eval, parameters={"v_shrink": -0.1})
@@ -177,7 +176,7 @@ def test_ale_coupled_stefan_problem():
     divergence when ALE velocities are dynamically coupled to boundary fluxes.
     """
     model = ALEStefanProblem()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     assert engine.jacobian_bandwidth == 0, "Engine failed to assign Dense Jacobian for coupled ALE state."
     
@@ -204,7 +203,7 @@ def test_ale_extreme_compression_singularity():
     with divide-by-zero errors in the mesh divergence terms.
     """
     model = ALECoordinateScaling(coord_sys="cartesian")
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     # Shrink to 0.001 length
     t_eval = np.linspace(0, 9.99, 100)
@@ -229,7 +228,7 @@ def test_multi_domain_ale_namespace_isolation():
     without their codegen C++ states (`dx`, dilution limits) colliding.
     """
     model = MultiDomainALE()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     # Check C++ source emission for correct variable isolation
     assert "dx_dom_A" in engine.cpp_source

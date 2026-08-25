@@ -10,7 +10,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 def _has_compiler() -> bool:
     has_std = bool(shutil.which("clang++") or shutil.which("g++"))
@@ -73,7 +72,7 @@ class DiscontinuousSteadyStateOracle(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_steady_state_discontinuous_flux_averaging():
-    engine = Engine(model=DiscontinuousSteadyStateOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=DiscontinuousSteadyStateOracle(), target="cpu", mock_execution=False)
     
     # Integrate to a massive time to guarantee thermodynamic steady-state
     # D_R = 0.01, so diffusion time scale is L^2/D = 1^2 / 0.01 = 100s. 100,000s is fully steady.

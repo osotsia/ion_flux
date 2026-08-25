@@ -1,7 +1,6 @@
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Model 1: Piecewise Equation (Works correctly)
@@ -86,7 +85,7 @@ class WorkaroundRegionBoundaryModel(fx.PDE):
 
 def test_piecewise_boundary_evaluates_correctly():
     """Proves that Piecewise loops evaluate global bounds correctly."""
-    engine = Engine(model=PiecewiseBoundaryModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=PiecewiseBoundaryModel(), target="cpu", mock_execution=False)
     y, ydot = np.zeros(engine.layout.n_states), np.zeros(engine.layout.n_states)
     
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})
@@ -101,7 +100,7 @@ def test_standard_region_boundary_is_ignored():
     THE ORACLE: Proves that binding a standard equation to a region 
     causes the compiler to silently ignore the right-hand boundary condition.
     """
-    engine = Engine(model=StandardRegionBoundaryModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=StandardRegionBoundaryModel(), target="cpu", mock_execution=False)
     y, ydot = np.zeros(engine.layout.n_states), np.zeros(engine.layout.n_states)
     
     res = engine.evaluate_residual(y.tolist(), ydot.tolist(), parameters={})

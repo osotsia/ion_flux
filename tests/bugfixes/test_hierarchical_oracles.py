@@ -11,7 +11,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -72,7 +71,7 @@ def test_cross_domain_memory_corruption():
     index. Because of the C++ CLAMP macro, the index does not segfault but maps 
     to the entirely wrong physical location.
     """
-    engine = Engine(model=HierarchicalMemoryCorruptionOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=HierarchicalMemoryCorruptionOracle(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y0, ydot0, _, _, _ = engine._extract_metadata()
@@ -135,7 +134,7 @@ def test_composite_domain_integration_failure():
     It will currently crash with a KeyError during AST translation, and must be 
     patched to support nested nested loops yielding `V_macro * V_micro`.
     """
-    engine = Engine(model=CompositeIntegrationOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=CompositeIntegrationOracle(), target="cpu", mock_execution=False)
     
     y0, ydot0, _, _, _ = engine._extract_metadata()
     res = engine.evaluate_residual(y0, ydot0, parameters={})
@@ -190,7 +189,7 @@ class SphericalFVMOracle(fx.PDE):
 @REQUIRES_COMPILER
 def test_spherical_fvm_volume_exactness():
     """Ensures the compiler has no off-by-one errors regarding Spherical geometry arrays."""
-    engine = Engine(model=SphericalFVMOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SphericalFVMOracle(), target="cpu", mock_execution=False)
     
     y0, ydot0, _, _, _ = engine._extract_metadata()
     y0 = np.array(y0)
@@ -262,7 +261,7 @@ def test_oracle_staggered_grid_nonlinear_dae_interpolation():
     PROBE: Fails if the AST-to-C++ translator misapplies cell-center states to 
     cell-face flux evaluations during non-linear tensor assembly.
     """
-    engine = Engine(model=StaggeredNonLinearMMSOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=StaggeredNonLinearMMSOracle(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(1.0, 2.0), t_eval=np.array([1.0, 2.0]))
     
@@ -326,7 +325,7 @@ def test_oracle_hierarchical_mass_coupling_crucible():
     simulated arrays to strictly account for every single mole of lithium transferred 
     across the scale gap.
     """
-    engine = Engine(model=HierarchicalMassCouplingOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=HierarchicalMassCouplingOracle(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(0, 1.0), t_eval=np.array([0.0, 1.0]))
     
@@ -404,7 +403,7 @@ def test_oracle_chen2020_topological_overlap_off_by_one():
     PROBE: Fails if the `Domain.region` math creates overlapping indices 
     or orphans nodes at the right boundary due to Python 3 float rounding.
     """
-    engine = Engine(model=Chen2020TopologicalOverlapOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=Chen2020TopologicalOverlapOracle(), target="cpu", mock_execution=False)
     
     y0, ydot0, _, _, _ = engine._extract_metadata()
     res = engine.evaluate_residual(y0, ydot0, parameters={})
@@ -455,7 +454,7 @@ def test_oracle_eis_mass_matrix_extraction():
     """
     PROBE: Compares the simulated EIS against the exact analytical Transfer Function.
     """
-    engine = Engine(model=CapacitiveImpedanceOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=CapacitiveImpedanceOracle(), target="cpu", mock_execution=False)
     session = engine.start_session(parameters={"C_cap": 5.0, "R": 2.0, "i_app": 1.0})
     session.reach_steady_state()
     
@@ -504,7 +503,7 @@ def test_oracle_adjoint_mass_matrix_vjp():
     PROBE: Compares the Enzyme-derived continuous Adjoint gradient to an exact 
     Scipy-derived analytical ground truth.
     """
-    engine = Engine(model=AdjointCapacityOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=AdjointCapacityOracle(), target="cpu", mock_execution=False)
     t_eval = np.linspace(0, 5.0, 50)
     
     # Forward Pass
@@ -592,7 +591,7 @@ def test_oracle_literature_transference_mass_leak():
     This test is skipped. The user script faithfully reproduces the DFN equations
     published in the O'Regan 2022 paper, but the paper itself contains an error.
     """
-    engine = Engine(model=VariableTransferenceLeakProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=VariableTransferenceLeakProbe(), target="cpu", mock_execution=False)
     
     res = engine.solve(t_span=(0, 10.0), t_eval=np.array([0.0, 10.0]))
     

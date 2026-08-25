@@ -15,7 +15,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Setup
@@ -95,7 +94,7 @@ def test_unbound_domain_integral_context_resolution():
     Analytical Integral of x dx from 0 to 0.1 = 0.5 * (0.1)^2 = 0.005.
     
     """
-    engine = Engine(model=UnboundIntegralModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=UnboundIntegralModel(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()
@@ -119,7 +118,7 @@ def test_bound_domain_integral_correctness():
     Proves that anchoring a State to the domain currently serves as a valid 
     workaround to restore mathematical exactness to the integral.
     """
-    engine = Engine(model=BoundIntegralModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=BoundIntegralModel(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()

@@ -8,7 +8,6 @@ off-by-one errors, resulting in overlapping physics and orphaned boundary nodes.
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Model for Isolation
@@ -76,7 +75,7 @@ def test_piecewise_residual_abandonment():
     PROBE 2: Evaluates the instantaneous residual to prove the PDE solver 
     abandons the final node due to the off-by-one error.
     """
-    engine = Engine(model=LGM50TopologicalProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=LGM50TopologicalProbe(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()
@@ -98,7 +97,7 @@ def test_piecewise_overlap_overwrite():
     PROBE 3: Proves that the overlapping boundary between x_s and x_p 
     causes the latter to silently overwrite the former.
     """
-    engine = Engine(model=LGM50TopologicalProbe(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=LGM50TopologicalProbe(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y, ydot = np.zeros(N).tolist(), np.zeros(N).tolist()

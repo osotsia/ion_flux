@@ -13,7 +13,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -170,7 +169,7 @@ def test_bimaterial_mass_conservation():
     If the interface at x=1.0 is not stitched, the divergence residuals
     will accumulate/leak mass due to differing diffusion coefficients.
     """
-    engine = Engine(model=BiMaterialDiffusion(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=BiMaterialDiffusion(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     
@@ -194,7 +193,7 @@ def test_bimaterial_jacobian_interface_coupling():
     If fluxes are disjoint, Node 9 (left of interface) will have a 0.0 derivative
     with respect to Node 10 (right of interface).
     """
-    engine = Engine(model=BiMaterialDiffusion(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=BiMaterialDiffusion(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine.layout.n_states
     y = np.linspace(1.0, 5.0, N).tolist()
@@ -220,7 +219,7 @@ def test_triregion_mass_conservation():
     """
     Proves conservation scales safely to 3+ regions (like the DFN electrolyte).
     """
-    engine = Engine(model=TriRegionElectrolyte(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=TriRegionElectrolyte(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
     y = np.linspace(100.0, 200.0, N).tolist() # Smooth gradient across all 3 regions
@@ -241,7 +240,7 @@ def test_complex_tensor_piecewise_stitching():
     Ensures that auto-stitching doesn't break when fluxes contain complex
     multi-state dependencies (like migration `c * grad(phi)`).
     """
-    engine = Engine(model=CoupledTensorFlux(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
+    engine = fx.Engine(model=CoupledTensorFlux(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     N = engine.layout.n_states
     off_c, size_c = engine.layout.state_offsets["c"]

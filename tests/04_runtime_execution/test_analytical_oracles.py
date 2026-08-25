@@ -11,7 +11,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -55,7 +54,7 @@ class ExponentialDecay(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_1_exponential_decay():
     model = ExponentialDecay()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     t_eval = np.linspace(0, 10, 100)
     k_val = 0.5
@@ -92,7 +91,7 @@ class HarmonicOscillator(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_2_harmonic_oscillator():
     model = HarmonicOscillator()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     t_eval = np.linspace(0, 5, 200)
     omega_val = 2.0
@@ -136,7 +135,7 @@ class HeatEquationPDE(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_3_heat_equation_pde():
     model = HeatEquationPDE()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     t_eval = np.linspace(0, 1.0, 50)
     alpha_val = 0.1
@@ -185,7 +184,7 @@ class NonLinearDAE(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_4_nonlinear_dae():
     model = NonLinearDAE()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     t_eval = np.linspace(0, 5, 100)
     k_val, I_val, R_val = 0.5, 2.0, 0.1
@@ -241,7 +240,7 @@ class ALESwellingOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_5_ale_mass_conservation():
     model = ALESwellingOracle()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     t_eval = np.linspace(0, 2.0, 50)
     
@@ -299,7 +298,7 @@ class ALESphericalContractionOracle(fx.PDE):
 @REQUIRES_RUNTIME
 def test_oracle_6_ale_spherical_contraction():
     model = ALESphericalContractionOracle()
-    engine = Engine(model=model, target="cpu", mock_execution=False)
+    engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     # Simulate a particle shrinking from R=1.0 down to R=0.5
     t_eval = np.linspace(0, 5.0, 50) 

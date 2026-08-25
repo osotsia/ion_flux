@@ -14,7 +14,6 @@ import shutil
 import platform
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 from ion_flux.runtime.scheduler import MultiTenantScheduler
 from ion_flux.protocols import Sequence, CC, CV, Rest
 
@@ -120,8 +119,8 @@ def test_native_vs_sundials_cccv_hot_swapping():
     Algebraic constraints mid-solve (CC to CV) utilizing Python root-finding logic.
     """
     model = BatteryProtocolPDE()
-    engine_native = Engine(model=model, target="cpu", solver_backend="native")
-    engine_sundials = Engine(model=model, target="cpu", solver_backend="sundials")
+    engine_native = fx.Engine(model=model, target="cpu", solver_backend="native")
+    engine_sundials = fx.Engine(model=model, target="cpu", solver_backend="sundials")
     
     protocol = Sequence([
         CC(rate=10.0, until=model.V <= 3.2),
@@ -147,7 +146,7 @@ def test_native_vs_sundials_cccv_hot_swapping():
 @REQUIRES_RUNTIME
 def test_stateful_session_hil_control():
     """Validates the SolverHandle maintains memory seamlessly for continuous micro-stepping (BMS HIL)."""
-    engine = Engine(model=BatteryProtocolPDE(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=BatteryProtocolPDE(), target="cpu", mock_execution=False)
     
     # Initialize at Rest (0 current)
     session = engine.start_session(parameters={"_term_i_target": 0.0, "_term_mode": 1.0})
@@ -177,7 +176,7 @@ def test_differentiable_analytical_eis_and_adjoints():
     1. Analytical Frequency Domain Solves (EIS) via Enzyme Jacobians.
     2. Discrete Adjoint Backward Propagation via Vector-Jacobian Products (VJPs).
     """
-    engine = Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
     session = engine.start_session(parameters={"R": 10.0, "C": 0.1, "i_app": 1.0})
     
     session.reach_steady_state()
@@ -215,7 +214,7 @@ def test_3d_unstructured_matrix_free_gmres():
     (bandwidth=-1), correctly traverse CSR geometries, and support Adjoint passes without OOM.
     """
     # Cache=False forces the Engine to re-emit the JVP C++ payload natively
-    engine = Engine(model=UnstructuredGMRESModel(), target="cpu", mock_execution=False, cache=False)
+    engine = fx.Engine(model=UnstructuredGMRESModel(), target="cpu", mock_execution=False, cache=False)
     
     assert engine.jacobian_bandwidth == -1, "Engine failed to assign GMRES to unstructured CSR graph."
     
@@ -239,7 +238,7 @@ def test_3d_unstructured_matrix_free_gmres():
 @REQUIRES_RUNTIME
 def test_rayon_task_parallelism_batching():
     """Validates that solve_batch bypasses the Python GIL utilizing Rust Rayon."""
-    engine = Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
     
     param_sweep = [{"R": 10.0}, {"R": 20.0}, {"R": 30.0}]
     results = engine.solve_batch(parameters=param_sweep, t_span=(0, 1.0), max_workers=3)
@@ -264,14 +263,14 @@ def test_openmp_data_parallelism_emission():
                 "initial_conditions": {self.c: 0.0}
             }
             
-    engine = Engine(model=LargeOpenMPModel(), target="cpu:omp", mock_execution=False)
+    engine = fx.Engine(model=LargeOpenMPModel(), target="cpu:omp", mock_execution=False)
     assert "omp parallel for" in engine.cpp_source
 
 
 @REQUIRES_RUNTIME
 def test_stateless_binary_deployment(tmp_path):
     """Validates 0ms cold-start `.so` deployments bypassing AST reconstruction."""
-    engine = Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
     
     export_file = tmp_path / "model_prod.so"
     engine.export_binary(str(export_file))
@@ -279,7 +278,7 @@ def test_stateless_binary_deployment(tmp_path):
     assert os.path.exists(str(export_file) + ".meta.json")
     
     # Instantiate instantly without Clang or AST parsing
-    stateless_engine = Engine.load(str(export_file), target="cpu:serial")
+    stateless_engine = fx.Engine.load(str(export_file), target="cpu:serial")
     
     assert stateless_engine.mock_execution is False
     assert stateless_engine.layout.n_states == engine.layout.n_states
@@ -297,7 +296,7 @@ async def test_async_multitenant_scheduler_isolation():
     thread-pool panic/exceptions from dragging down sibling jobs.
     """
     # For isolation testing without needing Clang, use a mock execution engine
-    engine = Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=True)
+    engine = fx.Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=True)
     scheduler = MultiTenantScheduler(max_concurrent=2)
     
     # `c.t0` == float('inf') is a hardcoded mock trigger for "Native Solver Crash" in mock_execution

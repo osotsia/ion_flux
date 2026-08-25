@@ -16,7 +16,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Environment Configuration
@@ -89,7 +88,7 @@ def test_disproportionate_resolution_distorts_physics():
     If unfixed (or unmitigated in the user's script), this evaluates to ~10.1 
     instead of 80.0, exposing why charge conservation failed in the DFN model.
     """
-    engine = Engine(model=SpatialScaleGapOracle(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SpatialScaleGapOracle(), target="cpu", mock_execution=False)
     
     # Evaluate instantaneous algebraic integration at t=0
     y0, ydot0, _, _, _ = engine._extract_metadata()
@@ -147,7 +146,7 @@ def test_composite_domain_csr_extraction():
     the unstructured CSR graph arrays (`V_nodes`, `row_ptr`, etc.) when they 
     are hidden inside a `CompositeDomain` multiplier.
     """
-    engine = Engine(model=CompositeCSRExtractionOracle(), target="cpu", mock_execution=True)
+    engine = fx.Engine(model=CompositeCSRExtractionOracle(), target="cpu", mock_execution=True)
     
     # If the `_get_domains()` recursion fix is absent, the compiler sees `macro_micro`, 
     # checks `getattr(macro_micro, 'csr_data', None)` which is False, and skips 

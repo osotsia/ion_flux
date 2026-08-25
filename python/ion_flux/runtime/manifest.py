@@ -2,8 +2,8 @@ import json
 import shutil
 import os
 from typing import Dict, Any, List, Tuple, Optional
-from ion_flux.compiler._1_analysis.memory_layout import MemoryLayout
-from ion_flux.compiler._5_toolchain.ffi_runtime import NativeRuntime
+from ion_flux.stage2_compiler._1_analysis.memory_layout import MemoryLayout
+from ion_flux.stage3_backend.ffi_runtime import NativeRuntime
 
 class ExecutableManifest:
     """

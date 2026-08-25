@@ -16,7 +16,6 @@ Specifically:
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 
 # ==============================================================================
 # Bug Isolation Model
@@ -85,7 +84,7 @@ def test_piecewise_composite_dae_masking_bug():
     `reg["end_idx"]` (4), masking indices 0-3 as 1.0, but silently leaving 
     indices 4-11 as 0.0 (Algebraic constraints).
     """
-    engine = Engine(model=CompositeMaskingBugOracle(), target="cpu", mock_execution=True)
+    engine = fx.Engine(model=CompositeMaskingBugOracle(), target="cpu", mock_execution=True)
     
     _, _, id_arr, _, _ = engine._extract_metadata()
     id_arr = np.array(id_arr)
@@ -110,7 +109,7 @@ def test_dirichlet_composite_dae_masking_bug():
     `offset + size - 1` (11). Indices 4, 8, 3, and 7 are left as 1.0 (PDEs), 
     causing a structurally singular system or constraint divergence.
     """
-    engine = Engine(model=CompositeMaskingBugOracle(), target="cpu", mock_execution=True)
+    engine = fx.Engine(model=CompositeMaskingBugOracle(), target="cpu", mock_execution=True)
     
     _, _, id_arr, _, _ = engine._extract_metadata()
     id_arr = np.array(id_arr)

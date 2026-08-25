@@ -1,6 +1,6 @@
 import math
 from typing import List, Dict, Tuple, Any, Set
-from ion_flux.dsl.core import State, Parameter, Observable
+from ion_flux.stage1_dsl.core import State, Parameter, Observable
 
 class MemoryLayout:
     """

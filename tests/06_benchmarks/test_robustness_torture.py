@@ -14,7 +14,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.runtime.engine import Engine
 from ion_flux.protocols import Sequence, CC, Rest
 
 # ==============================================================================
@@ -111,7 +110,7 @@ class SimpleTimingIntegrator(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_torture_t0_algebraic_snap():
-    engine = Engine(model=AlgebraicSnapCrucible(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=AlgebraicSnapCrucible(), target="cpu", mock_execution=False)
     protocol = Sequence([CC(rate=100.0, time=1.0)])
     res = engine.solve(protocol=protocol)
     
@@ -120,7 +119,7 @@ def test_torture_t0_algebraic_snap():
 
 @REQUIRES_RUNTIME
 def test_torture_high_frequency_chatter():
-    engine = Engine(model=AlgebraicSnapCrucible(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=AlgebraicSnapCrucible(), target="cpu", mock_execution=False)
     steps = []
     for _ in range(25):
         steps.append(CC(rate=10.0, time=1.0))
@@ -142,7 +141,7 @@ def test_torture_pathological_stiffness():
     C++ backend either miraculously solves it or degrades gracefully into a Python Exception.
     It MUST NOT segfault the host process.
     """
-    engine = Engine(model=PathologicalStiffness(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=PathologicalStiffness(), target="cpu", mock_execution=False)
     
     try:
         res = engine.solve(t_span=(0, 1.0), parameters={"D": 1e-24})
@@ -160,7 +159,7 @@ def test_torture_bisection_asymptote_tracking():
     of the ODE physics. The bisection algorithm must perfectly locate the boundaries 
     without thrashing or overstepping into the opposite regime.
     """
-    engine = Engine(model=BisectionHysteresis(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=BisectionHysteresis(), target="cpu", mock_execution=False)
     
     protocol = Sequence([
         CC(rate=100.0, until=engine.model.y >= 55.5),
@@ -182,7 +181,7 @@ def test_torture_bisection_asymptote_tracking():
 
 @REQUIRES_RUNTIME
 def test_torture_graceful_degradation_segfault_guard():
-    engine = Engine(model=UnsolvableParadox(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=UnsolvableParadox(), target="cpu", mock_execution=False)
     
     with pytest.raises(RuntimeError) as excinfo:
         engine.solve(t_span=(0, 1.0))
@@ -198,7 +197,7 @@ def test_protocol_orchestrator_subsecond_timing_bug():
     PROBE: The `dt_step` Clamping Bug.
     Validates that `_orchestrate_sequence` strictly respects protocol step limits.
     """
-    engine = Engine(model=SimpleTimingIntegrator(), target="cpu", mock_execution=False)
+    engine = fx.Engine(model=SimpleTimingIntegrator(), target="cpu", mock_execution=False)
     
     steps = [CC(rate=1.0, time=0.01) for _ in range(5)]
     protocol = Sequence(steps)
