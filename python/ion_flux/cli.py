@@ -11,6 +11,7 @@ import time
 import threading
 import urllib.error
 from typing import Tuple
+import hashlib
 
 # =============================================================================
 # Terminal Utilities
@@ -124,13 +125,13 @@ class ToolchainInstaller:
         self._check_system_dependencies()
         self._prepare_directories()
         
-        llvm_url, enzyme_url = self._resolve_download_urls()
+        llvm_url, enzyme_url, llvm_hash, enzyme_hash = self._resolve_download_urls()
 
         print("Fetching dependencies...")
-        self._download_with_progress(llvm_url, self.llvm_tarball, "LLVM")
+        self._download_with_progress(llvm_url, self.llvm_tarball, "LLVM", llvm_hash)
         self._extract_archive(self.llvm_tarball, self.llvm_dir, "Extr")
         
-        self._download_with_progress(enzyme_url, self.enzyme_tarball, "Enzm")
+        self._download_with_progress(enzyme_url, self.enzyme_tarball, "Enzm", enzyme_hash)
         self._extract_archive(self.enzyme_tarball, self.enzyme_src_dir, "Extr")
 
         print("Building Automatic Differentiation plugin...")
@@ -221,28 +222,33 @@ class ToolchainInstaller:
             shutil.rmtree(self.enzyme_src_dir)
         os.makedirs(self.enzyme_src_dir, exist_ok=True)
 
-    def _resolve_download_urls(self) -> Tuple[str, str]:
+    def _resolve_download_urls(self) -> Tuple[str, str, str, str]:
         """Maps the current hardware architecture to the correct LLVM release binaries."""
         system = platform.system().lower()
         machine = platform.machine().lower()
         
+        enzyme_hash = "9334895dc805bf9089709587d66212a96d7612bc2d6ad0c670d95fcc904496d7"
+        
         if system == "darwin":
             arch = "ARM64" if machine == "arm64" else "X64"
             llvm_url = f"https://github.com/llvm/llvm-project/releases/download/llvmorg-{self.llvm_version}/LLVM-{self.llvm_version}-macOS-{arch}.tar.xz"
+            llvm_hash = "9da86f64a99f5ce9b679caf54e938736ca269c5e069d0c94ad08b995c5f25c16" if arch == "ARM64" else "264f2f1e8b67f066749349ae8b4943d346cd44e099464164ef21b42a57663540"
         elif system == "linux":
             llvm_url = f"https://github.com/llvm/llvm-project/releases/download/llvmorg-{self.llvm_version}/LLVM-{self.llvm_version}-Linux-X64.tar.xz"
+            llvm_hash = "cee77d641690466a193d9b88c89705de1c02bbad46bde6a3b126793c0a0f2923"
         else:
             print(f"Unsupported system architecture: {system} {machine}")
             sys.exit(1)
             
         enzyme_url = f"https://github.com/EnzymeAD/Enzyme/archive/refs/tags/{self.enzyme_version}.tar.gz"
-        return llvm_url, enzyme_url
+        return llvm_url, enzyme_url, llvm_hash, enzyme_hash
 
     # --- I/O & Network ---
 
-    def _download_with_progress(self, url: str, dest_path: str, bar_name: str) -> None:
+    def _download_with_progress(self, url: str, dest_path: str, bar_name: str, expected_hash: str) -> None:
         """Streams a download from a URL, updating the custom progress bar via a reporting hook."""
         pb = ProgressBar(bar_name)
+        hasher = hashlib.sha256()
         
         def reporthook(block_num: int, block_size: int, total_size: int):
             downloaded = block_num * block_size
@@ -269,17 +275,24 @@ class ToolchainInstaller:
                         if not chunk:
                             break
                         out_file.write(chunk)
+                        hasher.update(chunk)
                         downloaded += len(chunk)
                         
                         # Calculate fake block variables to feed the standard reporthook logic
                         reporthook(downloaded // 16384, 16384, total_size)
                         
             pb.finish("Complete")
+            
+            actual_hash = hasher.hexdigest()
+            if actual_hash != expected_hash:
+                print(f"\nHash verification failed for {bar_name}!")
+                print(f"Expected: {expected_hash}")
+                print(f"Actual:   {actual_hash}")
+                os.remove(dest_path)
+                sys.exit(1)
+                
         except urllib.error.URLError as e:
             print(f"\nNetwork error downloading {bar_name}: {e}")
-            sys.exit(1)
-        except Exception as e:
-            print(f"\nError downloading {bar_name}: {e}")
             sys.exit(1)
 
     def _extract_archive(self, tarball_path: str, dest_dir: str, bar_name: str) -> None:

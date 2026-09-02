@@ -1,6 +1,6 @@
-### `ion_flux` V2 API Reference Architecture
+### `ion_flux` API Reference Architecture
 
-The `ion_flux` V2 API embraces a design philosophy of **Zero boilerplate, infinite scalability.** 
+The `ion_flux` API embraces a design philosophy of **Zero boilerplate, infinite scalability.** 
 
 By leveraging a purely Python-based AST compiler, a custom native Rust implicit solver, and Enzyme for Compile-Time Automatic Differentiation (AD), the API ruthlessly separates *Physical Intent* from *Computational Execution*. 
 
@@ -64,7 +64,7 @@ class ModularSPM(fx.PDE):
         
         macro_physics = {
             "equations": {
-                # Global algebraic variables natively map to V2 standard equation structures
+                # Global algebraic variables natively map to standard equation structures
                 self.V_cell: self.V_cell == (4.2 - 0.001 * c_surf_p) - (0.1 - 0.001 * c_surf_n)
             },
             "boundaries": {},
@@ -92,7 +92,7 @@ class ModularSPM(fx.PDE):
 
 ### Level 2: Scaling Complexity (Multi-Scale & DAEs)
 
-In legacy frameworks, modeling macro-micro scale coupling or differential-algebraic equations (DAEs) requires severe "math gymnastics." V2 treats these complex phenomena as native syntax.
+In legacy frameworks, modeling macro-micro scale coupling or differential-algebraic equations (DAEs) requires severe "math gymnastics." Ion_flux treats these complex phenomena as native syntax.
 
 *   **Pseudo-Dimensions:** Multiply domains together to create hierarchical cross-product meshes (`macro_micro = x * r`). The compiler unrolls these into highly efficient flat C-array strides.
 *   **Spatial DAEs:** Any equation omitting a `fx.dt()` operator is automatically flagged by the compiler as a pure Algebraic constraint. The Rust implicit solver will solve it at every spatial node concurrently with the ODEs.
@@ -162,7 +162,7 @@ class MinimalDFN(fx.PDE):
 
 ### Level 3: The Engineer API (Execution & Protocols)
 
-Once the AST is built, the `fx.Engine` uses LLVM to JIT-compile the math via Enzyme into native machine code (C++). `ion_flux` V2 provides ultimate flexibility for execution, seamlessly handling continuous protocol blocks or microsecond HIL stepping.
+Once the AST is built, the `fx.Engine` uses LLVM to JIT-compile the math via Enzyme into native machine code (C++). `ion_flux` provides ultimate flexibility for execution, seamlessly handling continuous protocol blocks or microsecond HIL stepping.
 
 #### Use Case A: Multi-Mode Protocols (CCCV)
 Engineers supply a compiled state-machine (`Sequence`). By targeting the `fx.Terminal` abstraction, the native solver dynamically hot-swaps the active constraint (e.g., forcing $i_{app} = i_{target}$ for CC, or $V_{cell} = v_{target}$ for CV). It utilizes dense bisection root-finding to land perfectly on voltage asymptotes without re-compiling the AST or rebuilding the Jacobian sparsity pattern.
