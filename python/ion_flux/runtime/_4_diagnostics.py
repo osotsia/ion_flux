@@ -1,32 +1,21 @@
-import json
 from ion_flux.runtime.manifest import ExecutableManifest
+
+try:
+    from ion_flux._core import NativeSolverCrash
+except ImportError:
+    class NativeSolverCrash(RuntimeError): pass
 
 def format_native_crash(original_error: Exception, manifest: ExecutableManifest) -> Exception:
     """
-    Parses Native Rust Crash JSONs (embedded in the error message) and maps physical Python AST variable names 
+    Extracts the structured NativeSolverCrash dictionary and maps physical Python AST variable names 
     back to the faulty flat C-arrays that caused the crash.
     """
-    try:
-        err_str = str(original_error)
-        
-        # Try to parse the embedded JSON from the Rust panic message
-        start_idx = err_str.find('{')
-        end_idx = err_str.rfind('}')
-        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
-            raise ValueError("No JSON payload found in the Native Rust Error string.")
+    if isinstance(original_error, NativeSolverCrash):
+        if not original_error.args or not isinstance(original_error.args[0], dict):
+            return original_error
             
-        json_str = err_str[start_idx:end_idx+1]
+        crash_data = original_error.args[0]
         
-        # Rust's f64 formatter produces 'inf', '-inf', and 'NaN' for floating point extremities. 
-        # Python's strict json parser requires 'Infinity', '-Infinity', and 'NaN'.
-        json_str = json_str.replace(": inf", ": Infinity")
-        json_str = json_str.replace(": -inf", ": -Infinity")
-        
-        crash_data = json.loads(json_str)
-        
-        if crash_data.get("status") != "CRASH":
-            raise ValueError("Valid JSON found, but it is not a solver crash report.")
-            
         idx_to_name = {}
         for name, (offset, size) in manifest.layout.state_offsets.items():
             for i in range(size): 
@@ -69,7 +58,6 @@ def format_native_crash(original_error: Exception, manifest: ExecutableManifest)
             
         msg += f"{'-'*100}\n"
         return RuntimeError(msg)
-    except Exception as e:
-        # Gracefully fallback to the original error if JSON parsing or string processing fails,
-        # but append the parsing error for diagnostic context.
-        return RuntimeError(f"{str(original_error)}\n\n[Diagnostic Formatting Failed: {e}]")
+        
+    # Fallback for standard String panics (e.g., from SUNDIALS or simple LU failures)
+    return RuntimeError(f"{str(original_error)}")

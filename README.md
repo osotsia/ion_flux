@@ -234,7 +234,7 @@ while session.time < 3600.0:
 
 For more details, see the [Project Structure Documentation](/docs/Ion_Flux_project_structure.md).
 
-## 🧪 Testing & Verification
+## ✅ Testing & Verification
 
 The framework is verified through an automated CI pipeline running across macOS and Linux (Python 3.10–3.14). The testing architecture relies on the following methodologies:
 

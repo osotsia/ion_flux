@@ -4,6 +4,8 @@ use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::solver::shared::workspace::Workspace;
 use crate::solver::_2_stepper::bdf;
 use crate::solver::_3_nonlinear::newton;
+use crate::NativeSolverCrash;
+use crate::solver::_0_ffi::crash_report_to_pydict;
 
 #[pyclass(unsendable)]
 pub struct SolverHandle {
@@ -39,13 +41,17 @@ impl SolverHandle {
         Ok(SolverHandle { _lib: lib, prob, wk })
     }
 
-    pub fn step(&mut self, dt: f64) -> PyResult<()> {
-        bdf::step(&self.prob, &mut self.wk, dt, None).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    pub fn step(&mut self, py: Python<'_>, dt: f64) -> PyResult<()> {
+        bdf::step(&self.prob, &mut self.wk, dt, None).map_err(|e| {
+            NativeSolverCrash::new_err(crash_report_to_pydict(py, &e).unbind())
+        })
     }
 
     pub fn step_history<'py>(&mut self, py: Python<'py>, dt: f64) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
         let mut history = vec![];
-        bdf::step(&self.prob, &mut self.wk, dt, Some(&mut history)).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        bdf::step(&self.prob, &mut self.wk, dt, Some(&mut history)).map_err(|e| {
+            NativeSolverCrash::new_err(crash_report_to_pydict(py, &e).unbind())
+        })?;
         
         let h_len = history.len();
         let mut micro_t = vec![0.0; h_len];
@@ -91,7 +97,7 @@ impl SolverHandle {
         if idx < self.wk.p.len() { self.wk.p[idx] = val; } 
     }
     
-    pub fn reach_steady_state(&mut self) -> PyResult<()> { self.step(1000.0) }
+    pub fn reach_steady_state(&mut self, py: Python<'_>) -> PyResult<()> { self.step(py, 1000.0) }
     pub fn clone_state(&self) -> PyResult<(f64, Vec<f64>, Vec<f64>)> { Ok(self.wk.clone_state()) }
     pub fn restore_state(&mut self, t: f64, y: Vec<f64>, ydot: Vec<f64>) -> PyResult<()> { self.wk.restore_state(t, y, ydot); Ok(()) }
 }

@@ -2,14 +2,14 @@ use crate::solver::shared::problem::Problem;
 use crate::solver::shared::workspace::Workspace;
 use crate::solver::_3_nonlinear::newton;
 use crate::solver::_3_nonlinear::constraints;
-use crate::solver::shared::diagnostics::build_crash_report_json;
+use crate::solver::shared::diagnostics::CrashReport;
 
 pub fn step(
     prob: &Problem,
     wk: &mut Workspace,
     target_dt: f64,
     mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>
-) -> Result<(), String> {
+) -> Result<(), CrashReport> {
     let mut t_local = 0.0;
     let mut error_fails = 0;
     let abs_t = wk.t;
@@ -70,8 +70,7 @@ pub fn step(
                     
                     if wk.history.h <= prob.config.min_dt {
                         let reason = format!("Tolerance Starvation (Step collapsed below min_dt). t={}", abs_t + t_local);
-                        let crash_json = build_crash_report_json(&wk.diag, &wk.y, &wk.ydot, &prob.id, &reason);
-                        return Err(crash_json);
+                        return Err(wk.diag.build_crash_report(&wk.y, &wk.ydot, &prob.id, reason));
                     }
                     continue;
                 }
@@ -98,8 +97,7 @@ pub fn step(
                 wk.diag.rejected_steps += 1; wk.history.restore(); wk.history.h *= 0.25; wk.lu_solver.mark_stale();
                 if wk.history.h <= prob.config.min_dt {
                     let reason = format!("Nonlinear Divergence / Constraint Starvation (Step collapsed below min_dt). t={}", abs_t + t_local);
-                    let crash_json = build_crash_report_json(&wk.diag, &wk.y, &wk.ydot, &prob.id, &reason);
-                    return Err(crash_json);
+                    return Err(wk.diag.build_crash_report(&wk.y, &wk.ydot, &prob.id, reason));
                 }
             }
         }
