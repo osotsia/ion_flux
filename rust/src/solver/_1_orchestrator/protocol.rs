@@ -4,6 +4,7 @@ use crate::solver::shared::workspace::Workspace;
 use crate::solver::_3_nonlinear::newton;
 use crate::solver::_2_stepper::bdf;
 use crate::solver::_1_orchestrator::bisection::{TrigInfo, check_trigger, execute_bisection};
+use crate::solver::_0_ffi::SolverError;
 
 pub struct ProtocolStep {
     pub s_type: i32, pub target_val: f64, pub t_limit: f64,
@@ -14,7 +15,7 @@ pub fn run_sequence(
     prob: &Problem, wk: &mut Workspace, steps: &[ProtocolStep],
     out_t: &mut Vec<f64>, out_traj: &mut Vec<f64>, out_obs: &mut Vec<f64>,
     show_progress: bool, v_idx: i32
-) -> Result<(), String> {
+) -> Result<(), SolverError> {
     
     let mut step_obs = vec![0.0; prob.n_obs];
     if prob.n_obs > 0 {

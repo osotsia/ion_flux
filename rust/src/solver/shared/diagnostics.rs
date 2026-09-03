@@ -1,3 +1,28 @@
+#[derive(Clone, Debug)]
+pub struct Offender {
+    pub index: usize,
+    pub is_diff: bool,
+    pub y_val: f64,
+    pub ydot_val: f64,
+    pub residual: f64,
+    pub proposed_step_dy: f64,
+    pub solver_weight: f64,
+    pub weighted_error: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CrashReport {
+    pub reason: String,
+    pub accepted_steps: usize,
+    pub t0_max_res: f64,
+    pub t0_max_res_idx: usize,
+    pub jac_max: f64,
+    pub jac_min: f64,
+    pub cond_warning: bool,
+    pub trace: Vec<(usize, f64, f64)>,
+    pub offenders: Vec<Offender>,
+}
+
 #[derive(Clone)]
 pub struct Diagnostics {
     pub total_steps: usize,
@@ -40,48 +65,47 @@ impl Diagnostics {
             jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0, recent_newton_norms: std::collections::VecDeque::new(),
         }
     }
-}
 
-pub fn build_crash_report_json(diag: &Diagnostics, y: &[f64], ydot: &[f64], id: &[f64], reason: &str) -> String {
-    let mut offenders: Vec<(usize, f64, f64, f64, f64, f64, f64, bool)> = diag.last_res.iter().enumerate()
-        .map(|(i, &res)| {
-            let weight = diag.last_weights.get(i).copied().unwrap_or(0.0);
-            let dy = diag.last_dy.get(i).copied().unwrap_or(0.0);
-            let err = dy * weight;
-            let is_diff = id.get(i).unwrap_or(&0.0) > &0.5;
-            let y_v = y.get(i).copied().unwrap_or(0.0);
-            let ydot_v = ydot.get(i).copied().unwrap_or(0.0);
-            (i, res, err.abs(), y_v, ydot_v, dy, weight, is_diff)
+    pub fn build_crash_report(&self, y: &[f64], ydot: &[f64], id: &[f64], reason: String) -> CrashReport {
+        let mut raw_offenders: Vec<(usize, f64, f64, f64, f64, f64, f64, bool)> = self.last_res.iter().enumerate()
+            .map(|(i, &res)| {
+                let weight = self.last_weights.get(i).copied().unwrap_or(0.0);
+                let dy = self.last_dy.get(i).copied().unwrap_or(0.0);
+                let err = dy * weight;
+                let is_diff = id.get(i).unwrap_or(&0.0) > &0.5;
+                let y_v = y.get(i).copied().unwrap_or(0.0);
+                let ydot_v = ydot.get(i).copied().unwrap_or(0.0);
+                (i, res, err.abs(), y_v, ydot_v, dy, weight, is_diff)
+            }).collect();
+        
+        raw_offenders.sort_by(|a, b| {
+            let a_nan = !a.1.is_finite() || !a.3.is_finite() || !a.4.is_finite();
+            let b_nan = !b.1.is_finite() || !b.3.is_finite() || !b.4.is_finite();
+            if a_nan && !b_nan { return std::cmp::Ordering::Less; }
+            if !a_nan && b_nan { return std::cmp::Ordering::Greater; }
+            b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        let offenders: Vec<Offender> = raw_offenders.into_iter().take(15).map(|(i, res, _err, y_v, ydot_v, dy, weight, is_diff)| {
+            Offender {
+                index: i, is_diff, y_val: y_v, ydot_val: ydot_v,
+                residual: res, proposed_step_dy: dy, solver_weight: weight, weighted_error: _err,
+            }
         }).collect();
-    
-    offenders.sort_by(|a, b| {
-        let a_nan = !a.1.is_finite() || !a.3.is_finite() || !a.4.is_finite();
-        let b_nan = !b.1.is_finite() || !b.3.is_finite() || !b.4.is_finite();
-        if a_nan && !b_nan { return std::cmp::Ordering::Less; }
-        if !a_nan && b_nan { return std::cmp::Ordering::Greater; }
-        b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    
-    let top_offenders: Vec<String> = offenders.into_iter().take(15).map(|(i, res, err, y_v, ydot_v, dy, weight, is_diff)| {
-        let eq_type = if is_diff { "ODE/PDE" } else { "Algebraic" };
-        format!(
-            "{{\n      \"index\": {},\n      \"type\": \"{}\",\n      \"y_val\": {:.3e},\n      \"ydot_val\": {:.3e},\n      \"residual\": {:.3e},\n      \"proposed_step_dy\": {:.3e},\n      \"solver_weight\": {:.3e},\n      \"weighted_error\": {:.3e}\n    }}",
-            i, eq_type, y_v, ydot_v, res, dy, weight, err
-        )
-    }).collect();
 
-    let mut trace_str = String::new();
-    let trace_len = diag.recent_newton_norms.len();
-    for (i, &(iter, fnorm, dynorm)) in diag.recent_newton_norms.iter().enumerate() {
-        trace_str.push_str(&format!("{{\"iter\": {}, \"residual_norm\": {:.3e}, \"step_norm\": {:.3e}}}", iter, fnorm, dynorm));
-        if i < trace_len - 1 { trace_str.push_str(",\n    "); }
+        let trace = self.recent_newton_norms.iter().map(|&(iter, fnorm, dynorm)| (iter, fnorm, dynorm)).collect();
+        let cond_warning = self.jac_max > 0.0 && self.jac_min > 0.0 && (self.jac_max / self.jac_min) > 1e12;
+
+        CrashReport {
+            reason,
+            accepted_steps: self.accepted_steps,
+            t0_max_res: self.t0_max_res,
+            t0_max_res_idx: self.t0_max_res_idx,
+            jac_max: self.jac_max,
+            jac_min: self.jac_min,
+            cond_warning,
+            trace,
+            offenders,
+        }
     }
-
-    let cond_warning = diag.jac_max > 0.0 && diag.jac_min > 0.0 && (diag.jac_max / diag.jac_min) > 1e12;
-    
-    format!(
-        "{{\n  \"status\": \"CRASH\",\n  \"reason\": \"{}\",\n  \"accepted_steps\": {},\n  \"initialization_health\": {{\n    \"t0_max_residual\": {:.3e},\n    \"t0_max_residual_index\": {}\n  }},\n  \"jacobian_health\": {{\n    \"max_element\": {:.3e},\n    \"min_nonzero_element\": {:.3e},\n    \"condition_warning\": {}\n  }},\n  \"newton_thrashing_trace\": [\n    {}\n  ],\n  \"top_offenders\": [\n    {}\n  ]\n}}",
-        reason, diag.accepted_steps, diag.t0_max_res, diag.t0_max_res_idx,
-        diag.jac_max, diag.jac_min, cond_warning, trace_str, top_offenders.join(",\n    ")
-    )
 }

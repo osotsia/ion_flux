@@ -9,6 +9,8 @@ use crate::solver::shared::workspace::Workspace;
 use crate::solver::_2_stepper::bdf;
 use crate::solver::_1_orchestrator::protocol::{ProtocolStep, run_sequence};
 use crate::solver::_1_orchestrator::bisection::TrigInfo;
+use crate::NativeSolverCrash;
+use crate::solver::_0_ffi::{SolverError, crash_report_to_pydict};
 
 #[pyfunction]
 #[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, record_history=false, debug=false, show_progress=true, v_idx=-1))]
@@ -51,7 +53,11 @@ pub fn solve_ida_native<'py>(
     let total_steps = t_eval.len().saturating_sub(1);
     for step in 1..t_eval.len() {
         let dt = t_eval[step] - t_eval[step - 1];
-        bdf::step(&prob, &mut wk, dt, history.as_mut()).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        
+        bdf::step(&prob, &mut wk, dt, history.as_mut()).map_err(|report| {
+            NativeSolverCrash::new_err(crash_report_to_pydict(py, &report).unbind())
+        })?;
+        
         for i in 0..n { out_traj[step * n + i] = wk.y[i]; }
         
         if let Some(obs_fn) = prob.fns.obs_fn {
@@ -124,7 +130,7 @@ pub fn solve_batch_native<'py>(
     let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
     let prob_base = Problem { n: y0.len(), bw: bandwidth, n_obs, id, constraints: vec![0.0; y0.len()], m: m_list, spatial_diag, max_steps, cpr, config: SolverConfig::default(), fns };
 
-    let results: Result<Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, String> = py.allow_threads(|| {
+    let results: Result<Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, SolverError> = py.allow_threads(|| {
         pool.install(|| {
             p_batch.par_iter().enumerate().map(|(b_idx, p)| {
                 let prob = prob_base.clone();
@@ -152,7 +158,7 @@ pub fn solve_batch_native<'py>(
                     out_t = t_eval.clone();
                     out_traj = vec![0.0; t_eval.len() * prob.n];
                     out_obs = vec![0.0; t_eval.len() * prob.n_obs];
-                    crate::solver::_3_nonlinear::newton::calc_algebraic_roots(&prob, &mut wk)?;
+                    crate::solver::_3_nonlinear::newton::calc_algebraic_roots(&prob, &mut wk).map_err(|e| SolverError::Message(e))?;
                     for i in 0..prob.n { out_traj[i] = wk.y[i]; }
                     if let Some(obs_fn) = prob.fns.obs_fn {
                         let mut step_obs = vec![0.0; prob.n_obs];
@@ -160,7 +166,7 @@ pub fn solve_batch_native<'py>(
                         for i in 0..prob.n_obs { out_obs[i] = step_obs[i]; }
                     }
                     for step in 1..t_eval.len() {
-                        bdf::step(&prob, &mut wk, t_eval[step] - t_eval[step - 1], None)?;
+                        bdf::step(&prob, &mut wk, t_eval[step] - t_eval[step - 1], None).map_err(SolverError::Crash)?;
                         for i in 0..prob.n { out_traj[step * prob.n + i] = wk.y[i]; }
                         if let Some(obs_fn) = prob.fns.obs_fn {
                             let mut step_obs = vec![0.0; prob.n_obs];
@@ -188,7 +194,11 @@ pub fn solve_batch_native<'py>(
         })
     });
 
-    let unwrapped = results.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    let unwrapped = results.map_err(|e| match e {
+        SolverError::Crash(report) => NativeSolverCrash::new_err(crash_report_to_pydict(py, &report).unbind()),
+        SolverError::Message(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
+    })?;
+    
     let mut py_results = Vec::new();
     for (res_t, res_y, res_obs) in unwrapped { 
         let steps = res_t.len();
