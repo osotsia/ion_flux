@@ -17,16 +17,7 @@ No flattened arrays. No massive Python memory graphs. No "math gymnastics." Just
 
 Because `ion_flux` leverages Ahead-of-Time (AOT) compilation and LLVM-level Automatic Differentiation, you must fetch and build its hermetic C++ toolchain locally after installing the Python package.
 
-**1. Install System Build Tools**
-```bash
-# macOS
-brew install cmake ninja
-
-# Ubuntu
-sudo apt install cmake ninja-build
-```
-
-**2. Install and Configure `ion_flux`**
+**1. Install and Configure `ion_flux`**
 ```bash
 # Create a virtual environment (recommended)
 # Requires python 3.10–3.14
@@ -39,7 +30,7 @@ pip install ion_flux
 # Fetch LLVM and compile the Enzyme AD plugin
 ion-flux install-toolchain
 ```
-**3. Get Started**
+**2. Get Started**
 
 ```bash
 # Clone the repository to access the examples and reference models

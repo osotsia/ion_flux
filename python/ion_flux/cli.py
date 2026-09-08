@@ -210,7 +210,7 @@ class ToolchainInstaller:
         missing = [tool for tool in ["cmake", "ninja"] if shutil.which(tool) is None]
         if missing:
             print(f"Error: Missing required system dependencies to build the toolchain: {', '.join(missing)}")
-            print("Please install them via your system package manager (e.g., `brew install cmake ninja` or `sudo apt install cmake ninja-build`).")
+            print("Please install them via `pip install cmake ninja`.")
             sys.exit(1)
 
     def _prepare_directories(self) -> None:

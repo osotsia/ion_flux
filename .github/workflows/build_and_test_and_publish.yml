@@ -32,13 +32,17 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          if [ "$RUNNER_OS" == "macOS" ]; then
-            brew update
-            brew install cmake ninja
-          elif [ "$RUNNER_OS" == "Linux" ]; then
+          if [ "$RUNNER_OS" == "Linux" ]; then
             sudo apt-get update
-            sudo apt-get install -y cmake ninja-build curl
+            sudo apt-get install -y curl
           fi
+        shell: bash
+
+      - name: Setup Build Environment
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          pip install cmake ninja
         shell: bash
 
       - name: Provision System Directory Permissions
@@ -127,12 +131,9 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          if [ "$RUNNER_OS" == "macOS" ]; then
-            brew update
-            brew install cmake ninja
-          elif [ "$RUNNER_OS" == "Linux" ]; then
+          if [ "$RUNNER_OS" == "Linux" ]; then
             sudo apt-get update
-            sudo apt-get install -y cmake ninja-build curl
+            sudo apt-get install -y curl
           fi
         shell: bash
 
@@ -168,7 +169,7 @@ jobs:
       - name: Install Python Build Tools & Dependencies
         run: |
           pip install --upgrade pip
-          pip install maturin auditwheel delocate pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib jinja2 hypothesis
+          pip install cmake ninja maturin auditwheel delocate pytest pytest-asyncio pytest-benchmark numpy scipy pandas matplotlib jinja2 hypothesis
 
       - name: Run Rust Core Tests
         run: |
