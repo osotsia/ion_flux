@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ====================================================================
+  # ============================================================================
   # Job 1: Prepare Toolchain (Runs exactly once per OS)
-  # ====================================================================
+  # ============================================================================
   prepare_toolchain:
     name: Prepare C++ Toolchain (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -30,23 +30,23 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - name: Install System Dependencies (macOS)
-        if: runner.os == 'macOS'
+      - name: Install System Dependencies
         run: |
-          brew update
-          brew install sundials cmake ninja
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            brew update
+            brew install cmake ninja
+          elif [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build curl
+          fi
+        shell: bash
 
-      - name: Install System Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build curl
-
-      - name: Free System Directory Permissions (Linux)
-        if: runner.os == 'Linux'
+      - name: Provision System Directory Permissions
+        # Ensures /usr/local is writable for hermetic library installations
         run: |
           sudo mkdir -p /usr/local/lib /usr/local/include
           sudo chown -R $USER /usr/local/lib /usr/local/include
+        shell: bash
 
       - name: Cache C++ Toolchain
         id: cache-toolchain
@@ -59,15 +59,13 @@ jobs:
             /usr/local/include/nvector
             /usr/local/include/sunmatrix
             /usr/local/include/sunlinsol
-            /opt/homebrew/lib/libsundials*
-            /opt/homebrew/include/sundials
-            /opt/homebrew/include/nvector
-            /opt/homebrew/include/sunmatrix
-            /opt/homebrew/include/sunlinsol
-          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test_and_publish.yml') }}
+          # Suffix updated to force cache invalidation of legacy Homebrew symlinks
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-sundials7.1.1-${{ hashFiles('.github/workflows/build_and_test_and_publish.yml') }}
 
-      - name: Build SUNDIALS (Linux)
-        if: runner.os == 'Linux' && steps.cache-toolchain.outputs.cache-hit != 'true'
+      - name: Build Hermetic SUNDIALS (Cross-Platform)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        # Compiling from source bypasses package manager symlink decay (Homebrew)
+        # and guarantees strict numerical determinism across macOS and Linux runners.
         run: |
           curl -L https://github.com/LLNL/sundials/releases/download/v7.1.1/sundials-7.1.1.tar.gz -o sundials.tar.gz
           tar -xzf sundials.tar.gz
@@ -90,9 +88,9 @@ jobs:
           python3 python/ion_flux/cli.py install-toolchain
 
 
-  # ====================================================================
+  # ============================================================================
   # Job 2: Build & Test (Matrix: macOS/Linux x Python versions)
-  # ====================================================================
+  # ============================================================================
   build_and_test:
     name: Build & Test (${{ matrix.os }} / Py${{ matrix.python-version }})
     needs: prepare_toolchain
@@ -127,25 +125,24 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
-      - name: Install System Dependencies (macOS)
-        if: runner.os == 'macOS'
+      - name: Install System Dependencies
         run: |
-          brew update
-          brew install sundials cmake ninja
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            brew update
+            brew install cmake ninja
+          elif [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build curl
+          fi
+        shell: bash
 
-      - name: Install System Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build curl
-
-      - name: Free System Directory Permissions (Linux)
-        if: runner.os == 'Linux'
+      - name: Provision System Directory Permissions
         run: |
           sudo mkdir -p /usr/local/lib /usr/local/include
           sudo chown -R $USER /usr/local/lib /usr/local/include
+        shell: bash
 
-      - name: Restore C++ Toolchain
+      - name: Restore C++ Toolchain Cache
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -155,15 +152,10 @@ jobs:
             /usr/local/include/nvector
             /usr/local/include/sunmatrix
             /usr/local/include/sunlinsol
-            /opt/homebrew/lib/libsundials*
-            /opt/homebrew/include/sundials
-            /opt/homebrew/include/nvector
-            /opt/homebrew/include/sunmatrix
-            /opt/homebrew/include/sunlinsol
-          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-${{ hashFiles('.github/workflows/build_and_test_and_publish.yml') }}
+          key: toolchain-${{ runner.os }}-${{ runner.arch }}-llvm19.1.0-sundials7.1.1-${{ hashFiles('.github/workflows/build_and_test_and_publish.yml') }}
           fail-on-cache-miss: true
 
-      - name: Update ldconfig (Linux)
+      - name: Update Dynamic Linker (Linux Only)
         if: runner.os == 'Linux'
         run: sudo ldconfig
 
@@ -198,7 +190,7 @@ jobs:
           maturin build --release -o dist --auditwheel skip
           maturin develop --release
           
-          if [ "$(uname -s)" = "Linux" ]; then
+          if [ "$RUNNER_OS" == "Linux" ]; then
             for whl in dist/*.whl; do
               # We explicitly manually repair Linux wheels only for SUNDIALS bundling
               auditwheel repair "$whl" -w dist_repaired/
@@ -221,9 +213,9 @@ jobs:
           retention-days: 1
 
 
-  # ====================================================================
+  # ============================================================================
   # Job 3: Publish to PyPI (Runs strictly on new releases)
-  # ====================================================================
+  # ============================================================================
   publish_pypi:
     name: Publish Wheels to PyPI
     needs: build_and_test

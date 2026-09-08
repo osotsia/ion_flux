@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "ion_flux_core"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "faer",
  "libloading",

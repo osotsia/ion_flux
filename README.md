@@ -20,7 +20,7 @@ Because `ion_flux` leverages Ahead-of-Time (AOT) compilation and LLVM-level Auto
 **1. Install System Build Tools**
 ```bash
 # macOS
-brew install cmake ninja sundials libomp
+brew install cmake ninja
 
 # Ubuntu
 sudo apt install cmake ninja-build
