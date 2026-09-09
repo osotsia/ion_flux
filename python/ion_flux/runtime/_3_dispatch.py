@@ -8,7 +8,8 @@ from ion_flux.runtime._4_diagnostics import format_native_crash
 try:
     from ion_flux._core import solve_ida_native, solve_ida_sundials, solve_batch_native
     RUST_FFI_AVAILABLE = True
-except ImportError:
+except ModuleNotFoundError:
+    # Safe fallback for pure-Python AST testing
     RUST_FFI_AVAILABLE = False
 
 def run_single(manifest: ExecutableManifest, y0: List[float], ydot0: List[float], 

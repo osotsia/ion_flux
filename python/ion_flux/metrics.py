@@ -5,7 +5,8 @@ from typing import Optional, Any, Union, Dict
 try:
     from ion_flux._core import discrete_adjoint_native
     RUST_FFI_AVAILABLE = True
-except ImportError:
+except ModuleNotFoundError:
+    # Safe fallback for pure-Python AST testing
     RUST_FFI_AVAILABLE = False
 
 class Loss:
