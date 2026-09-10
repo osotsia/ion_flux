@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional, List, Tuple
-from ion_flux.stage2_compiler._2_lowering.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus, Reduction
+from ion_flux.stage2_compiler._4_codegen.compute_ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary, RawCpp, UnaryMinus, Reduction
 from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
 from ion_flux.stage2_compiler._2_lowering.context import SpatialContext
 from ion_flux.stage2_compiler._2_lowering.dialects import get_dialect
@@ -219,15 +219,14 @@ class SpatialLoweringVisitor:
         return BinaryOp("+", Literal(bounds[0]), BinaryOp("*", l_phys_ir, w_center))
 
     def _lower_integral(self, node: Dict[str, Any], child: Dict[str, Any], idx_mgr: IndexManager, ctx: SpatialContext) -> Expr:
-        from ion_flux.stage2_compiler._4_codegen.emitter import CppEmitter
         target_domain = node.get("over")
         axes = self.topo.get_axes(target_domain)
         
         idx_new = idx_mgr.clone()
         int_id = id(node)
-        geom_code = ""
-        loop_vars = []
-        loop_ends = []
+        
+        loops = []
+        vol_exprs = []
         
         for axis in axes:
             b_axis = self.topo.get_base_axis(axis)
@@ -235,32 +234,19 @@ class SpatialLoweringVisitor:
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
             int_var = f"i_{int_id}_{axis}"
             
-            loop_vars.append(int_var)
-            loop_ends.append(Literal(res))
+            loops.append((int_var, Literal(res)))
             idx_new.register(b_axis, BinaryOp("+", Var(int_var), Literal(start)))
             
             dialect = get_dialect(self.topo, self.layout, axis)
-            geom_code += dialect.integral_volume_weight(int_var, start)
+            vol_exprs.append(dialect.integral_volume_weight(int_var, start))
         
         int_ctx = ctx
         if axes:
             int_ctx = ctx.with_updates(axis=axes[-1])
             
         child_expr = self.lower(child, idx_new, int_ctx, face=None)
-        child_cpp = CppEmitter().emit(child_expr)
         
-        cpp_code = "[&]() {\n    double sum = 0.0;\n"
-        for axis in axes:
-            res = self.topo.domains.get(axis, {}).get("resolution", 1)
-            cpp_code += f"    #pragma clang loop unroll(full)\n    for(int i_{int_id}_{axis} = 0; i_{int_id}_{axis} < {res}; ++i_{int_id}_{axis}) {{\n"
-            
-        cpp_code += "        double vol = 1.0;\n" + geom_code
-        cpp_code += f"        sum += {child_cpp} * vol;\n"
-        
-        for _ in axes: cpp_code += "    }\n"
-        cpp_code += "    return sum;\n}()"
-        
-        return Reduction(loop_vars, loop_ends, child_expr, cpp_code)
+        return Reduction(loops, child_expr, vol_exprs)
 
     def _harmonic_mean(self, a: Expr, b: Expr) -> Expr:
         abs_a = FuncCall("std::abs", [a])

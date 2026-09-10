@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional
-from ion_flux.stage2_compiler._2_lowering.ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, RawCpp, UnstructuredRead
+from ion_flux.stage2_compiler._4_codegen.compute_ir import Expr, Literal, Var, ArrayAccess, BinaryOp, FuncCall, UnstructuredRead
 
 class TopologyDialect:
     """Base interface for abstracting spatial geometries."""
@@ -15,7 +15,7 @@ class TopologyDialect:
     def gradient(self, visitor, child: Dict[str, Any], idx_mgr, ctx, face: Optional[str]) -> Expr:
         raise NotImplementedError
 
-    def integral_volume_weight(self, int_var: str, start: int) -> str:
+    def integral_volume_weight(self, int_var: str, start: int) -> Expr:
         raise NotImplementedError
 
     def ale_dimension_multiplier(self) -> float:
@@ -96,13 +96,20 @@ class StructuredDialect(TopologyDialect):
         
         return BinaryOp("/", BinaryOp("-", r_val, l_val), dist_safe)
 
-    def integral_volume_weight(self, int_var: str, start: int) -> str:
+    def integral_volume_weight(self, int_var: str, start: int) -> Expr:
         dim_exp = 3.0 if self.coord_sys == "spherical" else (2.0 if self.coord_sys == "cylindrical" else 1.0)
         vol_off = self.layout.mesh_offsets[self.b_axis]["w_V_nodes"]
-        return (
-            f"        double L_scale_{self.b_axis} = std::pow(L_phys_{self.b_axis}, {dim_exp});\n"
-            f"        vol *= m[{vol_off} + {start} + {int_var}] * L_scale_{self.b_axis};\n"
-        )
+        
+        idx_expr = BinaryOp("+", Literal(vol_off + start), Var(int_var))
+        m_val = ArrayAccess("m", idx_expr)
+        
+        l_phys = Var(f"L_phys_{self.b_axis}")
+        if dim_exp == 1.0:
+            scale = l_phys
+        else:
+            scale = FuncCall("std::pow", [l_phys, Literal(dim_exp)])
+            
+        return BinaryOp("*", m_val, scale)
 
     def ale_dimension_multiplier(self) -> float:
         if self.coord_sys == "spherical": return 3.0
@@ -158,11 +165,11 @@ class UnstructuredDialect(TopologyDialect):
     def gradient(self, visitor, child: Dict[str, Any], idx_mgr, ctx, face: Optional[str]) -> Expr:
         return Literal(0.0)
 
-    def integral_volume_weight(self, int_var: str, start: int) -> str:
+    def integral_volume_weight(self, int_var: str, start: int) -> Expr:
         if self.b_axis in self.layout.mesh_offsets and "volumes" in self.layout.mesh_offsets[self.b_axis]:
             vol_off = self.layout.mesh_offsets[self.b_axis]["volumes"]
-            return f"        vol *= m[{vol_off} + {int_var}];\n"
-        return f"        vol *= 1.0;\n"
+            return ArrayAccess("m", BinaryOp("+", Literal(vol_off), Var(int_var)))
+        return Literal(1.0)
 
 
 def get_dialect(topo, layout, axis_name: Optional[str]) -> TopologyDialect:

@@ -1,9 +1,9 @@
 from typing import List, Dict, Any, Tuple
 from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
 from ion_flux.stage2_compiler._2_lowering.spatial_visitor import SpatialLoweringVisitor, IndexManager
-from ion_flux.stage2_compiler._2_lowering.ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
+from ion_flux.stage2_compiler._4_codegen.compute_ir import Loop, Assign, ArrayAccess, BinaryOp, Literal, Var, RawCpp
 from ion_flux.stage2_compiler._2_lowering.context import SpatialContext
-from ion_flux.stage2_compiler._4_codegen.emitter import CppEmitter
+from ion_flux.stage2_compiler._4_codegen.cpp_emitter import CppEmitter
 from ion_flux.stage2_compiler._4_codegen.templates import generate_cpp_skeleton
 from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
 

@@ -1,15 +1,16 @@
 """
-Intermediate Representation (IR) for Spatial Lowering.
-Strictly defines the data structure of the mathematical operations.
+Compute Intermediate Representation (IR).
+Strictly defines the data structure of the mathematical operations, 
+decoupled from physical topology or syntax formatting.
 """
-from typing import List
+from typing import List, Tuple, Union
 
 class IRNode: pass
 class Expr(IRNode): pass
 class Stmt(IRNode): pass
 
 class Literal(Expr):
-    def __init__(self, val: float | int | str): 
+    def __init__(self, val: Union[float, int, str]): 
         self.val = val
 
 class Var(Expr):
@@ -51,11 +52,11 @@ class UnstructuredRead(Expr):
         self.idx_expr = idx_expr
 
 class Reduction(Expr):
-    def __init__(self, loop_vars: List[str], loop_ends: List[Expr], child_expr: Expr, cpp_code: str):
-        self.loop_vars = loop_vars
-        self.loop_ends = loop_ends
+    """Represents a discrete integral accumulation loop."""
+    def __init__(self, loops: List[Tuple[str, Expr]], child_expr: Expr, vol_exprs: List[Expr]):
+        self.loops = loops
         self.child_expr = child_expr
-        self.cpp_code = cpp_code
+        self.vol_exprs = vol_exprs
 
 class Assign(Stmt):
     def __init__(self, lhs: Expr, rhs: Expr):

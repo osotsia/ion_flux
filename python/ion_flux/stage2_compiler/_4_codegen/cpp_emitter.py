@@ -1,12 +1,12 @@
-from ion_flux.stage2_compiler._2_lowering.ir import (
+from ion_flux.stage2_compiler._4_codegen.compute_ir import (
     IRNode, Literal, Var, ArrayAccess, BinaryOp, UnaryMinus, 
     FuncCall, Ternary, Assign, Loop, RawCpp, UnstructuredRead, Reduction
 )
 
 class CppEmitter:
     """
-    Mechanically stringifies the Loop-Level Math Intermediate Representation (MIR) 
-    into exact C++ syntax. Performs no mathematical or topological logic.
+    Mechanically stringifies the Compute IR into exact C++ syntax. 
+    Performs absolutely no mathematical or topological logic.
     """
     def emit(self, node: IRNode) -> str:
         if isinstance(node, Literal): 
@@ -42,7 +42,22 @@ class CppEmitter:
                 f"    }}\n    return sum;\n}}()"
             )
         if isinstance(node, Reduction):
-            return node.cpp_code
+            cpp_code = "[&]() {\n    double sum = 0.0;\n"
+            for var_name, end_expr in node.loops:
+                res_str = self.emit(end_expr)
+                cpp_code += f"    #pragma clang loop unroll(full)\n    for(int {var_name} = 0; {var_name} < {res_str}; ++{var_name}) {{\n"
+            
+            cpp_code += "        double vol = 1.0;\n"
+            for vol_expr in node.vol_exprs:
+                cpp_code += f"        vol *= {self.emit(vol_expr)};\n"
+                
+            child_cpp = self.emit(node.child_expr)
+            cpp_code += f"        sum += {child_cpp} * vol;\n"
+            
+            for _ in node.loops:
+                cpp_code += "    }\n"
+            cpp_code += "    return sum;\n}()"
+            return cpp_code
         if isinstance(node, RawCpp): 
             return node.code
             

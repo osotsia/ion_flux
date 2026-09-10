@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Set, Tuple, Optional
-from ion_flux.stage2_compiler._2_lowering.ir import Loop, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall, Literal, Var, UnaryMinus, UnstructuredRead, Reduction
+from ion_flux.stage2_compiler._4_codegen.compute_ir import Loop, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall, Literal, Var, UnaryMinus, UnstructuredRead, Reduction
 
 class IndexEvaluator:
     """
@@ -100,11 +100,11 @@ class IndexEvaluator:
                 cols.append(s_off + neighbor)
         elif isinstance(expr, Reduction):
             def eval_loops(depth, current_env):
-                if depth == len(expr.loop_vars):
+                if depth == len(expr.loops):
                     cols.extend(self.extract_cols(expr.child_expr, current_env))
                     return
-                var = expr.loop_vars[depth]
-                end = self.eval_idx(expr.loop_ends[depth], current_env)
+                var, end_expr = expr.loops[depth]
+                end = self.eval_idx(end_expr, current_env)
                 for val in range(end):
                     current_env[var] = val
                     eval_loops(depth + 1, current_env)
