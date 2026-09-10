@@ -3,8 +3,6 @@ import numpy as np
 import shutil
 import platform
 import ion_flux as fx
-from ion_flux.stage2_compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
-import math
 import sys
 import os
 
@@ -12,7 +10,6 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..', 'models'))
 
 from Chen2020_DFN import Chen2020_DFN # type: ignore
-# from Marquis2019_1Plus1D_SPMe import Marquis1Plus1D_SPMe
 from ORegan2022_ThermalDFN import ThermalDFN # type: ignore
 
 
@@ -58,7 +55,6 @@ def get_missing_dependencies(model):
     return enzyme_set - python_set
 
 
-
 @REQUIRES_COMPILER
 def test_static_sparsity_analyzer_matches_enzyme_oracl_v1():
     """
@@ -73,23 +69,10 @@ def test_static_sparsity_analyzer_matches_enzyme_oracl_v1():
         f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
 
 
-
 @REQUIRES_COMPILER
 @pytest.mark.skip(reason="Passes, but takes a long time to run")
 def test_static_sparsity_analyzer_matches_enzyme_oracl_v2():
-
     missing_dependencies = get_missing_dependencies(model=ThermalDFN())
-    assert not missing_dependencies, \
-        f"FATAL: Python analyzer failed to map physical dependencies! " \
-        f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
-
-
-
-@REQUIRES_COMPILER
-@pytest.mark.skip(reason="Disabled Marquis model")
-def test_static_sparsity_analyzer_matches_enzyme_oracl_v3():
-
-    missing_dependencies = get_missing_dependencies(model=Marquis1Plus1D_SPMe())
     assert not missing_dependencies, \
         f"FATAL: Python analyzer failed to map physical dependencies! " \
         f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
