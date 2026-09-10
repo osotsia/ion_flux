@@ -138,7 +138,7 @@ def test_fuzz_ast_spatial_lowering_resilience(random_ast):
         semantic_ctx = SemanticContext(ast_payload)
         state_map = {model.c_fuzz.name: model.c_fuzz}
         
-        ast_payload = NormalizationPass(ast_payload, topo, semantic_ctx, state_map).run()
+        ast_payload = NormalizationPass(ast_payload, topo, semantic_ctx, state_map, layout).run()
         verify_manifold(ast_payload)
         
         cpp_str, _ = generate_cpp(ast_payload, layout, states=[model.c_fuzz], observables=[], target="cpu")

@@ -9,8 +9,8 @@ from ion_flux.stage2_compiler._3_optimization.cpr_orchestrator import compute_cp
 class Compiler:
     """
     The central orchestrator for the Staged Lowering Pipeline.
-    Transforms pure topological ASTs into Compute IR, performs static sparsity analysis,
-    and emits C++ strings and CPR caches.
+    Transforms ASTs to Math IR, discretizes to Compute IR, performs static CPR
+    sparsity analysis, and emits C++ strings and CPR schedules.
     """
     @staticmethod
     def compile(ast_payload: Dict[str, Any], layout: Any, states: List[Any], 
@@ -21,7 +21,7 @@ class Compiler:
         state_map = {s.name: s for s in states}
         state_map.update({o.name: o for o in observables})
         
-        ast_payload = NormalizationPass(ast_payload, topo, semantic_ctx, state_map).run()
+        ast_payload = NormalizationPass(ast_payload, topo, semantic_ctx, state_map, layout).run()
         verify_manifold(ast_payload)
         
         # Guard: Check rank deficiencies prior to static analysis
