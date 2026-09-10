@@ -7,7 +7,7 @@ class DomainBoundary(Node):
         self.domain = domain
         self.side = side
     def __call__(self) -> "DomainBoundary": return self
-    def to_dict(self) -> Dict[str, Any]: 
+    def to_dict(self, tags: Optional[Dict[int, str]] = None) -> Dict[str, Any]: 
         return {"type": "DomainBoundary", "domain": self.domain.name, "side": self.side}
     def __repr__(self) -> str: return f"{self.domain.name}.{self.side}"
 

@@ -197,7 +197,13 @@ def test_ast_capture_and_semantic_buckets():
     bc_phi = next(bc for bc in ast["boundaries"] if bc.get("state") == "phi_e")
     assert bc_phi["type"] == "dirichlet"
     assert bc_phi["bcs"]["left"]["type"] == "Scalar"
-
+    
+    # 5. Verify Immutable Frontend Architecture (Phase 1 Goal)
+    # Proves the compiler did not inject mutability hacks into the user's Python AST graph
+    for attr in dir(model):
+        val = getattr(model, attr)
+        if isinstance(val, fx.Node):
+            assert not hasattr(val, "_bc_id"), f"Mutability Leak! Node {val} was polluted with internal compiler state."
 
 def test_model_composition_and_namespacing():
     """Validates submodel deepcopying, fx.merge mechanics, and parameter prefixing."""

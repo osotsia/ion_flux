@@ -155,55 +155,63 @@ class PDE:
         for s in self.components(State): add_domain(getattr(s, "domain", None))
         for o in self.components(Observable): add_domain(getattr(o, "domain", None))
 
+        # 1. Identify all nodes that need BC tags (Immutable Context Passing)
+        tags = {}
+        for target, bcs in raw.get("boundaries", {}).items():
+            if isinstance(target, Boundary):
+                tags[id(target.child)] = str(id(target.child))
+            elif not isinstance(target, (State, Domain)):
+                tags[id(target)] = str(id(target))
+
         for target, bcs in raw.get("boundaries", {}).items():
             if isinstance(target, State):
                 compiled["boundaries"].append({
                     "type": "dirichlet", "state": target.name,
-                    "bcs": {k: _wrap(v).to_dict() for k, v in bcs.items()}
+                    "bcs": {k: _wrap(v).to_dict(tags) for k, v in bcs.items()}
                 })
             elif isinstance(target, Domain):
                 compiled["boundaries"].append({
                     "type": "moving_domain", "domain": target.name,
-                    "bcs": {k: _wrap(v).to_dict() for k, v in bcs.items()}
+                    "bcs": {k: _wrap(v).to_dict(tags) for k, v in bcs.items()}
                 })
             elif isinstance(target, Boundary):
-                target.child._bc_id = str(id(target.child))
+                node_id = tags[id(target.child)]
                 bc_entry = {
-                    "type": "neumann", "node_id": target.child._bc_id,
-                    "bcs": {target.side: _wrap(bcs).to_dict()}
+                    "type": "neumann", "node_id": node_id,
+                    "bcs": {target.side: _wrap(bcs).to_dict(tags)}
                 }
                 if target.domain is not None:
                     bc_entry["domain"] = target.domain.name
                 compiled["boundaries"].append(bc_entry)
             else:
-                target._bc_id = str(id(target))
+                node_id = tags[id(target)]
                 compiled["boundaries"].append({
-                    "type": "neumann", "node_id": target._bc_id,
-                    "bcs": {k: _wrap(v).to_dict() for k, v in bcs.items()}
+                    "type": "neumann", "node_id": node_id,
+                    "bcs": {k: _wrap(v).to_dict(tags) for k, v in bcs.items()}
                 })
                 
         for state, eq in raw.get("equations", {}).items():
             if isinstance(eq, Piecewise):
-                compiled["equations"].append({"state": state.name, "type": "piecewise", "regions": eq.to_dict()["regions"]})
+                compiled["equations"].append({"state": state.name, "type": "piecewise", "regions": eq.to_dict(tags)["regions"]})
                 for reg in eq.region_map.keys():
                     add_domain(reg)
             else:
-                compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict()})
+                compiled["equations"].append({"state": state.name, "type": "standard", "eq": eq.to_dict(tags)})
                 
         for state, val in raw.get("initial_conditions", {}).items():
-            compiled["initial_conditions"].append({"state": state.name, "value": _wrap(val).to_dict()})
+            compiled["initial_conditions"].append({"state": state.name, "value": _wrap(val).to_dict(tags)})
             
         for obs, eq in raw.get("observables", {}).items():
             if isinstance(eq, Piecewise):
-                compiled["observables"].append({"state": obs.name, "type": "piecewise", "regions": eq.to_dict()["regions"]})
+                compiled["observables"].append({"state": obs.name, "type": "piecewise", "regions": eq.to_dict(tags)["regions"]})
                 for reg in eq.region_map.keys():
                     add_domain(reg)
             else:
-                compiled["observables"].append({"state": obs.name, "type": "standard", "eq": _wrap(eq).to_dict()})
+                compiled["observables"].append({"state": obs.name, "type": "standard", "eq": _wrap(eq).to_dict(tags)})
             
         if hasattr(self, "terminal") and self.terminal:
             m = self._term_mode
             rhs = m * self._term_i_target + (1.0 - m) * (self.terminal.current - self.terminal.voltage + self._term_v_target)
-            compiled["equations"].append({"state": self.terminal.current.name, "type": "standard", "eq": (self.terminal.current == rhs).to_dict()})
+            compiled["equations"].append({"state": self.terminal.current.name, "type": "standard", "eq": (self.terminal.current == rhs).to_dict(tags)})
             
         return compiled
