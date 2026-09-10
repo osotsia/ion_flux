@@ -4,7 +4,7 @@ import sys
 import numpy as np
 from typing import Dict, Any, List, Optional
 
-from ion_flux.stage1_dsl.core import PDE
+from ion_flux.compiler._1_frontend.core import PDE
 from ion_flux.runtime.manifest import ExecutableManifest
 from ion_flux.runtime.session import Session
 from ion_flux.runtime.results import SimulationResult

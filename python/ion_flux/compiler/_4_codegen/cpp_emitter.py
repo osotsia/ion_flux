@@ -1,4 +1,4 @@
-from ion_flux.stage2_compiler._4_codegen.compute_ir import (
+from ion_flux.compiler._4_codegen.compute_ir import (
     IRNode, Literal, Var, ArrayAccess, BinaryOp, UnaryMinus, 
     FuncCall, Ternary, Assign, Loop, RawCpp, UnstructuredRead, Reduction
 )

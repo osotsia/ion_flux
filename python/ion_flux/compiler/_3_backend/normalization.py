@@ -6,10 +6,10 @@ resolving boundary conditions, piecewise regional domains, and Dirichlet boundar
 """
 
 from typing import Dict, Any, List, Optional
-from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
-from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
-from ion_flux.stage2_compiler._1_analysis.ast_utils import extract_div_child
-from ion_flux.stage2_compiler._2_lowering.math_ir import (
+from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
+from ion_flux.compiler._2_middle_end.semantics import SemanticContext
+from ion_flux.compiler._2_middle_end.ast_utils import extract_div_child
+from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp, MathUnaryOp,
     MathGrad, MathDiv, MathDt, MathCoords, MathIntegral, MathBoundaryRef,
     MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathSystem

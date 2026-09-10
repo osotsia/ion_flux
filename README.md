@@ -201,27 +201,27 @@ while session.time < 3600.0:
 ---
 ## 🧠 How it Works Under the Hood
 
-`ion_flux` replaces the traditional symbolic-to-numeric computation graph paradigm with a strictly staged Compiler-and-Runtime architecture. It works like a pipeline 1 -> 2 -> 3 -> 4
+`ion_flux` replaces the traditional symbolic-to-numeric computation graph paradigm with a strictly staged Compiler-and-Runtime architecture structured as a unidirectional lowering pipeline: $1 \rightarrow 2 \rightarrow 3 \rightarrow 4$.
 
-**Stage 1: Intent Capture (Frontend)**
-*   **Elements:** Python DSL (`fx.PDE`, `fx.grad`, `fx.div`, etc).
-*   **How:** Pure Python operator overloading intercepts mathematical syntax and constructs an Abstract Syntax Tree (AST) in memory. No numerical execution occurs here.
-*   **Why:** Enforces the separation of physical intent from computational execution. Researchers define equations without hardcoding loop indices, memory strides, or geometric boilerplate.
+**Stage 1: Declarative Intent Capture (Frontend)**
+*   **Elements:** Pure Python DSL (`compiler/_1_frontend`: `PDE`, `State`, `Parameter`, `Domain`, `grad`, `div`, etc.).
+*   **How:** Operator overloading intercepts mathematical syntax to construct an immutable Abstract Syntax Tree (AST). No geometry, discretization, or numerical execution occurs here.
+*   **Why:** Ruthlessly separates physical intent from computational execution. Researchers specify continuum physics without hardcoding loop indices, memory strides, coordinate transformations, or boundary boilerplate.
 
-**Stage 2: Staged Lowering (Middle-end)**
-*   **Elements:** AST-to-C++ Compiler (`_1_analysis` through `_4_codegen`).
-*   **How:** A unidirectional visitor passes an immutable `SpatialContext` down the AST. It translates topology-agnostic operators into explicit Finite Volume Method (FVM) Intermediate Representation (MIR), unrolls syntactic sugar (e.g., piecewise domains), and stringifies the result to C++. Once the C++ source is generated, the Python AST is completely left out of the numerical execution loop.
-*   **Why:** Flattens hierarchical, multi-scale domains (like a micro-particle mesh nested inside a macro-electrode mesh) into strictly contiguous 1D C-arrays. This guarantees CPU cache locality and enables SIMD vectorization.
+**Stage 2: Continuum Topology & Semantic Normalization (Middle-end)**
+*   **Elements:** Topological Analysis & Math IR (`compiler/_2_middle_end` and `compiler/_3_backend/math_ir.py`).
+*   **How:** Analyzes domain manifolds, composite cross-products ($x \times r$), and boundary constraints. The `NormalizationPass` unrolls syntactic sugar (e.g., piecewise regional equations) and resolves continuum boundary constraints, lowering the untyped AST into a strongly typed, N-Dimensional **Math IR** (`MathSystem`).
+*   **Why:** Isolates physical mathematics and boundary conditions in a structured, topology-aware representation before geometric discretization or memory indexing is introduced.
 
-**Stage 3: Compile-Time Automatic Differentiation (Backend)**
-*   **Elements:** Clang/LLVM, Enzyme AD Plugin (`_5_toolchain`).
-*   **How:** Python invokes `clang++` to compile the generated C++ source into a `.so` shared library. The Enzyme plugin differentiates the highly optimized LLVM IR natively.
-*   **Why:** Bypasses the Out-Of-Memory (OOM) crashes typical of symbolic frameworks that build massive "tape" graphs in RAM. Generates exact analytical Vector-Jacobian Products (VJPs) with $O(1)$ memory overhead and enables 0ms cold-start serverless deployments.
+**Stage 3: FVM Discretization, Static AD Analysis & Codegen (Backend)**
+*   **Elements:** FVM Discretizer, CPR Sparsity Optimizer, and Clang/Enzyme Invoker (`compiler/_3_backend` and `compiler/_4_codegen`).
+*   **How:** `FVMDiscretizer` lowers Math IR into **Compute IR**—linearizing N-dimensional coordinates into 1D memory strides (`idx`), applying Finite Volume Method (FVM) stencils (Cartesian, Cylindrical, Spherical, and Unstructured CSR), auto-stitching piecewise interfaces via harmonic mean flux matching, and injecting Arbitrary Lagrangian-Eulerian (ALE) grid kinematics. Static graph coloring (Curtis-Powell-Reid) analyzes the Compute IR to schedule Jacobian evaluation sweeps. `CppEmitter` stringifies Compute IR to C++, and `NativeCompiler` subprocesses Clang with the Enzyme LLVM plugin to synthesize exact analytical Forward Jacobians (JVP) and Reverse Vector-Jacobian Products (VJP) Ahead-of-Time into a `.so` binary.
+*   **Why:** Completely eliminates runtime Python graph traversal. Contiguous 1D C-arrays ensure cache locality and SIMD vectorization, while compile-time Enzyme AD eliminates out-of-memory crashes inherent to tape-based symbolic AD.
 
-**Stage 4: FFI Boundary & Native Solver (Backend)**
-*   **Elements:** Rust Implicit Solver (`_0_ffi` -> `bdf` -> `newton` -> `sparse_lu`).
-*   **How:** Python packs the numerical data (initial conditions, parameters, and mesh geometry) into flat 1D C-ABI pointers and yields control. The Rust solver loads the compiled `.so` binary to fetch the exact residuals, Jacobians, and VJPs. It integrates stiff non-linear Differential-Algebraic Equations (DAEs) by passing a pre-allocated memory arena (`Workspace`) down the call stack, mutating state without reallocation. 
-*   **Why:** Completely bypasses the Python Global Interpreter Lock (GIL). Eliminating memory fragmentation and hot-loop allocations sustains microsecond-latency control loops for Hardware-in-the-Loop (HIL) testing, and unlocks massive task-parallel batching across all vCPUs via Rayon.
+**Stage 4: FFI Boundary & Native Implicit Solver (Runtime)**
+*   **Elements:** Rust Implicit Solver (`runtime/` & `rust/src/solver/`: `_0_ffi` $\rightarrow$ `_1_orchestrator` $\rightarrow$ `_2_stepper` $\rightarrow$ `_3_nonlinear` $\rightarrow$ `_4_linear`).
+*   **How:** Python packs parameters and initial conditions into flat C-ABI pointers. The native Rust solver loads the compiled `.so` binary. It integrates stiff non-linear Differential-Algebraic Equations (DAEs) by passing a pre-allocated memory arena (`Workspace`) down a layered call stack (BDF stepper $\rightarrow$ Newton-Raphson $\rightarrow$ Faer Sparse LU / Matrix-Free GMRES), mutating state without hot-loop heap reallocations.
+*   **Why:** Completely bypasses the Python Global Interpreter Lock (GIL). Zero-allocation hot loops sustain microsecond-latency control loops for Hardware-in-the-Loop (HIL) testing and unlock linear task-parallel CPU scaling across vCPUs via Rayon.
 
 For more details, see the [Project Structure Documentation](/docs/Ion_Flux_project_structure.md).
 

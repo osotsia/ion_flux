@@ -13,7 +13,7 @@ import shutil
 import platform
 import numpy as np
 import ion_flux as fx
-from ion_flux.stage3_backend.clang_invoker import NativeCompiler
+from ion_flux.compiler._4_codegen.clang_invoker import NativeCompiler
 
 # ==============================================================================
 # Environment Configuration

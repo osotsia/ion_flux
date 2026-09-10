@@ -7,13 +7,13 @@ flux upwinding, piecewise interface harmonic averaging, and ALE dynamic mesh dil
 """
 
 from typing import Dict, Any, Optional, List, Tuple
-from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
-from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
-from ion_flux.stage2_compiler._4_codegen.compute_ir import (
+from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
+from ion_flux.compiler._2_middle_end.semantics import SemanticContext
+from ion_flux.compiler._4_codegen.compute_ir import (
     Expr, Stmt, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary,
     UnaryMinus, Loop, Assign, RawCpp, UnstructuredRead, Reduction
 )
-from ion_flux.stage2_compiler._2_lowering.math_ir import (
+from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
     MathUnaryOp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
     MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride, MathSystem
@@ -151,7 +151,7 @@ class FVMDiscretizer:
                 idx_mgr = IndexManager(self.topo)
                 idx_mgr.register(self.topo.get_base_axis(d_name), Literal(0))
                 rhs_ir = self.lower_expr(binding["rhs_expr"], idx_mgr, current_axis=d_name)
-                from ion_flux.stage2_compiler._4_codegen.cpp_emitter import CppEmitter
+                from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
                 emitter = CppEmitter()
                 l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({emitter.emit(rhs_ir)}));"))
             else:

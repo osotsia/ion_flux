@@ -3,13 +3,13 @@ import tempfile
 import itertools
 from typing import Dict, Any, List, Optional
 
-from ion_flux.stage1_dsl.core import PDE, State, Parameter, Observable
-from ion_flux.stage1_dsl.spatial import Domain, CompositeDomain
-from ion_flux.stage2_compiler._1_analysis.memory_layout import MemoryLayout
-from ion_flux.stage2_compiler.pipeline import Compiler
-from ion_flux.stage3_backend.clang_invoker import NativeCompiler
+from ion_flux.compiler._1_frontend.core import PDE, State, Parameter, Observable
+from ion_flux.compiler._1_frontend.spatial import Domain, CompositeDomain
+from ion_flux.compiler._2_middle_end.memory_layout import MemoryLayout
+from ion_flux.compiler.pipeline import Compiler
+from ion_flux.compiler._4_codegen.clang_invoker import NativeCompiler
 from ion_flux.runtime.manifest import ExecutableManifest
-from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
+from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 
 def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, jacobian_bandwidth: Optional[int] = None, mock_execution: bool = False) -> ExecutableManifest:
     """Orchestrates the Compiler pipeline to emit a frozen execution target."""

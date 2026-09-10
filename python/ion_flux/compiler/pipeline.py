@@ -1,10 +1,10 @@
 from typing import Dict, Any, List, Optional
-from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
-from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
-from ion_flux.stage2_compiler._2_lowering.normalization import NormalizationPass
-from ion_flux.stage2_compiler._1_analysis.verification import verify_manifold
-from ion_flux.stage2_compiler._4_codegen.builder import generate_cpp
-from ion_flux.stage2_compiler._3_optimization.cpr_orchestrator import compute_cpr
+from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
+from ion_flux.compiler._2_middle_end.semantics import SemanticContext
+from ion_flux.compiler._3_backend.normalization import NormalizationPass
+from ion_flux.compiler._2_middle_end.verification import verify_manifold
+from ion_flux.compiler._4_codegen.builder import generate_cpp
+from ion_flux.compiler._3_backend.cpr_orchestrator import compute_cpr
 
 class Compiler:
     """
@@ -46,7 +46,7 @@ class Compiler:
 
     @staticmethod
     def _compute_symbolic_bandwidth(layout: Any, states: List[Any], ast_payload: Dict[str, Any]) -> int:
-        from ion_flux.stage2_compiler._1_analysis.ast_utils import extract_state_names
+        from ion_flux.compiler._2_middle_end.ast_utils import extract_state_names
         
         if any(getattr(s.domain, "coord_sys", "") == "unstructured" for s in states): 
             return -1

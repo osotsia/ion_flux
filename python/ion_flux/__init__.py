@@ -1,9 +1,9 @@
-from .stage1_dsl.core import PDE, State, Parameter, Observable, Domain, Condition, Terminal, Node, Piecewise, Dirichlet
-from .stage1_dsl.core import merge
-from .stage1_dsl.operators import dt, grad, div, integral, exp, log, sin, cos, sqrt, clamp
-from .stage1_dsl.operators import abs_val as abs
-from .stage1_dsl.operators import maximum as max
-from .stage1_dsl.operators import minimum as min
+from .compiler._1_frontend.core import PDE, State, Parameter, Observable, Domain, Condition, Terminal, Node, Piecewise, Dirichlet
+from .compiler._1_frontend.core import merge
+from .compiler._1_frontend.operators import dt, grad, div, integral, exp, log, sin, cos, sqrt, clamp
+from .compiler._1_frontend.operators import abs_val as abs
+from .compiler._1_frontend.operators import maximum as max
+from .compiler._1_frontend.operators import minimum as min
 from .runtime.engine import Engine
 from .runtime.scheduler import MultiTenantScheduler
 from . import metrics

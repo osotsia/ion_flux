@@ -1,8 +1,8 @@
 import logging
 from typing import List, Any, Tuple
-from ion_flux.stage2_compiler._1_analysis.memory_layout import MemoryLayout
-from ion_flux.stage2_compiler._3_optimization.sparsity_tracer import SparsityAnalyzer
-from ion_flux.stage2_compiler._3_optimization.cpr_coloring import HybridGraphColorer
+from ion_flux.compiler._2_middle_end.memory_layout import MemoryLayout
+from ion_flux.compiler._3_backend.sparsity_tracer import SparsityAnalyzer
+from ion_flux.compiler._3_backend.cpr_coloring import HybridGraphColorer
 
 def compute_cpr(eq_stmts: List[Any], layout: MemoryLayout, jacobian_bandwidth: int) -> Tuple[List, List, List, List, List]:
     """

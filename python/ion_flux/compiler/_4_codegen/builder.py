@@ -5,12 +5,12 @@ Coordinates the FVM Discretizer and CppEmitter to generate C++ source code.
 """
 
 from typing import List, Dict, Any, Tuple
-from ion_flux.stage2_compiler._1_analysis.semantics import SemanticContext
-from ion_flux.stage2_compiler._1_analysis.topology import TopologyAnalyzer
-from ion_flux.stage2_compiler._2_lowering.normalization import NormalizationPass
-from ion_flux.stage2_compiler._2_lowering.discretizer import FVMDiscretizer
-from ion_flux.stage2_compiler._4_codegen.cpp_emitter import CppEmitter
-from ion_flux.stage2_compiler._4_codegen.templates import generate_cpp_skeleton
+from ion_flux.compiler._2_middle_end.semantics import SemanticContext
+from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
+from ion_flux.compiler._3_backend.normalization import NormalizationPass
+from ion_flux.compiler._3_backend.discretizer import FVMDiscretizer
+from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
+from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
 
 
 def generate_cpp(ast_payload: Dict[str, Any], layout: Any, states: List[Any], 
