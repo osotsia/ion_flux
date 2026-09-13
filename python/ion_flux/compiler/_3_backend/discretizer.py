@@ -16,22 +16,9 @@ from ion_flux.compiler._4_codegen.compute_ir import (
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
     MathUnaryOp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
-    MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride, MathSystem
+    MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride,
+    MathSystem, extract_math_state_names
 )
-
-
-def extract_math_state_names(expr: MathExpr) -> List[str]:
-    """Recursively extracts all State variable names referenced in a MathExpr."""
-    if isinstance(expr, MathState):
-        return [expr.name]
-    names = []
-    if isinstance(expr, (MathUnaryOp, MathGrad, MathDiv, MathDt, MathIntegral, MathBoundaryRef)):
-        names.extend(extract_math_state_names(expr.child))
-    elif isinstance(expr, MathBinaryOp):
-        names.extend(extract_math_state_names(expr.left))
-        names.extend(extract_math_state_names(expr.right))
-    seen = set()
-    return [x for x in names if not (x in seen or seen.add(x))]
 
 
 def extract_domain_name(expr: MathExpr) -> Optional[str]:
@@ -52,9 +39,8 @@ def extract_domain_name(expr: MathExpr) -> Optional[str]:
 
 
 class IndexManager:
-    """
-    Tracks and maps N-dimensional loop variables to 1D contiguous memory strides.
-    """
+    """Tracks and maps N-dimensional loop variables to 1D contiguous memory strides."""
+
     def __init__(self, topo: TopologyAnalyzer):
         self.topo = topo
         self.active_indices: Dict[str, Expr] = {}
@@ -98,16 +84,15 @@ class IndexManager:
             flat = BinaryOp("+", flat, t)
         return flat
 
-    def clone(self) -> 'IndexManager':
+    def clone(self) -> "IndexManager":
         clone_mgr = IndexManager(self.topo)
         clone_mgr.active_indices = self.active_indices.copy()
         return clone_mgr
 
 
 class FVMDiscretizer:
-    """
-    Discretizes continuum Math IR tensors into 1D array operations and loops.
-    """
+    """Discretizes continuum Math IR tensors into 1D array operations and loops."""
+
     _BIN_SYM = {
         "add": "+", "sub": "-", "mul": "*", "div": "/", "pow": "std::pow",
         "gt": ">", "lt": "<", "ge": ">=", "le": "<=", "eq": "==", "ne": "!="
@@ -118,8 +103,14 @@ class FVMDiscretizer:
         "sin": "std::sin", "cos": "std::cos", "sqrt": "std::sqrt"
     }
 
-    def __init__(self, layout: Any, topo: TopologyAnalyzer, semantic_ctx: SemanticContext,
-                 state_map: Dict[str, Any], target: str = "cpu"):
+    def __init__(
+        self,
+        layout: Any,
+        topo: TopologyAnalyzer,
+        semantic_ctx: SemanticContext,
+        state_map: Dict[str, Any],
+        target: str = "cpu"
+    ):
         self.layout = layout
         self.topo = topo
         self.semantic_ctx = semantic_ctx
@@ -153,7 +144,9 @@ class FVMDiscretizer:
                 rhs_ir = self.lower_expr(binding["rhs_expr"], idx_mgr, current_axis=d_name)
                 from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
                 emitter = CppEmitter()
-                l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({emitter.emit(rhs_ir)}));"))
+                l_phys_stmts.append(
+                    RawCpp(f"double L_phys_{d_name} = std::max(1e-12, (double)({emitter.emit(rhs_ir)}));")
+                )
             else:
                 bounds = d_info.get("bounds", (0.0, 1.0))
                 l_phys_stmts.append(RawCpp(f"double L_phys_{d_name} = {float(bounds[1] - bounds[0])};"))
@@ -172,7 +165,6 @@ class FVMDiscretizer:
         return l_phys_stmts, eq_stmts, obs_stmts
 
     def discretize_equation(self, eq: MathEquation) -> List[Stmt]:
-        """Lowers an individual MathEquation into nested loops and residual assignments."""
         axes = self.topo.get_axes(eq.target_domain)
         bounds_override = eq.bounds_override or {}
         base_axis = self._resolve_axis(axes[-1]) if axes else None
@@ -193,7 +185,6 @@ class FVMDiscretizer:
         lhs_ir = self.lower_expr(eq.lhs, idx_mgr, current_axis=base_axis, current_eq=eq)
         rhs_ir = self.lower_expr(eq.rhs, idx_mgr, current_axis=base_axis, current_eq=eq)
 
-        # Dynamic ALE kinematic dilution
         for ale_term in self._generate_ale_dilution(eq.state_name, idx_mgr, current_axis=base_axis):
             rhs_ir = BinaryOp("+", rhs_ir, ale_term)
 
@@ -211,7 +202,6 @@ class FVMDiscretizer:
         return curr_body
 
     def discretize_dirichlet_override(self, override: MathDirichletOverride) -> List[Stmt]:
-        """Lowers an explicit Dirichlet boundary node override."""
         state_obj = self.state_map.get(override.state_name)
         d_name = getattr(state_obj, "domain", None)
         target_dom_name = d_name.name if d_name else None
@@ -236,11 +226,9 @@ class FVMDiscretizer:
         y_access = ArrayAccess("y", BinaryOp("+", Literal(offset), flat_idx))
 
         rhs_ir = self.lower_expr(override.value_expr, idx_mgr, current_axis=base_axis)
-        assign = Assign(res_access, BinaryOp("-", y_access, rhs_ir))
-        return [assign]
+        return [Assign(res_access, BinaryOp("-", y_access, rhs_ir))]
 
     def discretize_observable(self, obs: MathObservable) -> List[Stmt]:
-        """Lowers an algebraic observable equation."""
         axes = self.topo.get_axes(obs.target_domain)
         bounds_override = obs.bounds_override or {}
         base_axis = self._resolve_axis(axes[-1]) if axes else None
@@ -272,13 +260,14 @@ class FVMDiscretizer:
 
         return curr_body
 
-    # =========================================================================
-    # Expression Lowering
-    # =========================================================================
-
-    def lower_expr(self, node: MathExpr, idx_mgr: IndexManager, current_axis: Optional[str] = None,
-                   face: Optional[str] = None, current_eq: Optional[MathEquation] = None) -> Expr:
-        """Lowers a MathExpr into a Compute IR Expr, applying Neumann boundaries at faces."""
+    def lower_expr(
+        self,
+        node: MathExpr,
+        idx_mgr: IndexManager,
+        current_axis: Optional[str] = None,
+        face: Optional[str] = None,
+        current_eq: Optional[MathEquation] = None
+    ) -> Expr:
         if face and getattr(node, "bc_id", None):
             bc_info = self.semantic_ctx.get_neumann_bc(node.bc_id, face)
             if bc_info:
@@ -297,9 +286,14 @@ class FVMDiscretizer:
 
         return self._dispatch(node, idx_mgr, current_axis, face, current_eq)
 
-    def _dispatch(self, node: MathExpr, idx_mgr: IndexManager, current_axis: Optional[str],
-                  face: Optional[str], current_eq: Optional[MathEquation]) -> Expr:
-        """Internal dispatcher for node types."""
+    def _dispatch(
+        self,
+        node: MathExpr,
+        idx_mgr: IndexManager,
+        current_axis: Optional[str],
+        face: Optional[str],
+        current_eq: Optional[MathEquation]
+    ) -> Expr:
         if isinstance(node, MathScalar):
             return Literal(node.value)
 
@@ -353,8 +347,14 @@ class FVMDiscretizer:
 
         return Literal(0.0)
 
-    def _lower_state(self, node: MathState, idx_mgr: IndexManager, current_axis: Optional[str],
-                     face: Optional[str] = None, force_ydot: bool = False) -> Expr:
+    def _lower_state(
+        self,
+        node: MathState,
+        idx_mgr: IndexManager,
+        current_axis: Optional[str],
+        face: Optional[str] = None,
+        force_ydot: bool = False
+    ) -> Expr:
         flat_idx = idx_mgr.get_flat_index(node.domain_name)
         arr = "ydot" if (node.is_ydot or force_ydot) else "y"
         base_access = ArrayAccess(arr, BinaryOp("+", Literal(node.offset), flat_idx))
@@ -413,8 +413,14 @@ class FVMDiscretizer:
         l_phys_ir = Var(f"L_phys_{b_axis}")
         return BinaryOp("+", Literal(bounds[0]), BinaryOp("*", l_phys_ir, w_center))
 
-    def _lower_gradient(self, child: MathExpr, axis_name: Optional[str], idx_mgr: IndexManager,
-                        face: Optional[str], current_eq: Optional[MathEquation]) -> Expr:
+    def _lower_gradient(
+        self,
+        child: MathExpr,
+        axis_name: Optional[str],
+        idx_mgr: IndexManager,
+        face: Optional[str],
+        current_eq: Optional[MathEquation]
+    ) -> Expr:
         b_axis = self._resolve_axis(axis_name)
         coord_sys = self.topo.domains.get(b_axis, {}).get("coord_sys", "cartesian") if b_axis else "cartesian"
 
@@ -459,8 +465,13 @@ class FVMDiscretizer:
         dist_safe = FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", l_phys_ir, BinaryOp("+", w_dx_r, w_dx_l))])
         return BinaryOp("/", BinaryOp("-", r_val, l_val), dist_safe)
 
-    def _lower_divergence(self, child: MathExpr, axis_name: Optional[str], idx_mgr: IndexManager,
-                          current_eq: Optional[MathEquation]) -> Expr:
+    def _lower_divergence(
+        self,
+        child: MathExpr,
+        axis_name: Optional[str],
+        idx_mgr: IndexManager,
+        current_eq: Optional[MathEquation]
+    ) -> Expr:
         b_axis = self._resolve_axis(axis_name)
         coord_sys = self.topo.domains.get(b_axis, {}).get("coord_sys", "cartesian") if b_axis else "cartesian"
 
@@ -470,7 +481,6 @@ class FVMDiscretizer:
         r_flux = self.lower_expr(child, idx_mgr, axis_name, face="right", current_eq=current_eq)
         l_flux = self.lower_expr(child, idx_mgr, axis_name, face="left", current_eq=current_eq)
 
-        # Apply harmonic mean auto-stitching across piecewise domain regions
         r_flux, l_flux = self._stitch_piecewise_fluxes(r_flux, l_flux, idx_mgr, axis_name, current_eq)
 
         l_phys_ir = Var(f"L_phys_{b_axis}")
@@ -486,8 +496,13 @@ class FVMDiscretizer:
         net_flux = BinaryOp("-", BinaryOp("*", A_R, r_flux), BinaryOp("*", A_L, l_flux))
         return BinaryOp("/", net_flux, V_safe)
 
-    def _lower_unstructured_divergence(self, child: MathExpr, axis_name: str, idx_mgr: IndexManager,
-                                       current_eq: Optional[MathEquation]) -> Expr:
+    def _lower_unstructured_divergence(
+        self,
+        child: MathExpr,
+        axis_name: str,
+        idx_mgr: IndexManager,
+        current_eq: Optional[MathEquation]
+    ) -> Expr:
         offsets = self.layout.mesh_offsets[axis_name]
         rp_off = Literal(offsets["row_ptr"])
         ci_off = Literal(offsets["col_ind"])
@@ -500,8 +515,6 @@ class FVMDiscretizer:
         idx_expr = idx_mgr.get_local(self.topo.get_base_axis(axis_name))
 
         bulk_div = UnstructuredRead(s_off, rp_off, ci_off, w_off, idx_expr)
-
-        # Strip grad to extract conductivity multiplier
         multiplier_expr = self.lower_expr(self._strip_grad(child), idx_mgr, axis_name, current_eq=current_eq)
         res_ir = BinaryOp("*", multiplier_expr, bulk_div)
 
@@ -515,7 +528,10 @@ class FVMDiscretizer:
                     mask_ir = ArrayAccess("m", BinaryOp("+", Literal(offsets["surfaces"][s_face]), idx_expr))
 
                     if "volumes" in offsets:
-                        vol_ir = FuncCall("std::max", [Literal("1e-30"), ArrayAccess("m", BinaryOp("+", Literal(offsets["volumes"]), idx_expr))])
+                        vol_ir = FuncCall(
+                            "std::max",
+                            [Literal("1e-30"), ArrayAccess("m", BinaryOp("+", Literal(offsets["volumes"]), idx_expr))]
+                        )
                         term_ir = BinaryOp("/", BinaryOp("*", bc_val_ir, mask_ir), vol_ir)
                     else:
                         term_ir = BinaryOp("*", bc_val_ir, mask_ir)
@@ -524,7 +540,6 @@ class FVMDiscretizer:
         return res_ir
 
     def _strip_grad(self, expr: MathExpr) -> MathExpr:
-        """Strips MathGrad from an expression to isolate multiplier coefficients."""
         if isinstance(expr, MathGrad):
             return MathScalar(1.0)
         if isinstance(expr, MathBinaryOp):
@@ -541,8 +556,14 @@ class FVMDiscretizer:
         den = BinaryOp("+", BinaryOp("+", abs_a, abs_b), Literal("1e-30"))
         return BinaryOp("/", num, den)
 
-    def _stitch_piecewise_fluxes(self, r_flux: Expr, l_flux: Expr, idx_mgr: IndexManager,
-                                 axis_name: str, current_eq: Optional[MathEquation]) -> Tuple[Expr, Expr]:
+    def _stitch_piecewise_fluxes(
+        self,
+        r_flux: Expr,
+        l_flux: Expr,
+        idx_mgr: IndexManager,
+        axis_name: str,
+        current_eq: Optional[MathEquation]
+    ) -> Tuple[Expr, Expr]:
         if current_eq and current_eq.is_piecewise and current_eq.current_region:
             reg = current_eq.current_region
             start, end = reg.start_idx, reg.end_idx
@@ -576,7 +597,6 @@ class FVMDiscretizer:
 
             loops.append((int_var, Literal(res)))
             idx_new.register(b_axis, BinaryOp("+", Var(int_var), Literal(start)))
-
             vol_exprs.append(self._get_integral_volume_weight(axis, b_axis, int_var, start))
 
         child_expr = self.lower_expr(child, idx_new, current_axis=axes[-1] if axes else None)
@@ -600,7 +620,12 @@ class FVMDiscretizer:
         scale = l_phys if dim_exp == 1.0 else FuncCall("std::pow", [l_phys, Literal(dim_exp)])
         return BinaryOp("*", m_val, scale)
 
-    def _generate_ale_dilution(self, state_name: str, idx_mgr: IndexManager, current_axis: Optional[str]) -> List[Expr]:
+    def _generate_ale_dilution(
+        self,
+        state_name: str,
+        idx_mgr: IndexManager,
+        current_axis: Optional[str]
+    ) -> List[Expr]:
         ale = []
         domain = getattr(self.state_map.get(state_name), "domain", None)
         if not domain:
@@ -615,15 +640,16 @@ class FVMDiscretizer:
                 L = self.lower_expr(rhs_ir, idx_mgr, current_axis)
                 L_dot = self.lower_expr(MathDt(rhs_ir), idx_mgr, current_axis)
 
-                y_curr = ArrayAccess("y", BinaryOp("+", Literal(self.layout.state_offsets[state_name][0]),
-                                                   idx_mgr.get_flat_index(d_name)))
+                y_curr = ArrayAccess(
+                    "y",
+                    BinaryOp("+", Literal(self.layout.state_offsets[state_name][0]), idx_mgr.get_flat_index(d_name))
+                )
                 div_v = BinaryOp("*", Literal(dim_mult), BinaryOp("/", L_dot, FuncCall("std::max", [Literal(1e-12), L])))
                 ale.append(BinaryOp("*", UnaryMinus(y_curr), div_v))
 
         return ale
 
     def _lower_ast_dict(self, node: Any) -> MathExpr:
-        """Helper to lower raw boundary AST nodes into MathExpr preserving _bc_id."""
         if not isinstance(node, dict):
             return MathScalar(float(node) if isinstance(node, (int, float)) else 0.0)
 
@@ -646,7 +672,12 @@ class FVMDiscretizer:
             child_ir = self._lower_ast_dict(node["child"])
             return MathBoundaryRef(child=child_ir, side=node["side"], domain=node.get("domain"), bc_id=bc_id)
         if t == "BinaryOp":
-            return MathBinaryOp(node["op"], self._lower_ast_dict(node["left"]), self._lower_ast_dict(node["right"]), bc_id=bc_id)
+            return MathBinaryOp(
+                node["op"],
+                self._lower_ast_dict(node["left"]),
+                self._lower_ast_dict(node["right"]),
+                bc_id=bc_id
+            )
         if t == "UnaryOp":
             op = node["op"]
             child = node["child"]

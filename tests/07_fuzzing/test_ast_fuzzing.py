@@ -1,39 +1,26 @@
-import pytest
-import numpy as np
-import shutil
-import platform
+"""
+Property-Based Fuzzing Suite
+
+Aggressively stresses the ion_flux compiler pipeline, topology analyzer,
+CPR graph coloring, and native execution runtime using randomized, adversarial inputs.
+
+Enforces four key invariants:
+1. Spatial Lowering Resilience: ASTs with nested differentials, integrals, and boundary
+   conditions must either lower cleanly to Math IR and C++ or raise expected validation errors.
+2. Topological Verification: Manifold slicing must reject invalid boundary topologies
+   matching the compiler's strict geometry tolerance (1e-12).
+3. CPR Sparsity Recovery: Color-scheduled Forward JVPs and Reverse VJPs must exactly
+   reconstruct hybrid sparse/dense Jacobian structures.
+4. Memory Safety & Rollback: Extreme time steps and non-linear solver divergence must
+   not leak NaNs or corrupt state arrays across checkpoint/restore boundaries.
+"""
+
 import os
 import sys
-import ion_flux as fx
-
-# Ensure models directory is in path for E2E tests
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'models')))
-
-def _has_compiler() -> bool:
-    has_std = bool(shutil.which("clang++") or shutil.which("g++"))
-    has_mac = platform.system() == "darwin" and (
-        shutil.os.path.exists("/opt/homebrew/opt/llvm/bin/clang++") or 
-        shutil.os.path.exists("/usr/local/opt/llvm/bin/clang++")
-    )
-    return has_std or has_mac
-
-REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires native C++ toolchain.")
-
-try:
-    from ion_flux._core import solve_ida_native
-    RUST_FFI_AVAILABLE = True
-except ImportError:
-    RUST_FFI_AVAILABLE = False
-
-REQUIRES_RUNTIME = pytest.mark.skipif(
-    not _has_compiler() or not RUST_FFI_AVAILABLE, 
-    reason="Requires native C++ toolchain and compiled Rust backend."
-)
-
-import pytest
-import numpy as np
 import shutil
 import platform
+import pytest
+import numpy as np
 from hypothesis import given, settings, strategies as st
 
 import ion_flux as fx
@@ -41,58 +28,54 @@ from ion_flux.compiler._1_frontend.nodes import Scalar, BinaryOp, UnaryOp
 from ion_flux.compiler._2_middle_end.memory_layout import MemoryLayout
 from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
-from ion_flux.compiler._3_backend.normalization import NormalizationPass
 from ion_flux.compiler._2_middle_end.verification import verify_manifold, TopologicalError
+from ion_flux.compiler._3_backend.normalization import NormalizationPass
+from ion_flux.compiler._3_backend.math_ir import MathSystem
 from ion_flux.compiler._3_backend.cpr_coloring import HybridGraphColorer
 from ion_flux.compiler._4_codegen.builder import generate_cpp
-from ion_flux._core import solve_ida_native
+
+# Ensure models directory is in path for E2E tests
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'models')))
 
 
-"""
-Property-Based Fuzzing Suite
+# ==============================================================================
+# Environment Capabilities
+# ==============================================================================
 
-This suite aggressively probes the boundaries of the ion_flux AST compiler, 
-topology analyzer, graph coloring algorithms, and native execution engine using 
-thousands of randomized, adversarial inputs.
+def _has_compiler() -> bool:
+    has_std = bool(shutil.which("clang++") or shutil.which("g++"))
+    has_mac = platform.system() == "darwin" and (
+        os.path.exists("/opt/homebrew/opt/llvm/bin/clang++") or 
+        os.path.exists("/usr/local/opt/llvm/bin/clang++")
+    )
+    return has_std or has_mac
 
-It enforces strict mathematical and structural invariants:
-1. Compiler Resilience: Whitelists specific domain/validation rejections but traps 
-   internal compiler exceptions (IndexError, KeyError, etc.) caused by deeply 
-   nested spatial mathematics (integrals, piecewise, boundaries).
-2. Topological Verification: Constructs full AST payloads to trigger manifold closure 
-   checks, aggressively injecting micro-epsilon floating point errors to test clipping limits.
-3. CPR Graph Coloring: Simulates exact Reverse-Mode Vector-Jacobian Products (VJP) 
-   to mathematically prove collision-free isolation of dense global matrices.
-4. Native Session Integrity: Interleaves BDF checkpoint/restores with extreme time 
-   steps, ensuring memory buffers never corrupt to NaN even upon severe non-linear divergence.
-"""
 
+try:
+    from ion_flux._core import solve_ida_native
+    RUST_FFI_AVAILABLE = True
+except ImportError:
+    RUST_FFI_AVAILABLE = False
+
+REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires native C++ toolchain.")
+REQUIRES_RUNTIME = pytest.mark.skipif(
+    not _has_compiler() or not RUST_FFI_AVAILABLE, 
+    reason="Requires native C++ toolchain and compiled Rust backend."
+)
 
 
 # ==============================================================================
 # SECTION 1: AST Structural & Spatial Lowering Resilience
 # ==============================================================================
 
-# Anchors for spatial AST node generation
 D_MACRO = fx.Domain(bounds=(0, 1), resolution=5, name="d_macro")
-
-
 D_MICRO = fx.Domain(bounds=(0, 1), resolution=4, coord_sys="spherical", name="d_micro")
-
-
 C_STATE = fx.State(domain=D_MACRO * D_MICRO, name="c_fuzz")
-
-
 T_PARAM = fx.Parameter(default=1.0, name="t_param")
 
 
-
 def ast_expression_strategy():
-    """
-    Builds deeply nested, randomized mathematical expression trees.
-    Incorporates topology-aware spatial operators (grad, div, integral, boundary)
-    to comprehensively stress the C++ code generator's context routing.
-    """
+    """Generates deeply nested, randomized AST expressions with spatial operators."""
     base_nodes = st.one_of(
         st.builds(Scalar, st.floats(min_value=-100.0, max_value=100.0, allow_nan=False, allow_infinity=False)),
         st.just(C_STATE),
@@ -118,9 +101,8 @@ def ast_expression_strategy():
     )
 
 
-
 class MockFuzzPDE(fx.PDE):
-    """Wraps the randomized AST payload, explicitly injecting boundaries to trigger SemanticContext."""
+    """Wraps randomized AST expressions in a PDE with spatial boundary definitions."""
     d_macro = D_MACRO
     d_micro = D_MICRO
     c_fuzz = C_STATE
@@ -134,60 +116,70 @@ class MockFuzzPDE(fx.PDE):
         flux = fx.grad(self.c_fuzz, axis=self.d_micro)
         return {
             "equations": {
-                # Wrap the fuzzed expression inside a Piecewise block to test regional context
                 self.c_fuzz: fx.Piecewise({
                     self.d_macro: fx.dt(self.c_fuzz) == self.random_ast
                 })
             },
             "boundaries": {
-                # Triggers the SemanticContext Neumann parsing logic
                 flux: {"left": 0.0, "right": 1.0}
             },
             "initial_conditions": {self.c_fuzz: 1.0}
         }
 
 
-
 @settings(max_examples=100, deadline=None)
 @given(random_ast=ast_expression_strategy())
 def test_fuzz_ast_spatial_lowering_resilience(random_ast):
     """
-    PROBE: Feeds chaotic, deeply nested spatial ASTs into the Middle-End Compiler.
-    INVARIANT: The AST translator must cleanly lower the tree. We whitelist safe rejections 
-    (Topological Errors, invalid user bounds), but explicitly catch and fail on internal 
-    structural compiler crashes (KeyError, TypeError, IndexError) masking as logic flaws.
+    PROBE: Drives randomized spatial ASTs through the lowering pipeline:
+           AST -> Math IR (MathSystem) -> Compute IR -> C++ strings.
+    INVARIANT: The compiler must either cleanly lower the AST or reject it with expected
+               domain errors (TopologicalError, ValueError). Unhandled internal exceptions
+               (KeyError, IndexError, TypeError) indicate structural defects.
     """
     model = MockFuzzPDE(random_ast)
     ast_payload = model.ast()
     
-    layout = MemoryLayout(states=[model.c_fuzz], parameters=[model.t_param], all_domains=[model.d_macro, model.d_micro])
+    layout = MemoryLayout(
+        states=[model.c_fuzz], 
+        parameters=[model.t_param], 
+        all_domains=[model.d_macro, model.d_micro]
+    )
     
     try:
-        # Replicate the exact middleware pipeline from `_1_builder.py`
+        # Step 1: Middle-End Topology & Semantic Analysis
         topo = TopologyAnalyzer(ast_payload.get("domains", {}))
+        verify_manifold(ast_payload)
         semantic_ctx = SemanticContext(ast_payload)
         state_map = {model.c_fuzz.name: model.c_fuzz}
-        
-        ast_payload = NormalizationPass(ast_payload, topo, semantic_ctx, state_map, layout).run()
-        verify_manifold(ast_payload)
-        
-        cpp_str, _ = generate_cpp(ast_payload, layout, states=[model.c_fuzz], observables=[], target="cpu")
+
+        # Step 2: Normalization (AST -> Math IR)
+        norm_pass = NormalizationPass(ast_payload, topo, semantic_ctx, state_map, layout)
+        math_sys: MathSystem = norm_pass.lower_to_math_ir()
+
+        # Step 3: FVM Discretization & Codegen (Math IR -> Compute IR -> C++)
+        cpp_str, eq_stmts = generate_cpp(
+            math_sys=math_sys,
+            layout=layout,
+            topo=topo,
+            semantic_ctx=semantic_ctx,
+            state_map=state_map,
+            target="cpu"
+        )
         
         assert isinstance(cpp_str, str)
         assert len(cpp_str) > 0
+        assert isinstance(eq_stmts, list)
         
     except TopologicalError:
-        pass  # Expected rejection of garbage physics topologies
+        pass  # Expected rejection of physically invalid domain configurations
     except ValueError as e:
-        # Trap explicitly uncaught AST dialects and mathematical leaks
         err_msg = str(e)
         if "Unknown IR Node" in err_msg or "Math Leak" in err_msg:
-            pytest.fail(f"Compiler AST generation bug detected: {e}\nAST: {random_ast}")
-        # Other ValueErrors (e.g. "Unconstrained state detected") are valid user rejections
+            pytest.fail(f"Compiler AST generation defect detected: {e}\nAST: {random_ast}")
+        # Other ValueErrors (e.g. unconstrained states) represent valid frontend rejections
     except Exception as e:
-        # ALL OTHER EXCEPTIONS ARE CRITICAL COMPILER BUGS
         pytest.fail(f"Unhandled structural compiler crash ({type(e).__name__}): {e}\nAST: {random_ast}")
-
 
 
 # ==============================================================================
@@ -196,10 +188,7 @@ def test_fuzz_ast_spatial_lowering_resilience(random_ast):
 
 @st.composite
 def topological_manifold_strategy(draw):
-    """
-    Generates random sub-regions, intentionally injecting both gross topological flaws 
-    and micro-epsilon float discrepancies to push clipping boundaries.
-    """
+    """Generates random sub-regions, intentionally injecting clipping and boundary gaps."""
     parent_res = 100
     parent_bounds = (0.0, 10.0)
     coord_sys = draw(st.sampled_from(["cartesian", "spherical", "cylindrical"]))
@@ -224,7 +213,6 @@ def topological_manifold_strategy(draw):
                 "bounds": (start_b, end_b), "type": "standard", "parent": "cell"
             })
     else:
-        # Generate invalid boundaries: mix of gross structural gaps and machine-epsilon perturbations
         boundaries = sorted(draw(st.lists(
             st.integers(1, 99), min_size=num_regions-1, max_size=num_regions-1, unique=True
         ))) if num_regions > 1 else []
@@ -248,39 +236,38 @@ def topological_manifold_strategy(draw):
     return should_be_valid, regions, coord_sys
 
 
-
 def _is_valid_tiling(regions, p_bounds, p_res):
-    """Ground truth oracle to determine if a set of regions perfectly tiles the parent."""
-    if not regions: return False
+    """Reference check verifying whether sub-regions partition the parent domain without gaps."""
+    if not regions:
+        return False
     regions_sorted = sorted(regions, key=lambda r: r["start_idx"])
     
     current_idx = 0
     current_bound = p_bounds[0]
     
     for r in regions_sorted:
-        if r["start_idx"] != current_idx: return False
-        # The oracle MUST precisely match the compiler's strict 1e-12 geometry limit
-        if abs(r["bounds"][0] - current_bound) > 1e-12: return False
+        if r["start_idx"] != current_idx:
+            return False
+        if abs(r["bounds"][0] - current_bound) > 1e-12:
+            return False
         current_idx += r["resolution"]
         current_bound = r["bounds"][1]
         
-    if current_idx != p_res: return False
-    # The oracle MUST precisely match the compiler's strict 1e-12 geometry limit
-    if abs(current_bound - p_bounds[1]) > 1e-12: return False
+    if current_idx != p_res:
+        return False
+    if abs(current_bound - p_bounds[1]) > 1e-12:
+        return False
     return True
-
 
 
 @settings(max_examples=100, deadline=None)
 @given(manifold_data=topological_manifold_strategy())
 def test_fuzz_verify_manifold_rejections(manifold_data):
     """
-    PROBE: Feeds chaotic boundary geometries into the Manifold Verifier.
-    INVARIANT: The Verifier must raise `TopologicalError` if and only if the 
-    regions fail the perfect tiling test. Includes boundaries to ensure 
-    `_verify_boundaries` mathematically closes the manifold securely.
+    PROBE: Feeds randomized regional partitions into verify_manifold.
+    INVARIANT: Must raise TopologicalError if and only if regions fail the exact tiling check.
     """
-    should_be_valid_generated, regions, coord_sys = manifold_data
+    _, regions, coord_sys = manifold_data
     
     p_bounds, p_res = (0.0, 10.0), 100
     is_mathematically_valid = _is_valid_tiling(regions, p_bounds, p_res)
@@ -289,9 +276,16 @@ def test_fuzz_verify_manifold_rejections(manifold_data):
     for r in regions:
         domains[r["name"]] = r
         
-    # Inject dummy states and boundaries to trigger the _verify_boundaries pass
-    eq_payload = {"state": "c", "type": "standard", "eq": {"type": "UnaryOp", "op": "grad", "child": {"type": "State", "name": "c"}}}
-    bc_payload = {"type": "dirichlet", "state": "c", "bcs": {"left": {"type": "Scalar", "value": 0.0}, "right": {"type": "Scalar", "value": 0.0}}}
+    eq_payload = {
+        "state": "c", 
+        "type": "standard", 
+        "eq": {"type": "UnaryOp", "op": "grad", "child": {"type": "State", "name": "c"}}
+    }
+    bc_payload = {
+        "type": "dirichlet", 
+        "state": "c", 
+        "bcs": {"left": {"type": "Scalar", "value": 0.0}, "right": {"type": "Scalar", "value": 0.0}}
+    }
     
     ast_payload = {
         "domains": domains, 
@@ -306,32 +300,26 @@ def test_fuzz_verify_manifold_rejections(manifold_data):
             verify_manifold(ast_payload)
 
 
-
 # ==============================================================================
 # SECTION 3: CPR Graph Coloring (Hybrid Density Segregation)
 # ==============================================================================
 
 @st.composite
 def structured_sparsity_strategy(draw):
-    """
-    Generates highly structured sparse Jacobian dependencies (e.g., Banded FVM elements) 
-    interspersed with dense global constraint rows (Arrowheads).
-    """
+    """Generates banded sparse Jacobian matrices interspersed with dense constraint rows."""
     N = draw(st.integers(20, 100))
     band = draw(st.integers(0, 4))
     
     triplets = set()
     J_true = np.zeros((N, N))
     
-    # Generate banded bulk
     for i in range(N):
         for j in range(max(0, i - band), min(N, i + band + 1)):
             val = draw(st.floats(0.1, 10.0))
             triplets.add((i, j))
             J_true[i, j] = val
             
-    # Inject dense arrowhead rows
-    dense_rows = draw(st.lists(st.integers(0, N-1), min_size=0, max_size=3, unique=True))
+    dense_rows = draw(st.lists(st.integers(0, N - 1), min_size=0, max_size=3, unique=True))
     for r in dense_rows:
         for c in range(N):
             val = draw(st.floats(0.1, 10.0))
@@ -341,22 +329,20 @@ def structured_sparsity_strategy(draw):
     return N, triplets, J_true
 
 
-
 @settings(max_examples=50)
 @given(graph_data=structured_sparsity_strategy())
 def test_fuzz_cpr_jvp_reconstruction_exactness(graph_data):
     """
-    PROBE: Validates CPR Welsh-Powell coloring by simulating an exact AD reconstruction.
-    INVARIANT: Simulates Forward-Mode AD JVP sweeps for the sparse bulk, and Reverse-Mode 
-    AD VJP passes for the isolated dense components. Perfect mathematical recovery of 
-    the hybrid sparse matrix is required.
+    PROBE: Validates CPR Welsh-Powell column-intersection graph coloring.
+    INVARIANT: Sparse columns colored together must not collide in the same row. Dense rows
+               must be isolated into the dedicated VJP sweep. Reconstructed J must equal J_true.
     """
     N, triplets, J_true = graph_data
     
     colorer = HybridGraphColorer(n_states=N, triplets=triplets, dense_threshold=15)
     J_reconstructed = np.zeros((N, N))
     
-    # 1. Simulate Forward-Mode AD JVP Sweeps
+    # Forward-Mode AD JVP Sweeps (Sparse Bulk)
     for c_idx, seed_vector in enumerate(colorer.color_seeds):
         v = np.array(seed_vector)
         jvp_out = J_true @ v
@@ -365,28 +351,21 @@ def test_fuzz_cpr_jvp_reconstruction_exactness(graph_data):
             if colorer.color_map[col] == c_idx:
                 J_reconstructed[row, col] = jvp_out[row]
                 
-    # 2. Simulate Reverse-Mode AD VJP passes for Arrowhead dense rows
+    # Reverse-Mode AD VJP Passes (Dense Arrowhead Rows)
     for r in colorer.dense_rows:
-        # Construct the adjoint vector lambda mapping directly to the isolated row
         lam_vjp = np.zeros(N)
         lam_vjp[r] = 1.0
         
-        # Simulated VJP: evaluate_vjp(..., lambda) yields lambda^T @ J
         dy_out = lam_vjp @ J_true
-        
-        # Re-scatter evaluating strictly non-zero tolerance
         for col in range(N):
             val = dy_out[col]
             if abs(val) > 1e-16:
                 J_reconstructed[r, col] = val
                 
-    # 3. Assert Perfect Sparsity Recovery
     np.testing.assert_allclose(
         J_reconstructed, J_true, atol=1e-12,
-        err_msg="CPR Reconstruction Failed! Color collision caused a JVP overlap, or "
-                "the VJP failed to correctly amputate and map the dense Arrowhead row."
+        err_msg="CPR Reconstruction Failed: Color collision or dense row amputation error."
     )
-
 
 
 # ==============================================================================
@@ -394,11 +373,7 @@ def test_fuzz_cpr_jvp_reconstruction_exactness(graph_data):
 # ==============================================================================
 
 class StiffNonLinearDAE(fx.PDE):
-    """
-    A stiff, highly non-linear model designed to fight the Newton-Raphson root finder. 
-    Coupling rapid spatial diffusion with logarithmic algebraic constraints guarantees 
-    extreme sensitivity to arbitrary parameter jumps.
-    """
+    """Stiff nonlinear DAE combining rapid spatial diffusion with logarithmic algebraic constraints."""
     x = fx.Domain(bounds=(0, 1), resolution=10, name="x")
     c = fx.State(domain=x, name="c")
     v = fx.State(domain=None, name="v")
@@ -420,16 +395,16 @@ class StiffNonLinearDAE(fx.PDE):
         }
 
 
-_STIFF_ENGINE = fx.Engine(model=StiffNonLinearDAE(), target="cpu", mock_execution=False)
-
+# Lazily instantiate the test engine only when the native runtime is present
+_STIFF_ENGINE = (
+    fx.Engine(model=StiffNonLinearDAE(), target="cpu", mock_execution=False)
+    if (_has_compiler() and RUST_FFI_AVAILABLE) else None
+)
 
 
 @st.composite
 def session_action_strategy(draw):
-    """
-    Emits a sequence of aggressive session commands. 
-    Time steps (dt) span 18 orders of magnitude (1e-12 to 1e6) to induce tolerance starvation.
-    """
+    """Emits random session commands with time steps spanning 1e-12 to 1e6."""
     action_type = draw(st.sampled_from(["STEP", "CHECKPOINT", "RESTORE"]))
     if action_type == "STEP":
         log_dt = draw(st.floats(min_value=-12.0, max_value=6.0))
@@ -438,17 +413,14 @@ def session_action_strategy(draw):
     return (action_type, 0.0, 0.0)
 
 
-
 @pytest.mark.skipif(_STIFF_ENGINE is None, reason="Requires Native Execution Environment.")
 @settings(max_examples=50, deadline=None)
 @given(actions=st.lists(session_action_strategy(), min_size=1, max_size=30))
 def test_fuzz_ffi_stiff_nonlinear_stepping(actions):
     """
-    PROBE: Rapidly steps the Native Rust BDF solver using randomized extreme time-steps, 
-    violent parameter jumps, and constant history checkpointing/restorations.
-    INVARIANT: We tolerate explicit Integration Rejections (divergence, thrashing). We 
-    STRICTLY assert that failed or aborted integration sweeps DO NOT leak NaN garbage 
-    into the observable user state arrays, maintaining hermetic memory integrity.
+    PROBE: Applies aggressive parameter steps and time increments to the native Rust solver.
+    INVARIANT: Divergence or step rejections are acceptable, but solver workspace rollback
+               must maintain finite, non-corrupted state arrays without NaN leakage.
     """
     session = _STIFF_ENGINE.start_session()
     
@@ -466,20 +438,21 @@ def test_fuzz_ffi_stiff_nonlinear_stepping(actions):
         try:
             session.step(dt, inputs={"i_app": i_app})
         except RuntimeError as e:
-            # Tolerable rejection: Extreme parameter swings violate BDF tolerances or cause divergence.
             err_str = str(e).lower()
             assert "divergence" in err_str or "convergence" in err_str or "crash" in err_str, \
                 f"Unexpected Native Engine exception: {e}"
             step_crashed = True
             
-        # GUARANTEE STRICT ARRAY OBSERVABILITY (MASK LOCAL NANS).
-        # By extracting the arrays *even when the solver crashes*, we prove that the
-        # workspace rollback successfully cleared any NaNs injected by a speculative Newton step.
+        # Verify workspace rollback cleared speculative NaNs from state buffers
         c_arr = session.get_array("c")
         v_arr = session.get_array("v")
         
-        assert np.all(np.isfinite(c_arr)), f"Solver leaked NaN into state array 'c' after step failure.\nActions: {actions}"
-        assert np.all(np.isfinite(v_arr)), f"Solver leaked NaN into algebraic array 'v' after step failure.\nActions: {actions}"
+        assert np.all(np.isfinite(c_arr)), f"State array 'c' contains non-finite values.\nActions: {actions}"
+        assert np.all(np.isfinite(v_arr)), f"Algebraic array 'v' contains non-finite values.\nActions: {actions}"
 
         if step_crashed:
-            break 
+            break
+
+
+if __name__ == "__main__":
+    pytest.main(["-v", "-s", __file__])

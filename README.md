@@ -37,9 +37,6 @@ ion-flux install-toolchain
 git clone https://github.com/osotsia/ion_flux.git
 cd ion_flux
 
-# Run the performance showcase
-python examples/6_demo.py
-
 # Run a full DFN model
 python models/Chen2020_DFN.py
 
@@ -211,7 +208,7 @@ while session.time < 3600.0:
 **Stage 2: Continuum Topology & Semantic Normalization (Middle-end)**
 *   **Elements:** Topological Analysis & Math IR (`compiler/_2_middle_end` and `compiler/_3_backend/math_ir.py`).
 *   **How:** Analyzes domain manifolds, composite cross-products ($x \times r$), and boundary constraints. The `NormalizationPass` unrolls syntactic sugar (e.g., piecewise regional equations) and resolves continuum boundary constraints, lowering the untyped AST into a strongly typed, N-Dimensional **Math IR** (`MathSystem`).
-*   **Why:** Isolates physical mathematics and boundary conditions in a structured, topology-aware representation before geometric discretization or memory indexing is introduced.
+*   **Why:** Isolates physical mathematics and boundary conditions in a structured, topology-aware representation, allowing physics inspection before computational complexities (discretization or memory indexing) are introduced.
 
 **Stage 3: FVM Discretization, Static AD Analysis & Codegen (Backend)**
 *   **Elements:** FVM Discretizer, CPR Sparsity Optimizer, and Clang/Enzyme Invoker (`compiler/_3_backend` and `compiler/_4_codegen`).

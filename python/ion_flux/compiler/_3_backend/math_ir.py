@@ -1,8 +1,8 @@
 """
 Math Intermediate Representation (Math IR).
 
-Represents N-Dimensional continuum mathematics, tensor operators, 
-and boundary constraints prior to spatial discretization and memory flattening.
+Represents N-Dimensional continuum mathematics, tensor differential operators,
+and domain boundary constraints prior to spatial discretization and memory layout flattening.
 """
 
 from dataclasses import dataclass
@@ -141,3 +141,19 @@ class MathSystem:
     observables: List[MathObservable]
     dirichlet_overrides: List[MathDirichletOverride]
     dynamic_domain_bindings: Dict[str, Dict[str, Any]]
+
+
+def extract_math_state_names(expr: MathExpr) -> List[str]:
+    """Recursively extracts all unique State variable names referenced in a MathExpr."""
+    if isinstance(expr, MathState):
+        return [expr.name]
+
+    names: List[str] = []
+    if isinstance(expr, (MathUnaryOp, MathGrad, MathDiv, MathDt, MathIntegral, MathBoundaryRef)):
+        names.extend(extract_math_state_names(expr.child))
+    elif isinstance(expr, MathBinaryOp):
+        names.extend(extract_math_state_names(expr.left))
+        names.extend(extract_math_state_names(expr.right))
+
+    seen = set()
+    return [x for x in names if not (x in seen or seen.add(x))]
