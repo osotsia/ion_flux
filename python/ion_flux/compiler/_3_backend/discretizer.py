@@ -4,6 +4,7 @@ FVM Discretizer.
 Transforms N-Dimensional Math IR into strict 1D Compute IR.
 Handles memory stride linearization, Finite Volume Method geometric scaling,
 flux upwinding, piecewise interface harmonic averaging, and ALE dynamic mesh dilution.
+Uses structural pattern matching for Math IR dispatch.
 """
 
 from typing import Dict, Any, Optional, List, Tuple
@@ -23,19 +24,21 @@ from ion_flux.compiler._3_backend.math_ir import (
 
 def extract_domain_name(expr: MathExpr) -> Optional[str]:
     """Recursively determines the spatial domain of an expression."""
-    if isinstance(expr, MathState):
-        return expr.domain_name
-    if isinstance(expr, MathBoundaryRef):
-        return expr.domain or extract_domain_name(expr.child)
-    if isinstance(expr, (MathGrad, MathDiv, MathCoords)):
-        if expr.axis:
-            return expr.axis
-        return extract_domain_name(expr.child) if hasattr(expr, "child") else None
-    if isinstance(expr, (MathUnaryOp, MathDt)):
-        return extract_domain_name(expr.child)
-    if isinstance(expr, MathBinaryOp):
-        return extract_domain_name(expr.left) or extract_domain_name(expr.right)
-    return None
+    match expr:
+        case MathState(domain_name=domain_name):
+            return domain_name
+        case MathBoundaryRef(domain=domain, child=child):
+            return domain or extract_domain_name(child)
+        case MathGrad(axis=axis, child=child) | MathDiv(axis=axis, child=child):
+            return axis or extract_domain_name(child)
+        case MathCoords(axis=axis):
+            return axis
+        case MathUnaryOp(child=child) | MathDt(child=child):
+            return extract_domain_name(child)
+        case MathBinaryOp(left=left, right=right):
+            return extract_domain_name(left) or extract_domain_name(right)
+        case _:
+            return None
 
 
 class IndexManager:
@@ -294,58 +297,64 @@ class FVMDiscretizer:
         face: Optional[str],
         current_eq: Optional[MathEquation]
     ) -> Expr:
-        if isinstance(node, MathScalar):
-            return Literal(node.value)
+        """
+        Dispatches Math IR expressions into Compute IR nodes via pattern matching.
+        Eliminates the isinstance() cascading branches.
+        """
+        match node:
+            case MathScalar(value=value):
+                return Literal(value)
 
-        if isinstance(node, MathParameter):
-            return ArrayAccess("p", Literal(node.offset))
+            case MathParameter(offset=offset):
+                return ArrayAccess("p", Literal(offset))
 
-        if isinstance(node, MathState):
-            return self._lower_state(node, idx_mgr, current_axis, face)
+            case MathState():
+                return self._lower_state(node, idx_mgr, current_axis, face)
 
-        if isinstance(node, MathBoundaryRef):
-            return self._lower_boundary_ref(node, idx_mgr, current_axis)
+            case MathBoundaryRef():
+                return self._lower_boundary_ref(node, idx_mgr, current_axis)
 
-        if isinstance(node, MathBinaryOp):
-            l = self.lower_expr(node.left, idx_mgr, current_axis, face, current_eq)
-            r = self.lower_expr(node.right, idx_mgr, current_axis, face, current_eq)
-            op = node.op
-            if op in ("max", "min"):
-                return FuncCall(f"std::{op}", [l, r])
-            bop = BinaryOp(self._BIN_SYM[op], l, r) if op != "pow" else FuncCall("std::pow", [l, r])
-            if op in ("gt", "lt", "ge", "le", "eq", "ne"):
-                return Ternary(bop, Literal(1.0), Literal(0.0))
-            return bop
+            case MathBinaryOp(op=op, left=left, right=right):
+                l = self.lower_expr(left, idx_mgr, current_axis, face, current_eq)
+                r = self.lower_expr(right, idx_mgr, current_axis, face, current_eq)
+                if op in ("max", "min"):
+                    return FuncCall(f"std::{op}", [l, r])
+                bop = BinaryOp(self._BIN_SYM[op], l, r) if op != "pow" else FuncCall("std::pow", [l, r])
+                if op in ("gt", "lt", "ge", "le", "eq", "ne"):
+                    return Ternary(bop, Literal(1.0), Literal(0.0))
+                return bop
 
-        if isinstance(node, MathUnaryOp):
-            c_ir = self.lower_expr(node.child, idx_mgr, current_axis, face, current_eq)
-            if node.op == "neg":
+            case MathUnaryOp(op="neg", child=child):
+                c_ir = self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
                 return UnaryMinus(c_ir)
-            if node.op == "coords":
+
+            case MathUnaryOp(op="coords"):
                 return self._lower_coords(current_axis, idx_mgr)
-            return FuncCall(self._UNARY_SYM.get(node.op, node.op), [c_ir])
 
-        if isinstance(node, MathDt):
-            if isinstance(node.child, MathState):
-                return self._lower_state(node.child, idx_mgr, current_axis, face, force_ydot=True)
-            return self.lower_expr(node.child, idx_mgr, current_axis, face, current_eq)
+            case MathUnaryOp(op=op, child=child):
+                c_ir = self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
+                return FuncCall(self._UNARY_SYM.get(op, op), [c_ir])
 
-        if isinstance(node, MathCoords):
-            axis = node.axis or current_axis
-            return self._lower_coords(axis, idx_mgr)
+            case MathDt(child=MathState() as state):
+                return self._lower_state(state, idx_mgr, current_axis, face, force_ydot=True)
 
-        if isinstance(node, MathGrad):
-            axis = node.axis or current_axis
-            return self._lower_gradient(node.child, axis, idx_mgr, face, current_eq)
+            case MathDt(child=child):
+                return self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
 
-        if isinstance(node, MathDiv):
-            axis = node.axis or current_axis
-            return self._lower_divergence(node.child, axis, idx_mgr, current_eq)
+            case MathCoords(axis=axis):
+                return self._lower_coords(axis or current_axis, idx_mgr)
 
-        if isinstance(node, MathIntegral):
-            return self._lower_integral(node.child, node.over_domain, idx_mgr)
+            case MathGrad(child=child, axis=axis):
+                return self._lower_gradient(child, axis or current_axis, idx_mgr, face, current_eq)
 
-        return Literal(0.0)
+            case MathDiv(child=child, axis=axis):
+                return self._lower_divergence(child, axis or current_axis, idx_mgr, current_eq)
+
+            case MathIntegral(child=child, over_domain=over_domain):
+                return self._lower_integral(child, over_domain, idx_mgr)
+
+            case _:
+                return Literal(0.0)
 
     def _lower_state(
         self,
@@ -540,13 +549,16 @@ class FVMDiscretizer:
         return res_ir
 
     def _strip_grad(self, expr: MathExpr) -> MathExpr:
-        if isinstance(expr, MathGrad):
-            return MathScalar(1.0)
-        if isinstance(expr, MathBinaryOp):
-            return MathBinaryOp(expr.op, self._strip_grad(expr.left), self._strip_grad(expr.right))
-        if isinstance(expr, MathUnaryOp):
-            return MathUnaryOp(expr.op, self._strip_grad(expr.child))
-        return expr
+        """Strips MathGrad nodes from flux expressions for unstructured divergence assembly."""
+        match expr:
+            case MathGrad():
+                return MathScalar(1.0)
+            case MathBinaryOp(op=op, left=left, right=right):
+                return MathBinaryOp(op, self._strip_grad(left), self._strip_grad(right))
+            case MathUnaryOp(op=op, child=child):
+                return MathUnaryOp(op, self._strip_grad(child))
+            case _:
+                return expr
 
     def _harmonic_mean(self, a: Expr, b: Expr) -> Expr:
         abs_a = FuncCall("std::abs", [a])
@@ -650,49 +662,63 @@ class FVMDiscretizer:
         return ale
 
     def _lower_ast_dict(self, node: Any) -> MathExpr:
-        if not isinstance(node, dict):
-            return MathScalar(float(node) if isinstance(node, (int, float)) else 0.0)
+        """Fallback lowering of embedded dictionary nodes."""
+        bc_id = node.get("_bc_id") if isinstance(node, dict) else None
 
-        bc_id = node.get("_bc_id")
-        t = node.get("type")
-        if t == "Scalar":
-            return MathScalar(float(node["value"]), bc_id=bc_id)
-        if t == "Parameter":
-            p_name = node["name"]
-            p_off = self.layout.get_param_offset(p_name) if self.layout else 0
-            return MathParameter(name=p_name, offset=p_off, bc_id=bc_id)
-        if t == "State":
-            s_name = node["name"]
-            s_obj = self.state_map.get(s_name)
-            s_dom = getattr(s_obj, "domain", None)
-            s_dom_name = s_dom.name if s_dom else None
-            off, size = self.layout.state_offsets[s_name] if self.layout and s_name in self.layout.state_offsets else (0, 1)
-            return MathState(name=s_name, domain_name=s_dom_name, offset=off, size=size, is_ydot=False, bc_id=bc_id)
-        if t == "Boundary":
-            child_ir = self._lower_ast_dict(node["child"])
-            return MathBoundaryRef(child=child_ir, side=node["side"], domain=node.get("domain"), bc_id=bc_id)
-        if t == "BinaryOp":
-            return MathBinaryOp(
-                node["op"],
-                self._lower_ast_dict(node["left"]),
-                self._lower_ast_dict(node["right"]),
-                bc_id=bc_id
-            )
-        if t == "UnaryOp":
-            op = node["op"]
-            child = node["child"]
-            if op == "coords":
+        match node:
+            case int() | float():
+                return MathScalar(float(node))
+
+            case {"type": "Scalar", "value": val}:
+                return MathScalar(float(val), bc_id=bc_id)
+
+            case {"type": "Parameter", "name": p_name}:
+                p_off = self.layout.get_param_offset(p_name) if self.layout else 0
+                return MathParameter(name=p_name, offset=p_off, bc_id=bc_id)
+
+            case {"type": "State", "name": s_name}:
+                s_obj = self.state_map.get(s_name)
+                s_dom = getattr(s_obj, "domain", None)
+                s_dom_name = s_dom.name if s_dom else None
+                off, size = (
+                    self.layout.state_offsets[s_name]
+                    if self.layout and s_name in self.layout.state_offsets
+                    else (0, 1)
+                )
+                return MathState(name=s_name, domain_name=s_dom_name, offset=off, size=size, is_ydot=False, bc_id=bc_id)
+
+            case {"type": "Boundary", "child": child, "side": side}:
+                child_ir = self._lower_ast_dict(child)
+                return MathBoundaryRef(child=child_ir, side=side, domain=node.get("domain"), bc_id=bc_id)
+
+            case {"type": "BinaryOp", "op": op, "left": left, "right": right}:
+                return MathBinaryOp(
+                    op,
+                    self._lower_ast_dict(left),
+                    self._lower_ast_dict(right),
+                    bc_id=bc_id
+                )
+
+            case {"type": "UnaryOp", "op": "coords"}:
                 axis = self._resolve_axis(node.get("axis"))
                 return MathCoords(axis=axis, bc_id=bc_id)
-            if op == "grad":
+
+            case {"type": "UnaryOp", "op": "grad", "child": child}:
                 axis = self._resolve_axis(node.get("axis"))
                 return MathGrad(child=self._lower_ast_dict(child), axis=axis, bc_id=bc_id)
-            if op == "div":
+
+            case {"type": "UnaryOp", "op": "div", "child": child}:
                 axis = self._resolve_axis(node.get("axis"))
                 return MathDiv(child=self._lower_ast_dict(child), axis=axis, bc_id=bc_id)
-            if op == "dt":
+
+            case {"type": "UnaryOp", "op": "dt", "child": child}:
                 return MathDt(child=self._lower_ast_dict(child), bc_id=bc_id)
-            if op == "integral":
+
+            case {"type": "UnaryOp", "op": "integral", "child": child}:
                 return MathIntegral(child=self._lower_ast_dict(child), over_domain=node.get("over"), bc_id=bc_id)
-            return MathUnaryOp(node["op"], self._lower_ast_dict(child), bc_id=bc_id)
-        return MathScalar(0.0)
+
+            case {"type": "UnaryOp", "op": op, "child": child}:
+                return MathUnaryOp(op, self._lower_ast_dict(child), bc_id=bc_id)
+
+            case _:
+                return MathScalar(0.0)

@@ -1,37 +1,52 @@
+"""
+AST Inspection and Traversal Utilities.
+
+Uses Python 3.10+ pattern matching to traverse raw AST dictionary nodes
+without manual dictionary sniffing or chained .get() lookups.
+"""
+
 from typing import Dict, Any, List
 
+
 def extract_state_names(node: Dict[str, Any]) -> List[str]:
-    """Recursively walks down AST wrappers to find ALL State names driving an equation."""
-    if not isinstance(node, dict):
-        return []
-        
-    node_type = node.get("type")
+    """
+    Recursively walks an AST payload to extract all unique State variable names.
+    Uses structural pattern matching to unpack node dictionaries directly.
+    """
+    names: List[str] = []
 
-    if node_type == "State":
-        return [node["name"]]
+    match node:
+        case {"type": "State", "name": str(name)}:
+            return [name]
 
-    names = []
-    
-    if node_type in ("UnaryOp", "Boundary", "InitialCondition"):
-        if "child" in node:
-            names.extend(extract_state_names(node["child"]))
-    elif node_type == "BinaryOp":
-        if "left" in node:
-            names.extend(extract_state_names(node["left"]))
-        if "right" in node:
-            names.extend(extract_state_names(node["right"]))
-    elif node_type == "DomainBoundary":
-        pass
-    else:
-        for key, val in node.items():
-            if isinstance(val, dict):
-                names.extend(extract_state_names(val))
-            elif isinstance(val, list):
-                for item in val:
-                    names.extend(extract_state_names(item))
+        case {"type": "UnaryOp" | "Boundary" | "InitialCondition", "child": dict() as child}:
+            names.extend(extract_state_names(child))
 
+        case {"type": "BinaryOp", "left": dict() as left, "right": dict() as right}:
+            names.extend(extract_state_names(left))
+            names.extend(extract_state_names(right))
+
+        case {"type": "DomainBoundary"}:
+            pass
+
+        case dict():
+            # Fallback for composite container dictionaries (e.g., boundaries, regions)
+            for val in node.values():
+                match val:
+                    case dict():
+                        names.extend(extract_state_names(val))
+                    case list():
+                        for item in val:
+                            if isinstance(item, dict):
+                                names.extend(extract_state_names(item))
+
+        case _:
+            return []
+
+    # Preserve traversal order while removing duplicates
     seen = set()
     return [x for x in names if not (x in seen or seen.add(x))]
+
 
 def extract_state_name(node: Dict[str, Any], layout: Any = None) -> str:
     """Extracts the primary target State name from an AST equation mapping."""
@@ -40,15 +55,21 @@ def extract_state_name(node: Dict[str, Any], layout: Any = None) -> str:
         raise ValueError(f"Could not resolve a primary State target from AST node: {node}")
     return names[0]
 
+
 def extract_div_child(node: Dict[str, Any]) -> Any:
-    """Recursively searches the AST for a 'div' operator and returns its child flux node."""
-    if not isinstance(node, dict): return None
-    if node.get("type") == "UnaryOp" and node.get("op") == "div":
-        return node.get("child")
-    if "left" in node and "right" in node:
-        res = extract_div_child(node["left"])
-        if res: return res
-        return extract_div_child(node["right"])
-    if "child" in node:
-        return extract_div_child(node["child"])
-    return None
+    """
+    Recursively searches the AST for a 'div' operator and returns its child flux node.
+    Structural pattern matching isolates the target operator directly.
+    """
+    match node:
+        case {"type": "UnaryOp", "op": "div", "child": child}:
+            return child
+
+        case {"left": left, "right": right}:
+            return extract_div_child(left) or extract_div_child(right)
+
+        case {"child": child}:
+            return extract_div_child(child)
+
+        case _:
+            return None

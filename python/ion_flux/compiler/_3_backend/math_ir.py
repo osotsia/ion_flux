@@ -144,16 +144,32 @@ class MathSystem:
 
 
 def extract_math_state_names(expr: MathExpr) -> List[str]:
-    """Recursively extracts all unique State variable names referenced in a MathExpr."""
-    if isinstance(expr, MathState):
-        return [expr.name]
-
+    """
+    Recursively extracts all unique State variable names referenced in a MathExpr.
+    Uses class pattern matching on typed Math IR expressions.
+    """
     names: List[str] = []
-    if isinstance(expr, (MathUnaryOp, MathGrad, MathDiv, MathDt, MathIntegral, MathBoundaryRef)):
-        names.extend(extract_math_state_names(expr.child))
-    elif isinstance(expr, MathBinaryOp):
-        names.extend(extract_math_state_names(expr.left))
-        names.extend(extract_math_state_names(expr.right))
+
+    match expr:
+        case MathState(name=name):
+            return [name]
+
+        case (
+            MathUnaryOp(child=child)
+            | MathGrad(child=child)
+            | MathDiv(child=child)
+            | MathDt(child=child)
+            | MathIntegral(child=child)
+            | MathBoundaryRef(child=child)
+        ):
+            names.extend(extract_math_state_names(child))
+
+        case MathBinaryOp(left=left, right=right):
+            names.extend(extract_math_state_names(left))
+            names.extend(extract_math_state_names(right))
+
+        case _:
+            pass
 
     seen = set()
     return [x for x in names if not (x in seen or seen.add(x))]
