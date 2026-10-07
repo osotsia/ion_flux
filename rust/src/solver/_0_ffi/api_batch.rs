@@ -130,7 +130,7 @@ pub fn solve_batch_native<'py>(
     let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
     let prob_base = Problem { n: y0.len(), bw: bandwidth, n_obs, id, constraints: vec![0.0; y0.len()], m: m_list, spatial_diag, max_steps, cpr, config: SolverConfig::default(), fns };
 
-    let results: Result<Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, SolverError> = py.allow_threads(|| {
+    let results: Result<Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, SolverError> = py.detach(|| {
         pool.install(|| {
             p_batch.par_iter().enumerate().map(|(b_idx, p)| {
                 let prob = prob_base.clone();
