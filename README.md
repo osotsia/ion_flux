@@ -174,7 +174,7 @@ print(grads["anode_D_s"])
 ```
 
 ### Scenario C: Microsecond-Latency Hardware-in-the-Loop (HIL)
-For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session**. The BDF history vectors, sparse LU matrices, and exact analytical Jacobians stay "hot" in hardware memory.
+Engineers couple physics models directly to control software because validating the software (eg fast-charging, thermal management) requires closed-loop feedback and cannot be done with pre-recorded test data. For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session**. The BDF history vectors, sparse LU matrices, and exact analytical Jacobians stay "hot" in hardware memory.
 
 ```python
 session = engine.start_session(parameters={"anode_D_s": 1e-14})
