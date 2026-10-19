@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 from scipy.stats import sobol_indices, uniform
 from tqdm import tqdm
 
-
 # Add the 'models' directory to the path to inherit the baseline model
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'models'))
 from Chen2020_DFN import Chen2020_DFN # type: ignore
@@ -21,7 +20,7 @@ import ion_flux as fx
 from ion_flux.protocols import Sequence, CC
 
 # ==============================================================================
-# 1. Configuration & Parameter Promotion
+# Configuration
 # ==============================================================================
 
 CONFIG = {
@@ -33,32 +32,19 @@ CONFIG = {
 }
 
 # ==============================================================================
-# 2. Execution Pipelines
+# Computational Pipelines
 # ==============================================================================
 
-def execute_runtime_adjoint_sensitivity(engine: fx.Engine, params_list: list, nominal_params: dict, c_rate: float):
+def compute_local_sensitivity(engine: fx.Engine, params_list: list, nominal_params: dict, c_rate: float):
     """
-    Computes exact local sensitivities: "How many extra seconds of discharge 
-    do I get if I increase a parameter by 1%?"
-    
-    This avoids noisy finite-difference approximations by differentiating the 
-    exact stopping event natively. 
-    
-    The Metaphor:
-    If a parameter tweak increases the final cell voltage by 1 mV, and the cell 
-    is plunging at a speed of 10 mV/second at the cutoff, that parameter buys 
-    us an extra 0.1 seconds of runtime. The native solver computes (1.0 / ydot) 
-    and uses it as the Adjoint seed to backpropagate through the entire trajectory.
+    Computes exact local sensitivities via analytical adjoints: 
+    "How many extra seconds of discharge do I get if I increase a parameter by 1%?"
     """
-    # 1. Define the exact algebraic trigger sequence
     protocol = Sequence([
         CC(rate=5.0 * c_rate, until=engine.model.V_cell <= CONFIG["v_cutoff"], time=7200)
     ])
     
-    # 2. Forward Pass
-    # Passing `protocol` instead of `t_eval` forces the Native Solver to perform 
-    # exact bisection root-finding to land on the right spot.
-    # `requires_grad` instructs the engine to record the trajectory tape in RAM.
+    # Forward Pass: Records the highly non-linear trajectory tape
     res = engine.solve(
         protocol=protocol, 
         parameters=nominal_params, 
@@ -66,46 +52,47 @@ def execute_runtime_adjoint_sensitivity(engine: fx.Engine, params_list: list, no
         show_progress=False
     )
     
-    # 3. Backward Pass (Adjoint VJP)
+    # Backward Pass: Adjoint VJP evaluating the exact trigger event
     loss = fx.metrics.runtime_to_event(res, trigger_state="V_cell")
     grads = loss.backward()
     
-    # 4. Normalize gradients into intuitive engineering units:
-    # (Seconds of extended runtime) per (1% increase in nominal parameter value)
+    # Normalize gradients to engineering units: (Seconds gained) per (1% parameter increase)
     sensitivities = {}
     for p in params_list:
         delta_p_1_percent = nominal_params[p] * 0.01
-        seconds_gained = grads[p] * delta_p_1_percent
-        sensitivities[p] = seconds_gained
+        sensitivities[p] = grads[p] * delta_p_1_percent
         
     return sensitivities, res
 
 
-def execute_global_sobol_analysis(engine: fx.Engine, params_list: list, nominal_params: dict, c_rate: float):
-    """Computes global feature variance using Total-Order Sobol Indices (ST) via Rayon Batching."""
-    
-    # 1. Define uniform variance distributions
-    dists = []
-    for p in params_list:
-        nom = nominal_params[p]
-        low = nom * (1.0 - CONFIG["variance"])
-        high = nom * (1.0 + CONFIG["variance"])
-        dists.append(uniform(loc=low, scale=high - low))
+def compute_global_sobol(engine: fx.Engine, params_list: list, nominal_params: dict, c_rate: float):
+    """
+    Computes global feature variance using Total-Order Sobol Indices (ST).
+    "What fraction of the total variability in battery runtime is driven by uncertainty in this parameter?"
+    """
+    # Define uniform variance distributions for the parameter hyperspace
+    dists = [
+        uniform(loc=nominal_params[p] * (1.0 - CONFIG["variance"]), 
+                scale=nominal_params[p] * 2 * CONFIG["variance"])
+        for p in params_list
+    ]
         
-    # 2. Define the vectorized batch evaluator
     protocol = Sequence([CC(rate=5.0 * c_rate, until=engine.model.V_cell <= CONFIG["v_cutoff"], time=7200)])
     all_trajectories = []
     
+    total_evals = CONFIG["sobol_n"] * (len(params_list) + 2)
+    pbar = tqdm(total=total_evals, desc=f"Sobol Sweep ({c_rate}C)", leave=False)
+
     def batch_evaluator(x_array):
-        samples = x_array.T
-        payloads = [{p: val for p, val in zip(params_list, row)} for row in samples]
+        """Closure invoked by scipy.sobol_indices to evaluate parameter matrices."""
+        payloads = [{p: val for p, val in zip(params_list, row)} for row in x_array.T]
         kpis = []
         
+        # Chunk execution to limit concurrent memory footprint
         chunk_size = min(64, (os.cpu_count() or 4) * 4) 
         
         for i in range(0, len(payloads), chunk_size):
             chunk = payloads[i:i+chunk_size]
-            
             res_chunk = engine.solve_batch(
                 parameters=chunk, 
                 t_span=(0, 7200), 
@@ -122,59 +109,37 @@ def execute_global_sobol_analysis(engine: fx.Engine, params_list: list, nominal_
                     })
                 kpis.append(r["Time [s]"].data[-1])
                 
-            # Update the outer progress bar dynamically
             pbar.update(len(chunk))
-                
+            
         return np.array(kpis)
 
-    # 3. Execute SciPy Sobol Analysis with a Master Progress Bar
-    total_evals = CONFIG["sobol_n"] * (len(params_list) + 2)
+    res = sobol_indices(func=batch_evaluator, n=CONFIG["sobol_n"], dists=dists)
+    pbar.close()
     
-    with tqdm(total=total_evals, desc=f"Sobol Sweep ({c_rate}C)", leave=False) as pbar:
-        res = sobol_indices(func=batch_evaluator, n=CONFIG["sobol_n"], dists=dists)
-    
-    # Extract Total-Order Indices (Captures both direct effects and non-linear interactions)
-    st_indices = res.total_order
-    importance = {p: st_indices[i] for i, p in enumerate(params_list)}
-    
+    importance = {p: res.total_order[i] for i, p in enumerate(params_list)}
     return all_trajectories, importance
 
-
 # ==============================================================================
-# 3. Execution & Visualization
+# Visualization
 # ==============================================================================
 
-def main():
-    # Utilizing the base Chen2020_DFN which now exposes these parameters natively
-    model = Chen2020_DFN()
-    engine = fx.Engine(model=model, target=CONFIG["target"])
-    
-    target_params = ["D_s_n", "D_s_p", "k_n", "k_p"]
-    nominal = {p: engine.parameters[p].value for p in target_params}
-    
-    # Render Dashboard
+def plot_sensitivity_dashboard(results_data: dict, params_list: list):
+    """Renders the 3x3 multi-variate diagnostic dashboard."""
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, axes = plt.subplots(3, 3, figsize=(18, 14))
     fig.suptitle("Multi-Variate Sensitivity Analysis (Chen2020 DFN)", fontsize=18, fontweight="bold")
     
     for row_idx, c_rate in enumerate(CONFIG["c_rates"]):
-        print(f"\n--- Processing {c_rate}C ---")
-        
-        # Execute Pipelines
-        local_sens, nominal_res = execute_runtime_adjoint_sensitivity(engine, target_params, nominal, c_rate)
-        mc_results, global_importance = execute_global_sobol_analysis(engine, target_params, nominal, c_rate)
-        
+        data = results_data[c_rate]
         ax_env, ax_loc, ax_glob = axes[row_idx]
         
-        # -------------------------------------------------------------------------
-        # Column 1: Trajectory Envelope
-        # -------------------------------------------------------------------------
-        for res_dict in mc_results: # Already capped at 250 in the evaluator
+        # --- Column 1: Trajectory Envelope ---
+        for res_dict in data["mc_results"]:
             t_mins = res_dict["Time [s]"] / 60.0
             ax_env.plot(t_mins, res_dict["V_cell"], color="tab:blue", alpha=0.05, linewidth=1.5)
             
-        t_nom_mins = nominal_res["Time [s]"].data / 60.0
-        ax_env.plot(t_nom_mins, nominal_res["V_cell"].data, color="black", linewidth=2, label="Nominal")
+        t_nom_mins = data["nominal_res"]["Time [s]"].data / 60.0
+        ax_env.plot(t_nom_mins, data["nominal_res"]["V_cell"].data, color="black", linewidth=2, label="Nominal")
         ax_env.axhline(CONFIG["v_cutoff"], color="k", linestyle="--", linewidth=1.5, label="Cutoff")
         
         ax_env.set_ylabel(f"{c_rate}C\nTerminal Voltage [V]", fontweight="bold")
@@ -187,14 +152,12 @@ def main():
             ax_env.set_xlabel("Time [minutes]")
         
         # Establish Common Y-Axis Sorting (Driven by Global Importance)
-        sorted_global = sorted(global_importance.items(), key=lambda item: item[1])
+        sorted_global = sorted(data["global_importance"].items(), key=lambda item: item[1])
         sorted_keys = [item[0] for item in sorted_global]
         vals_global = [item[1] for item in sorted_global]
         
-        # -------------------------------------------------------------------------
-        # Column 2: Local Sensitivity (Exact Event Time Adjoints)
-        # -------------------------------------------------------------------------
-        vals_local = [local_sens[k] for k in sorted_keys]
+        # --- Column 2: Local Sensitivity ---
+        vals_local = [data["local_sens"][k] for k in sorted_keys]
         colors = ["tab:red" if v < 0 else "tab:green" for v in vals_local]
         
         ax_loc.barh(sorted_keys, vals_local, color=colors, height=0.6)
@@ -205,22 +168,19 @@ def main():
         if row_idx == 2: 
             ax_loc.set_xlabel(f"Δ Time to {CONFIG['v_cutoff']}V [Seconds] per 1% Increase")
         
-        # Annotate exact values for clarity
         for i, v in enumerate(vals_local):
             offset = max(abs(max(vals_local)), abs(min(vals_local)), 1e-6) * 0.05
             x_text = v + offset if v >= 0 else v - offset
             ha = 'left' if v >= 0 else 'right'
             ax_loc.text(x_text, i, f"{v:.2f}s", va='center', ha=ha, fontsize=9)
         
-        # -------------------------------------------------------------------------
-        # Column 3: Global Feature Importance
-        # -------------------------------------------------------------------------
+        # --- Column 3: Global Feature Importance ---
         ax_glob.barh(sorted_keys, vals_global, color="tab:purple", height=0.6)
         
         for i, v in enumerate(vals_global):
             ax_glob.text(v + 0.02, i, f"{v:.2f}", va='center', fontsize=10)
             
-        ax_glob.set_xlim(0, max(vals_global) * 1.25) # Pad for text
+        ax_glob.set_xlim(0, max(vals_global) * 1.25)
         
         if row_idx == 0: 
             ax_glob.set_title(f"Global Feature Importance\n(Sobol $S_T$ vs Time-to-{CONFIG['v_cutoff']}V)", fontsize=12)
@@ -229,6 +189,33 @@ def main():
 
     plt.tight_layout()
     plt.show()
+
+# ==============================================================================
+# Main Orchestration
+# ==============================================================================
+
+def main():
+    model = Chen2020_DFN()
+    engine = fx.Engine(model=model, target=CONFIG["target"])
+    
+    target_params = ["D_s_n", "D_s_p", "k_n", "k_p"]
+    nominal_params = {p: engine.parameters[p].value for p in target_params}
+    
+    results_data = {}
+    
+    for c_rate in CONFIG["c_rates"]:
+        print(f"\n--- Processing {c_rate}C ---")
+        local_sens, nominal_res = compute_local_sensitivity(engine, target_params, nominal_params, c_rate)
+        mc_results, global_importance = compute_global_sobol(engine, target_params, nominal_params, c_rate)
+        
+        results_data[c_rate] = {
+            "local_sens": local_sens,
+            "nominal_res": nominal_res,
+            "mc_results": mc_results,
+            "global_importance": global_importance
+        }
+        
+    plot_sensitivity_dashboard(results_data, target_params)
 
 if __name__ == "__main__":
     main()
