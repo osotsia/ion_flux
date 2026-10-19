@@ -1,6 +1,7 @@
 import os
 import tempfile
 import itertools
+import json
 from typing import Dict, Any, List, Optional
 
 from ion_flux.compiler._1_frontend.core import PDE, State, Parameter, Observable
@@ -41,12 +42,33 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
         topo = compiler_result["topo"]
         jacobian_bandwidth = compiler_result["jacobian_bandwidth"]
         
+        id_arr, spatial_diag, max_steps = _compute_static_metadata(layout, ast_payload, topo, state_domain_map, state_max_steps)
+
+        meta_dict = {
+            "layout": {
+                "state_offsets": layout.state_offsets, "param_offsets": layout.param_offsets, "obs_offsets": layout.obs_offsets,
+                "n_states": layout.n_states, "n_params": layout.n_params, "n_obs": layout.n_obs,
+                "p_length": layout.p_length, "m_length": layout.m_length, "mesh_offsets": layout.mesh_offsets, "mesh_cache": layout.mesh_cache
+            },
+            "parameters": default_parameters,
+            "jacobian_bandwidth": jacobian_bandwidth or 0,
+            "metadata_cache": {
+                "id_arr": id_arr, "spatial_diag": spatial_diag, "max_steps": max_steps
+            },
+            "cpr_cache": cpr_cache,
+            "ast_payload": ast_payload,
+            "state_domain_map": state_domain_map,
+            "cpp_source": cpp_source
+        }
+        meta_json_str = json.dumps(meta_dict)
+        cpp_source += f'\nextern "C" const char* get_ion_flux_metadata() {{\n    return R"ION_FLUX_META({meta_json_str})ION_FLUX_META";\n}}\n'
+
         if not mock_execution:
             compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
             runtime = compiler.compile(cpp_source, layout.n_states)
             lib_path = runtime.lib_path
-
-    id_arr, spatial_diag, max_steps = _compute_static_metadata(layout, ast_payload, topo, state_domain_map, state_max_steps)
+    else:
+        id_arr, spatial_diag, max_steps = _compute_static_metadata(layout, ast_payload, topo, state_domain_map, state_max_steps)
 
     return ExecutableManifest(
         lib_path=lib_path,

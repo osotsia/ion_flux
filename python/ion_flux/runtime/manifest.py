@@ -1,6 +1,7 @@
 import json
 import shutil
 import os
+import ctypes
 from typing import Dict, Any, List, Tuple, Optional
 from ion_flux.compiler._2_middle_end.memory_layout import MemoryLayout
 from ion_flux.runtime.ffi_runtime import NativeRuntime
@@ -45,36 +46,30 @@ class ExecutableManifest:
         return p_list
 
     def save(self, export_path: str) -> None:
-        """Serializes the execution topology for serverless deployments."""
-        meta = {
-            "layout": {
-                "state_offsets": self.layout.state_offsets, "param_offsets": self.layout.param_offsets, "obs_offsets": self.layout.obs_offsets,
-                "n_states": self.layout.n_states, "n_params": self.layout.n_params, "n_obs": self.layout.n_obs,
-                "p_length": self.layout.p_length, "m_length": self.layout.m_length, "mesh_offsets": self.layout.mesh_offsets, "mesh_cache": self.layout.mesh_cache
-            },
-            "parameters": self.default_parameters,
-            "jacobian_bandwidth": self.jacobian_bandwidth,
-            "metadata_cache": {
-                "id_arr": self.id_arr, "spatial_diag": self.spatial_diag, "max_steps": self.max_steps
-            },
-            "cpr_cache": self.cpr_cache,
-            "ast_payload": self.ast_payload,
-            "state_domain_map": self.state_domain_map,
-            "cpp_source": self.cpp_source
-        }
-        with open(export_path + ".meta.json", "w") as f: 
-            json.dump(meta, f)
+        """Serializes the standalone compiled binary for single-artifact deployments."""
         if self.lib_path and os.path.exists(self.lib_path):
             shutil.copy(self.lib_path, export_path)
 
     @classmethod
     def load(cls, binary_path: str) -> "ExecutableManifest":
         """Deserializes a compiled model with strictly 0ms Clang parsing overhead."""
-        meta_path = binary_path + ".meta.json"
-        if not os.path.exists(meta_path): 
-            raise FileNotFoundError(f"Missing layout manifest at {meta_path}.")
-        with open(meta_path, "r") as f: 
-            meta = json.load(f)
+        meta = None
+        try:
+            dll = ctypes.CDLL(binary_path)
+            if hasattr(dll, "get_ion_flux_metadata"):
+                dll.get_ion_flux_metadata.restype = ctypes.c_char_p
+                raw = dll.get_ion_flux_metadata()
+                if raw:
+                    meta = json.loads(raw.decode("utf-8"))
+        except Exception:
+            meta = None
+
+        if meta is None:
+            meta_path = binary_path + ".meta.json"
+            if not os.path.exists(meta_path): 
+                raise FileNotFoundError(f"Missing embedded metadata or layout manifest at {meta_path}.")
+            with open(meta_path, "r") as f: 
+                meta = json.load(f)
         
         layout = MemoryLayout.from_dict(meta["layout"])
         default_parameters = meta["parameters"]

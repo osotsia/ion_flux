@@ -66,21 +66,25 @@ class AdjointAndEISModel(fx.PDE):
 
 @REQUIRES_RUNTIME
 def test_stateless_binary_deployment(tmp_path):
-    """Validates 0ms cold-start `.so` deployments bypassing AST reconstruction."""
+    """Validates 0ms cold-start single-binary deployments with embedded metadata using strict literal paths."""
     engine = fx.Engine(model=AdjointAndEISModel(), target="cpu", mock_execution=False)
     
     export_file = tmp_path / "model_prod.so"
     engine.export_binary(str(export_file))
     
-    assert os.path.exists(str(export_file) + ".meta.json")
+    # 1. Verify strict literal naming: The file on disk matches the export path exactly
+    assert os.path.exists(str(export_file))
     
-    # Instantiate instantly without Clang or AST parsing
+    # 2. Verify single-file deployment: No external .meta.json file is generated
+    assert not os.path.exists(str(export_file) + ".meta.json")
+    
+    # 3. Instantiate instantly via exact literal path (embedded metadata extracted)
     stateless_engine = fx.Engine.load(str(export_file), target="cpu:serial")
     
     assert stateless_engine.mock_execution is False
     assert stateless_engine.layout.n_states == engine.layout.n_states
     assert stateless_engine.layout.get_param_offset("R") == engine.layout.get_param_offset("R")
     
-    # Solve directly via FFI
+    # 4. Solve directly via FFI
     res = stateless_engine.solve(t_span=(0, 1.0), parameters={"R": 5.0})
     assert res.status == "completed"
