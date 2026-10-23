@@ -51,11 +51,13 @@ class Chen2020_DFN(fx.PDE):
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
     
-    # Tunable parameters
+    # Tunable parameters (Table IX Tuned Constants)
     D_s_n = fx.Parameter(default=3.3e-14, name="D_s_n")
     D_s_p = fx.Parameter(default=4.0e-15, name="D_s_p") # Cathode solid diffusivity [m^2/s]
     k_n = fx.Parameter(default=6.48e-7, name="k_n") # Reaction rate constants [A/m^2 (m^3/mol)^1.5]
     k_p = fx.Parameter(default=3.42e-6, name="k_p")
+    c_max_n = fx.Parameter(default=33133.0, name="c_max_n") # Anode max solid concentration [mol/m^3]
+    c_max_p = fx.Parameter(default=63104.0, name="c_max_p") # Cathode max solid concentration [mol/m^3]
 
     # Analytical Telemetry Trackers for Volumetric Current Densities (J_k) [A/m^3]
     J_n_obs = fx.Observable(domain=x_n, name="J_n_obs")
@@ -78,10 +80,6 @@ class Chen2020_DFN(fx.PDE):
         # Specific active surface area [1/m] (Equation 26: a_k = 3 * eps_act_k / R_k)
         a_n = 3.0 * eps_act_n / 5.86e-6
         a_p = 3.0 * eps_act_p / 5.22e-6
-        
-        # Maximum Solid Concentrations [mol/m^3]
-        c_max_n = 33133.0
-        c_max_p = 63104.0
         
         # Transport & Kinetic Constants
         sig_n, sig_p = 215.0, 0.18    # Electronic conductivities [S/m]
@@ -107,12 +105,12 @@ class Chen2020_DFN(fx.PDE):
         # 5. Thermodynamics & Kinetics
         # =====================================================================
         # Extract surface concentrations natively from the Micro-Domains
-        c_surf_n = fx.clamp(self.c_s_n.boundary("right", domain=self.r_n), lower=10.0, upper=c_max_n - 10.0)
-        c_surf_p = fx.clamp(self.c_s_p.boundary("right", domain=self.r_p), lower=10.0, upper=c_max_p - 10.0)
+        c_surf_n = fx.clamp(self.c_s_n.boundary("right", domain=self.r_n), lower=10.0, upper=self.c_max_n - 10.0)
+        c_surf_p = fx.clamp(self.c_s_p.boundary("right", domain=self.r_p), lower=10.0, upper=self.c_max_p - 10.0)
         
         # Active particle stoichiometries
-        x_n = c_surf_n / c_max_n
-        x_p = c_surf_p / c_max_p
+        x_n = c_surf_n / self.c_max_n
+        x_p = c_surf_p / self.c_max_p
         
         # Bound electrolyte concentration to prevent log singularities AND runaway Newton feedback loops
         ce_safe = fx.clamp(self.c_e, lower=10.0, upper=5000.0)
@@ -129,8 +127,8 @@ class Chen2020_DFN(fx.PDE):
                + 17.5842 * tanh_ast(15.9308 * (x_p - 0.3120)))
 
         # Exchange Current Densities [A/m^2] (Table I: Reaction Kinetics)
-        j0_n = self.k_n * (ce_safe * c_surf_n * (c_max_n - c_surf_n))**0.5
-        j0_p = self.k_p * (ce_safe * c_surf_p * (c_max_p - c_surf_p))**0.5
+        j0_n = self.k_n * (ce_safe * c_surf_n * (self.c_max_n - c_surf_n))**0.5
+        j0_p = self.k_p * (ce_safe * c_surf_p * (self.c_max_p - c_surf_p))**0.5
         
         # Local Overpotentials [V] (Table I)
         eta_n = self.phi_s_n - self.phi_e - U_n
@@ -243,8 +241,8 @@ class Chen2020_DFN(fx.PDE):
                 self.phi_s_p: 4.182,
                 
                 # Based on the 100% SOC stoichiometries from Table VII
-                self.c_s_n: 0.9014 * c_max_n,  
-                self.c_s_p: 0.27 * c_max_p,
+                self.c_s_n: 0.9014 * self.c_max_n,  
+                self.c_s_p: 0.27 * self.c_max_p,
                 
                 self.V_cell: 4.182,    
                 self.i_app: 0.0
