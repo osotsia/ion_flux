@@ -186,23 +186,24 @@ result.plot_dashboard(["V_cell", "i_app"]) # Launch interactive visualization UI
 ```
 
 #### Use Case B: Micro-Stepping Co-Simulation (BMS HIL)
-For Software-in-the-Loop, the compiled sparse matrices, exact Enzyme Jacobians, and BDF history vectors stay "hot" in the Rust hardware memory via a `Session`. Only 64-bit float inputs cross the Python boundary, enabling real-time control loops.
+For Software-in-the-Loop, the compiled sparse matrices, exact Enzyme Jacobians, and BDF history vectors stay "hot" in the Rust hardware memory via a `Session`. Only typed commands cross the boundary, enabling bounded, low-jitter real-time execution.
 
 ```python
-session = engine.start_session(parameters={"anode_D_s": 2e-14})
+# Launch session with real-time determinism profile
+session = engine.start_session(mode="realtime", parameters={"anode_D_s": 2e-14})
 
 # E.g., Executing a 100ms BMS cycle over a 1 hour simulated test
 while session.time < 3600:
-    # 1. Read state directly from the underlying C-array with zero overhead
-    current_v = session.get("V_cell")
+    # 1. Read scalar state directly with strict dimension verification
+    current_v = session.get_scalar("V_cell")
     
     # 2. Evaluate external BMS logic
     i_req = my_bms.compute_current(v_cell=current_v)
     
-    # 3. Safely toggle the multiplexer using the hidden terminal flags
-    # (1.0 = Current Control, 0.0 = Voltage Control).
-    # The native Rust solver integrates forward 100ms, preserving history.
-    session.step(dt=0.1, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
+    # 3. Actuate terminal directly via typed control methods.
+    # Continuous setpoint updates execute without redundant 50-iteration DAE reinitialization.
+    session.terminal.set_current(i_req)
+    session.step(dt=0.1)
     
     # 4. Check for arbitrary safety aborts
     if session.triggered(fx.Condition(model.V_cell < 2.5)):

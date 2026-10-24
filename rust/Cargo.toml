@@ -1,6 +1,6 @@
 [package]
 name = "ion_flux_core"
-version = "0.3.13"
+version = "0.3.14"
 edition = "2021"
 
 [lib]

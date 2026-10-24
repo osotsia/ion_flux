@@ -174,24 +174,26 @@ print(grads["anode_D_s"])
 ```
 
 ### Scenario C: Microsecond-Latency Hardware-in-the-Loop (HIL)
-Engineers couple physics models directly to control software because validating the software (eg fast-charging, thermal management) requires closed-loop feedback and cannot be done with pre-recorded test data. For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session**. The BDF history vectors, sparse LU matrices, and exact analytical Jacobians stay "hot" in hardware memory.
+Engineers couple physics models directly to control software because validating the software (e.g., fast-charging, thermal management) requires closed-loop feedback and cannot be done with pre-recorded test data. For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session** with deterministic execution profiles. The BDF history vectors, sparse LU factorizations, and exact analytical Jacobians stay "hot" in hardware memory.
 
 ```python
-session = engine.start_session(parameters={"anode_D_s": 1e-14})
+# Initialize session with real-time determinism (fixed step / bounded Newton)
+session = engine.start_session(mode="realtime", parameters={"anode_D_s": 1e-14})
 
 while session.time < 3600.0:
-    current_v = session.get("V_cell")
+    # Read scalar state directly without allocation churn or silent spatial reductions
+    current_v = session.get_scalar("V_cell")
     
     # Evaluate external C++ / Python BMS logic
     i_req = custom_bms.compute_current(v_cell=current_v)
     
-    # Advance the native solver by 10ms. 
-    # Dynamically toggling `_term_mode` (CC vs CV) hot-swaps the underlying 
-    # multiplexer Jacobian natively, without re-initializing the solver!
-    session.step(dt=0.01, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
+    # Actuate the terminal directly without magic compiler strings
+    session.terminal.set_current(i_req)
+    session.step(dt=0.01)
     
     if session.triggered(fx.Condition(model.V_cell > 4.25)):
-        print("BMS Safety Halt Triggered!")
+        session.terminal.set_voltage(4.25) # Smoothly hand off to CV mode
+        print("BMS Safety Clamped to CV Mode!")
         break
 ```
 

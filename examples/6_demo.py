@@ -130,11 +130,11 @@ def scenario_2_real_time_bms_control():
     
     engine = fx.Engine(model=FastSPM(), target="cpu:serial")
     
-    # 1. Start a "Hot" Native Session
+    # 1. Start a "Hot" Native Session with real-time determinism profile
     # PyBaMM Pain Point: `sim.step()` wraps massive amounts of Python overhead.
     # ion_flux pins the native Jacobian, sparse memory, and BDF integration history 
     # strictly in C++ RAM. Only scalar FFI pointers cross back to Python.
-    session = engine.start_session(parameters={"D_s": 1e-14})
+    session = engine.start_session(mode="realtime", parameters={"D_s": 1e-14})
     
     print("Initiating 10ms BMS Control Loop for 60 simulated seconds...")
     dt = 0.01  # 10 millisecond loop
@@ -142,14 +142,19 @@ def scenario_2_real_time_bms_control():
     start_time = time.perf_counter()
     steps_taken = 0
     
+    # Pre-allocate state buffer for zero-allocation sampling across FFI
+    state_buf = np.zeros(engine.layout.n_states, dtype=np.float64)
+    v_offset = engine.layout.get_state_offset("V_cell")
+    
     # Mock BMS Logic: Charge at 5A, but aggressively taper current to prevent 
     # voltage from exceeding a hard 4.2V safety ceiling.
     target_v = 4.2
     Kp = 50.0  # Proportional gain
     
     while session.time < 60.0:
-        # Introspect state with zero overhead (directly indexing the C-array)
-        current_v = session.get("V_cell")
+        # Introspect state with zero-allocation in-place buffer fill
+        session.read_state_into(state_buf)
+        current_v = state_buf[v_offset]
         
         # Calculate dynamic BMS current response
         if current_v < 4.15:
@@ -157,15 +162,16 @@ def scenario_2_real_time_bms_control():
         else:
             i_req = -max(0.0, Kp * (target_v - current_v))
             
-        # 2. Inject dynamic parameters and advance native solver seamlessly
-        # PyBaMM Pain Point: Dynamically changing inputs forces expensive re-discretization.
-        session.step(dt=dt, inputs={"_term_i_target": i_req, "_term_mode": 1.0})
+        # 2. Actuate terminal directly and advance native solver seamlessly
+        # Continuous setpoint updates execute without redundant 50-iteration DAE reinitialization.
+        session.terminal.set_current(i_req)
+        session.step(dt=dt)
         steps_taken += 1
         
     elapsed = time.perf_counter() - start_time
     print(f"✅ Completed {steps_taken} control loops in {elapsed:.4f} seconds.")
     print(f"   Average latency per step: {(elapsed/steps_taken)*1e6:.1f} microseconds.")
-    print(f"   Final Voltage: {session.get('V_cell'):.4f} V, Final Current: {session.get('i_app'):.2f} A")
+    print(f"   Final Voltage: {session.get_scalar('V_cell'):.4f} V, Final Current: {session.get_scalar('i_app'):.2f} A")
 
 
 # ==============================================================================
@@ -227,7 +233,6 @@ def scenario_3_adjoint_gradient_optimization():
         grad_x0 = grads["D_s"] * SCALE_D
         grad_x1 = grads["R_internal"] * SCALE_R
         
-        # Keep output concise
         if iteration % 10 == 0 or iteration == 1:
             print(f"   [Iter {iteration:02d}] Loss: {loss.value:.3e} | Guess -> D_s: {D_s_guess:.2e}, R: {R_guess:.4f}")
         
@@ -235,8 +240,6 @@ def scenario_3_adjoint_gradient_optimization():
 
     x0 = np.array([init_D_s / SCALE_D, init_R / SCALE_R]) 
     
-    # PyBaMM Pain Point: Extracting dLoss/dParameter requires massive numerical FD loops 
-    # or derivative-free optimizers. ion_flux provides exact jacobians in O(1) backward pass.
     res_opt = minimize(
         objective, 
         x0, 
