@@ -4,6 +4,8 @@ use crate::solver::shared::workspace::Workspace;
 use crate::solver::_4_linear::{jacobian, gmres};
 use crate::solver::_3_nonlinear::constraints;
 
+#[allow(dead_code)]
+#[derive(Debug)]
 pub enum NewtonFailure {
     NonFiniteResidual,
     SingularJacobian(String),
@@ -12,16 +14,18 @@ pub enum NewtonFailure {
     MaxItersReached,
 }
 
+#[derive(Debug)]
 pub enum NewtonResult {
     Converged(usize), 
-    DivergedStaleJac(NewtonFailure), 
-    DivergedFatal(NewtonFailure),    
+    Diverged(NewtonFailure),    
 }
 
 pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
     let c_j = wk.history.c_j;
     let mut cj_ratio = if wk.history.c_j_old == 0.0 { 1.0 } else { c_j / wk.history.c_j_old };
-    if cj_ratio < 0.6 || cj_ratio > 1.6666666666666667 { wk.lu_solver.mark_stale(); }
+    if !prob.config.is_realtime && (cj_ratio < 0.6 || cj_ratio > 1.6666666666666667) { 
+        wk.lu_solver.mark_stale(); 
+    }
 
     wk.ee.fill(0.0);
     wk.diag.recent_newton_norms.clear();
@@ -40,7 +44,7 @@ pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
         wk.diag.last_res.copy_from_slice(&wk.res);
 
         let f_norm = constraints::wrms_norm_all(&wk.res, &wk.weights);
-        if !f_norm.is_finite() { return NewtonResult::DivergedFatal(NewtonFailure::NonFiniteResidual); }
+        if !f_norm.is_finite() { return NewtonResult::Diverged(NewtonFailure::NonFiniteResidual); }
 
         for i in 0..prob.n { wk.dy[i] = -wk.res[i]; }
 
@@ -49,22 +53,26 @@ pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
             let y_ptr = wk.y.as_ptr(); let ydot_ptr = wk.ydot.as_ptr(); let p_ptr = wk.p.as_ptr(); let m_ptr = prob.m.as_ptr();
             let jvp_closure = |v: &[f64], out: &mut [f64]| { unsafe { jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) }; };
             let precond = |v: &[f64], out: &mut [f64]| { for i in 0..prob.n { out[i] = v[i] / (c_j * prob.id[i] + prob.spatial_diag[i] + 1.0); } };
-            if let Err(e) = gmres::solve_gmres(prob.n, &mut wk.dy, jvp_closure, precond) { return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); }
+            if let Err(e) = gmres::solve_gmres(prob.n, &mut wk.dy, jvp_closure, precond) { return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e)); }
             cj_ratio = 1.0;
         } else {
             if wk.lu_solver.is_stale {
-                let start = Instant::now();
-                jacobian::assemble(prob, wk, c_j);
-                wk.diag.jacobian_assembly_time_us += start.elapsed().as_micros();
-                wk.diag.jacobian_evaluations += 1;
-                
-                if let Err(e) = wk.lu_solver.factorize_from_triplets(&mut wk.diag) { return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); }
-                
-                wk.history.c_j_old = c_j; 
-                cj_ratio = 1.0; 
-                wk.lu_solver.is_stale = false;
+                if prob.config.is_realtime && wk.diag.accepted_steps > 0 {
+                    wk.lu_solver.is_stale = false;
+                } else {
+                    let start = Instant::now();
+                    jacobian::assemble(prob, wk, c_j);
+                    wk.diag.jacobian_assembly_time_us += start.elapsed().as_micros();
+                    wk.diag.jacobian_evaluations += 1;
+                    
+                    if let Err(e) = wk.lu_solver.factorize_from_triplets(&mut wk.diag) { return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e)); }
+                    
+                    wk.history.c_j_old = c_j; 
+                    cj_ratio = 1.0; 
+                    wk.lu_solver.is_stale = false;
+                }
             }
-            if let Err(e) = wk.lu_solver.solve(&mut wk.dy, &mut wk.diag) { return NewtonResult::DivergedFatal(NewtonFailure::SingularJacobian(e)); }
+            if let Err(e) = wk.lu_solver.solve(&mut wk.dy, &mut wk.diag) { return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e)); }
         }
 
         if prob.bw != -1 && cj_ratio != 1.0 {
@@ -99,15 +107,15 @@ pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
             let rate = (dy_norm / old_fnorm).powf(1.0 / iter as f64);
             wk.diag.last_rho = rate;
             
-            if rate > prob.config.max_rho && !is_clamped {
+            if !prob.config.is_realtime && rate > prob.config.max_rho && !is_clamped {
                 if !wk.lu_solver.is_stale { wk.lu_solver.mark_stale(); continue; }
-                return NewtonResult::DivergedFatal(NewtonFailure::ContractionThrashing(rate));
+                return NewtonResult::Diverged(NewtonFailure::ContractionThrashing(rate));
             }
             let ss = rate / (1.0 - rate);
             if ss * dy_norm <= prob.config.eps_newt { return constraints::evaluate(prob.n, &wk.y, &wk.ee, &wk.history.phi[0], &prob.constraints, iter); }
         }
     }
-    NewtonResult::DivergedFatal(NewtonFailure::MaxItersReached)
+    NewtonResult::Diverged(NewtonFailure::MaxItersReached)
 }
 
 pub fn calc_algebraic_roots(prob: &Problem, wk: &mut Workspace) -> Result<(), String> {

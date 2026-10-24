@@ -26,6 +26,9 @@ pub fn step(
         wk.history.psi[0] = wk.history.h;
         wk.history.c_j = 1.0 / wk.history.h;
         wk.history.order = 1;
+        if prob.config.is_realtime {
+            wk.history.max_order = 1;
+        }
         wk.history.k_used = 0;
         wk.lu_solver.mark_stale();
     }
@@ -44,7 +47,7 @@ pub fn step(
                 let err_k = wk.history.sigma[wk.history.order] * enorm_k;
                 let (mut err_km1, mut err_km2) = (0.0, 0.0);
 
-                if wk.history.order > 1 {
+                if !prob.config.is_realtime && wk.history.order > 1 {
                     let mut delta = vec![0.0; prob.n];
                     for i in 0..prob.n { delta[i] = wk.history.phi[wk.history.order][i] + wk.ee[i]; }
                     err_km1 = wk.history.sigma[wk.history.order - 1] * constraints::wrms_norm_mask(&delta, &wk.weights, &prob.id, prob.config.suppress_alg);
@@ -54,7 +57,7 @@ pub fn step(
                     }
                 }
 
-                if ck * enorm_k > 1.0 {
+                if !prob.config.is_realtime && ck * enorm_k > 1.0 {
                     error_fails += 1; wk.diag.rejected_steps += 1;
                     wk.history.restore(); wk.lu_solver.mark_stale();
                     
@@ -77,14 +80,21 @@ pub fn step(
 
                 error_fails = 0;
                 let mut err_kp1 = 0.0;
-                if wk.history.order < wk.history.max_order {
+                if !prob.config.is_realtime && wk.history.order < wk.history.max_order {
                     let mut delta = vec![0.0; prob.n];
                     for i in 0..prob.n { delta[i] = wk.ee[i] - wk.history.phi[wk.history.order + 1][i]; }
                     err_kp1 = constraints::wrms_norm_mask(&delta, &wk.weights, &prob.id, prob.config.suppress_alg) / ((wk.history.order + 2) as f64);
                 }
 
                 let ee_clone = wk.ee.clone();
-                wk.history.complete_step(err_k, err_km1, err_km2, err_kp1, &ee_clone, prob.config.min_dt, prob.config.max_dt);
+                if prob.config.is_realtime {
+                    wk.history.k_used = 1;
+                    wk.history.h_used = wk.history.h;
+                    for i in 0..prob.n { wk.history.phi[1][i] += ee_clone[i]; }
+                    for i in 0..prob.n { wk.history.phi[0][i] += wk.history.phi[1][i]; }
+                } else {
+                    wk.history.complete_step(err_k, err_km1, err_km2, err_kp1, &ee_clone, prob.config.min_dt, prob.config.max_dt);
+                }
                 
                 wk.diag.accepted_steps += 1;
                 wk.diag.trace_t.push(abs_t + t_local); wk.diag.trace_dt.push(wk.history.h_used);
@@ -93,10 +103,20 @@ pub fn step(
                 t_local += wk.history.h_used;
                 if let Some(ref mut hist) = history_cache { hist.push((abs_t + t_local, wk.y.clone(), wk.ydot.clone())); }
             },
-            newton::NewtonResult::DivergedStaleJac(_) | newton::NewtonResult::DivergedFatal(_) => {
+            newton::NewtonResult::Diverged(failure) => {
+                if prob.config.is_realtime {
+                    for i in 0..prob.n {
+                        let c = prob.constraints[i];
+                        if c > 0.0 && wk.y[i] < 0.0 { wk.y[i] = 0.0; }
+                        else if c < 0.0 && wk.y[i] > 0.0 { wk.y[i] = 0.0; }
+                    }
+                    wk.diag.accepted_steps += 1;
+                    t_local += wk.history.h;
+                    break;
+                }
                 wk.diag.rejected_steps += 1; wk.history.restore(); wk.history.h *= 0.25; wk.lu_solver.mark_stale();
                 if wk.history.h <= prob.config.min_dt {
-                    let reason = format!("Nonlinear Divergence / Constraint Starvation (Step collapsed below min_dt). t={}", abs_t + t_local);
+                    let reason = format!("Nonlinear Divergence: {:?} (Step collapsed below min_dt). t={}", failure, abs_t + t_local);
                     return Err(wk.diag.build_crash_report(&wk.y, &wk.ydot, &prob.id, reason));
                 }
             }

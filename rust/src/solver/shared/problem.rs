@@ -19,13 +19,30 @@ pub struct SolverConfig {
     pub max_rho: f64,
     pub eps_newt: f64,
     pub suppress_alg: bool,
+    pub is_realtime: bool,
 }
 
 impl Default for SolverConfig {
     fn default() -> Self {
         Self {
             rel_tol: 1e-6, abs_tol: 1e-8, max_newton_iters: 20, min_dt: 1e-12, max_dt: std::f64::INFINITY,
-            max_rho: 0.9, eps_newt: 0.33, suppress_alg: true,
+            max_rho: 0.9, eps_newt: 0.33, suppress_alg: true, is_realtime: false,
+        }
+    }
+}
+
+impl SolverConfig {
+    pub fn realtime() -> Self {
+        Self {
+            rel_tol: 1e-4,
+            abs_tol: 1e-6,
+            max_newton_iters: 3,
+            min_dt: 1e-12,
+            max_dt: std::f64::INFINITY,
+            max_rho: 0.95,
+            eps_newt: 0.5,
+            suppress_alg: true,
+            is_realtime: true,
         }
     }
 }

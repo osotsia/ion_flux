@@ -81,6 +81,37 @@ class SpatialVerificationPDE(fx.PDE):
         }
 
 
+class StiffStepSequencePDE(fx.PDE):
+    """Minimal non-linear spatial DAE with Dirichlet ground anchor and Butler-Volmer kinetics."""
+    x = fx.Domain(bounds=(0, 1.0), resolution=10, name="x")
+    phi = fx.State(domain=x, name="phi")
+    c = fx.State(domain=x, name="c")
+    V = fx.State(domain=None, name="V")
+    i_app = fx.State(domain=None, name="i_app")
+    terminal = fx.Terminal(current=i_app, voltage=V)
+
+    def math(self):
+        i_s = -10.0 * fx.grad(self.phi)
+        U = 1.0 - 0.1 * self.c
+        eta = self.phi - U
+        j_rxn = 25.0 * (fx.exp(0.5 * eta) - fx.exp(-0.5 * eta))
+
+        return {
+            "equations": {
+                self.c: fx.dt(self.c) == -j_rxn,
+                self.phi: fx.div(i_s) == -j_rxn,
+                self.V: self.V == self.phi.right
+            },
+            "boundaries": {
+                self.phi: {"left": fx.Dirichlet(0.0)},
+                i_s: {"right": self.i_app}
+            },
+            "initial_conditions": {
+                self.c: 10.0, self.phi: 0.0, self.V: 0.0, self.i_app: 0.0
+            }
+        }
+
+
 # ==============================================================================
 # Tests
 # ==============================================================================
@@ -184,7 +215,54 @@ def test_dae_gating_on_continuous_updates():
     # Transitioning to CV mode must trigger algebraic solve exactly once
     session.terminal.set_voltage(4.2)
     assert calc_calls == 1
-    
 
-if __name__ == "__main__":
-    pytest.main(["-v", "-s", __file__])
+
+@REQUIRES_RUNTIME
+def test_hil_zero_copy_buffer_fill():
+    """Validates zero-allocation in-place buffer mutation across the FFI boundary."""
+    engine = fx.Engine(model=BatteryProtocolPDE(), target="cpu", mock_execution=False)
+    session = engine.start_session()
+    
+    buf = np.zeros(engine.layout.n_states, dtype=np.float64)
+    session.read_state_into(buf)
+    
+    v_offset = engine.layout.get_state_offset("V")
+    assert buf[v_offset] == pytest.approx(5.0, abs=1e-4)
+
+    # Step forward and read in-place again
+    session.terminal.set_current(1.0)
+    session.step(dt=10.0)
+    session.read_state_into(buf)
+    assert buf[v_offset] < 5.0
+
+
+@REQUIRES_RUNTIME
+def test_realtime_mode_bounded_execution():
+    """Validates that mode='realtime' executes deterministic steps without fatal crashes."""
+    engine = fx.Engine(model=BatteryProtocolPDE(), target="cpu", mock_execution=False)
+    session = engine.start_session(mode="realtime")
+    
+    session.terminal.set_current(5.0)
+    for _ in range(10):
+        session.step(dt=0.01)
+        
+    assert session.time == pytest.approx(0.1, abs=1e-4)
+    assert session.get_scalar("soc") < 1.0
+
+
+@REQUIRES_RUNTIME
+def test_protocol_sequence_discontinuous_step_reinitialization():
+    """
+    Regression test: Ensures that discontinuous setpoint changes at protocol boundaries
+    (e.g., 0A equilibrium -> finite current discharge -> rest) re-equilibrate algebraic
+    DAE states before time-stepping, preventing Newton divergence at t=0.
+    """
+    engine = fx.Engine(model=StiffStepSequencePDE(), target="cpu", mock_execution=False)
+    protocol = Sequence([
+        CC(rate=5.0, time=0.1),
+        Rest(time=0.1)
+    ])
+    res = engine.solve(protocol=protocol, show_progress=False)
+    assert res.status == "completed"
+    assert res["Time [s]"].data[-1] == pytest.approx(0.2, abs=1e-3)
+    assert len(res["Time [s]"].data) >= 2

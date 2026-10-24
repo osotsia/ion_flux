@@ -21,7 +21,7 @@ pub fn evaluate(n: usize, y: &[f64], ee: &[f64], phi_0: &[f64], constraints: &[f
     }
 
     if violated {
-        NewtonResult::DivergedFatal(NewtonFailure::ConstraintsViolated(min_eta.clamp(0.1, 0.9)))
+        NewtonResult::Diverged(NewtonFailure::ConstraintsViolated(min_eta.clamp(0.1, 0.9)))
     } else {
         NewtonResult::Converged(iter + 1)
     }

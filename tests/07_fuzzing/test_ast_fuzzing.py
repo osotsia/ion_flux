@@ -436,7 +436,8 @@ def test_fuzz_ffi_stiff_nonlinear_stepping(actions):
         step_crashed = False
         
         try:
-            session.step(dt, inputs={"i_app": i_app})
+            session.set_parameter("i_app", i_app)
+            session.step(dt)
         except RuntimeError as e:
             err_str = str(e).lower()
             assert "divergence" in err_str or "convergence" in err_str or "crash" in err_str, \

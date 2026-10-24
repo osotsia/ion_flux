@@ -94,7 +94,7 @@ class Engine:
     def telemetry(self) -> TelemetryReport: 
         return TelemetryReport(self.manifest.layout.n_states, self.manifest.jacobian_bandwidth)
 
-    def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None) -> Session:
+    def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None, mode: str = "scientific") -> Session:
         """
         Instantiates a persistent native solver session.
 
@@ -105,11 +105,12 @@ class Engine:
         Args:
             parameters (Dict[str, float], optional): Base parameter initialization for the session.
             soc (float, optional): Initial State of Charge.
+            mode (str): Execution profile ("scientific" for adaptive VSVO BDF, "realtime" for deterministic bounds).
 
         Returns:
             Session: A stateful object holding the active FFI integration pointer.
         """
-        return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug)
+        return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug, mode=mode)
 
     # --- Primary Dispatch Hooks ---
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
@@ -247,6 +248,7 @@ class Engine:
             elif step_name == "Rest":
                 if "i_target" in self.parameters: session.set_parameter("i_target", 0.0)
                 elif "i_app" in self.parameters: session.set_parameter("i_app", 0.0)
+        session.reinitialize_algebraic()
 
     def _orchestrate_sequence(self, protocol, parameters, requires_grad, show_progress) -> SimulationResult:
         """

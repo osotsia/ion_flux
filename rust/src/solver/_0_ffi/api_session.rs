@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use numpy::{PyArray1, PyArray2, ToPyArray};
+use numpy::{PyArray1, PyArray2, PyReadwriteArray1, ToPyArray};
 use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::solver::shared::workspace::Workspace;
 use crate::solver::_2_stepper::bdf;
@@ -17,11 +17,16 @@ pub struct SolverHandle {
 #[pymethods]
 impl SolverHandle {
     #[new]
+    #[pyo3(signature = (
+        lib_path, n, bw, y0, ydot0, id, constraints, p, m, spatial_diag, max_steps, n_obs, debug, 
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, is_realtime=false
+    ))]
     pub fn new(
         lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, 
         constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, max_steps: Vec<f64>, 
         n_obs: usize, debug: bool, 
-        cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>
+        cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+        is_realtime: bool
     ) -> PyResult<Self> {
         let _ = debug;
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
@@ -34,7 +39,8 @@ impl SolverHandle {
         };
         
         let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
-        let prob = Problem { n, bw, n_obs, id, constraints, m, spatial_diag, max_steps, cpr, config: SolverConfig::default(), fns };
+        let config = if is_realtime { SolverConfig::realtime() } else { SolverConfig::default() };
+        let prob = Problem { n, bw, n_obs, id, constraints, m, spatial_diag, max_steps, cpr, config, fns };
         let mut wk = Workspace::new(n, bw, y0, ydot0, p);
         
         newton::calc_algebraic_roots(&prob, &mut wk).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
@@ -85,12 +91,46 @@ impl SolverHandle {
         numpy::ndarray::Array1::from_vec(self.wk.y.clone()).to_pyarray(py) 
     }
 
+    pub fn read_state_into(&self, mut target: PyReadwriteArray1<f64>) -> PyResult<()> {
+        let slice = target.as_slice_mut().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Target buffer must be contiguous: {}", e))
+        })?;
+        if slice.len() != self.prob.n {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Target buffer length ({}) must match state size ({})",
+                slice.len(), self.prob.n
+            )));
+        }
+        slice.copy_from_slice(&self.wk.y);
+        Ok(())
+    }
+
     pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let mut obs = vec![0.0; self.prob.n_obs];
         if let Some(obs_fn) = self.prob.fns.obs_fn {
             unsafe { obs_fn(self.wk.y.as_ptr(), self.wk.ydot.as_ptr(), self.wk.p.as_ptr(), self.prob.m.as_ptr(), obs.as_mut_ptr()); }
         }
         Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray(py))
+    }
+
+    pub fn read_observables_into(&mut self, mut target: PyReadwriteArray1<f64>) -> PyResult<()> {
+        let slice = target.as_slice_mut().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Target buffer must be contiguous: {}", e))
+        })?;
+        if slice.len() != self.prob.n_obs {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Target buffer length ({}) must match observables size ({})",
+                slice.len(), self.prob.n_obs
+            )));
+        }
+        if let Some(obs_fn) = self.prob.fns.obs_fn {
+            unsafe {
+                obs_fn(self.wk.y.as_ptr(), self.wk.ydot.as_ptr(), self.wk.p.as_ptr(), self.prob.m.as_ptr(), slice.as_mut_ptr());
+            }
+        } else {
+            slice.fill(0.0);
+        }
+        Ok(())
     }
     
     pub fn set_parameter(&mut self, idx: usize, val: f64) { 

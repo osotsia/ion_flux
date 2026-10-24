@@ -29,18 +29,22 @@ class TerminalController:
         self._v_offset = meta["v_target_offset"]
 
     def set_current(self, amps: float) -> None:
-        if self._session._current_term_mode != 1.0:
+        mode_changed = (self._session._current_term_mode != 1.0)
+        if mode_changed:
             self._session.set_parameter_by_offset(self._mode_offset, 1.0)
             self._session._current_term_mode = 1.0
-            self._session.reinitialize_algebraic()
         self._session.set_parameter_by_offset(self._i_offset, float(amps))
+        if mode_changed:
+            self._session.reinitialize_algebraic()
 
     def set_voltage(self, volts: float) -> None:
-        if self._session._current_term_mode != 0.0:
+        mode_changed = (self._session._current_term_mode != 0.0)
+        if mode_changed:
             self._session.set_parameter_by_offset(self._mode_offset, 0.0)
             self._session._current_term_mode = 0.0
-            self._session.reinitialize_algebraic()
         self._session.set_parameter_by_offset(self._v_offset, float(volts))
+        if mode_changed:
+            self._session.reinitialize_algebraic()
 
     def rest(self) -> None:
         self.set_current(0.0)
@@ -51,9 +55,11 @@ class Session:
     Stateful execution session for Hardware/Software-in-the-Loop co-simulation.
     Keeps native memory, sparse matrices, and integration history "hot" in hardware.
     """
-    def __init__(self, engine: Any, parameters: Dict[str, float], soc: Optional[float] = None, debug: bool = False):
+    def __init__(self, engine: Any, parameters: Dict[str, float], soc: Optional[float] = None, debug: bool = False, mode: str = "scientific"):
         self.engine = engine
         self.manifest = engine.manifest
+        self.mode = mode
+        is_realtime = (mode == "realtime")
         
         self.parameters = {**{k: v.value for k, v in engine.parameters.items()}, **parameters}
         self.time = 0.0
@@ -84,7 +90,7 @@ class Session:
                     self.manifest.lib_path, self.manifest.layout.n_states, self.manifest.jacobian_bandwidth,
                     y0, ydot0, self.manifest.id_arr, constraints, p_list, m_list, self.manifest.spatial_diag, 
                     self.manifest.max_steps, self.manifest.layout.n_obs, self.debug,
-                    c_seeds, c_ptrs, c_rows, c_cols, c_dense
+                    c_seeds, c_ptrs, c_rows, c_cols, c_dense, is_realtime
                 )
                 try:
                     self.handle.calc_algebraic_roots()
@@ -148,6 +154,30 @@ class Session:
 
     def get(self, variable_name: str) -> float:
         return self.get_scalar(variable_name)
+
+    def read_state_into(self, buffer: np.ndarray) -> None:
+        if not isinstance(buffer, np.ndarray) or buffer.dtype != np.float64:
+            raise TypeError("Target buffer must be a contiguous numpy.ndarray of dtype float64.")
+        if buffer.size != self.manifest.layout.n_states:
+            raise ValueError(
+                f"Target buffer size ({buffer.size}) must match state size ({self.manifest.layout.n_states})."
+            )
+        if self.handle:
+            self.handle.read_state_into(buffer)
+        else:
+            buffer[:] = self._mock_y
+
+    def read_observables_into(self, buffer: np.ndarray) -> None:
+        if not isinstance(buffer, np.ndarray) or buffer.dtype != np.float64:
+            raise TypeError("Target buffer must be a contiguous numpy.ndarray of dtype float64.")
+        if buffer.size != self.manifest.layout.n_obs:
+            raise ValueError(
+                f"Target buffer size ({buffer.size}) must match observables size ({self.manifest.layout.n_obs})."
+            )
+        if self.handle:
+            self.handle.read_observables_into(buffer)
+        else:
+            buffer.fill(0.0)
 
     def step(self, dt: float) -> None:
         if self.handle:
