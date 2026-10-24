@@ -14,6 +14,38 @@ except ModuleNotFoundError:
     # Safe fallback for pure-Python AST testing
     RUST_FFI_AVAILABLE = False
 
+
+class TerminalController:
+    """Explicit actuator control surface mapping directly to underlying terminal multiplexers."""
+    __slots__ = ["_session", "_mode_offset", "_i_offset", "_v_offset"]
+
+    def __init__(self, session: "Session"):
+        self._session = session
+        meta = session.manifest.terminal_meta
+        if not meta["has_terminal"]:
+            raise RuntimeError("Model does not declare an fx.Terminal abstraction.")
+        self._mode_offset = meta["mode_offset"]
+        self._i_offset = meta["i_target_offset"]
+        self._v_offset = meta["v_target_offset"]
+
+    def set_current(self, amps: float) -> None:
+        if self._session._current_term_mode != 1.0:
+            self._session.set_parameter_by_offset(self._mode_offset, 1.0)
+            self._session._current_term_mode = 1.0
+            self._session.reinitialize_algebraic()
+        self._session.set_parameter_by_offset(self._i_offset, float(amps))
+
+    def set_voltage(self, volts: float) -> None:
+        if self._session._current_term_mode != 0.0:
+            self._session.set_parameter_by_offset(self._mode_offset, 0.0)
+            self._session._current_term_mode = 0.0
+            self._session.reinitialize_algebraic()
+        self._session.set_parameter_by_offset(self._v_offset, float(volts))
+
+    def rest(self) -> None:
+        self.set_current(0.0)
+
+
 class Session:
     """
     Stateful execution session for Hardware/Software-in-the-Loop co-simulation.
@@ -35,6 +67,10 @@ class Session:
         self.id_arr = np.array(self.manifest.id_arr)
         constraints = [0.0] * self.manifest.layout.n_states
         
+        self._offset_to_param = {offset: name for name, (offset, _) in self.manifest.layout.param_offsets.items()}
+        self._current_term_mode = self.parameters.get("_term_mode", 1.0)
+        self.terminal = TerminalController(self) if self.manifest.terminal_meta["has_terminal"] else None
+
         if RUST_FFI_AVAILABLE and not engine.mock_execution:
             c_seeds, c_ptrs, c_rows, c_cols, c_dense = self.manifest.cpr_cache
             if getattr(engine, "solver_backend", "native") == "sundials":
@@ -68,11 +104,25 @@ class Session:
         finally:
             self.record_history = was_recording
 
+    def set_parameter_by_offset(self, offset: int, value: float) -> None:
+        param_name = self._offset_to_param.get(offset)
+        if param_name:
+            self.parameters[param_name] = value
+        if self.handle:
+            self.handle.set_parameter(offset, value)
+
     def set_parameter(self, param_name: str, value: float) -> None:
         self.parameters[param_name] = value 
         if self.handle:
             offset = self.manifest.layout.get_param_offset(param_name)
             self.handle.set_parameter(offset, value)
+
+    def reinitialize_algebraic(self) -> None:
+        if self.handle:
+            try:
+                self.handle.calc_algebraic_roots()
+            except RuntimeError as e:
+                raise format_native_crash(e, self.manifest) from None
 
     def get_array(self, variable_name: str) -> np.ndarray:
         if variable_name in self.manifest.layout.state_offsets:
@@ -87,24 +137,19 @@ class Session:
             return np.array([max(2.5, 4.2 - (self.time * 0.0001))])
         raise KeyError(f"Variable '{variable_name}' not found in the current state or observables.")
 
-    def get(self, variable_name: str) -> float:
-        return float(np.mean(self.get_array(variable_name)))
+    def get_scalar(self, variable_name: str) -> float:
+        arr = self.get_array(variable_name)
+        if arr.size != 1:
+            raise ValueError(
+                f"State/Observable '{variable_name}' is a spatial field with size {arr.size}. "
+                f"Use get_array() instead."
+            )
+        return float(arr[0])
 
-    def step(self, dt: float, inputs: Optional[Dict[str, float]] = None) -> None:
-        if inputs:
-            changed = False
-            for k, v in inputs.items(): 
-                current_v = self.parameters.get(k)
-                if current_v is None or abs(current_v - v) > 1e-12:
-                    self.set_parameter(k, v)
-                    changed = True
-                    
-            if changed and self.handle:
-                try:
-                    self.handle.calc_algebraic_roots()
-                except RuntimeError as e:
-                    raise format_native_crash(e, self.manifest) from None
-                
+    def get(self, variable_name: str) -> float:
+        return self.get_scalar(variable_name)
+
+    def step(self, dt: float) -> None:
         if self.handle:
             if getattr(self, "record_history", False):
                 if hasattr(self.handle, "step_history"):
@@ -114,12 +159,10 @@ class Session:
                         raise format_native_crash(e, self.manifest) from None
                         
                     if len(mt) > 0:
-                        # Append raw NumPy arrays directly, avoiding tolist() serialization overhead
                         self.micro_t.append(mt)
                         self.micro_y.append(my)
                         self.micro_ydot.append(mydot)
                         
-                        # Tile the exact parameters associated with this time-step
                         p_arr = np.tile(self.manifest.pack_parameters(self.parameters), (len(mt), 1))
                         self.micro_p.append(p_arr)
                 else:

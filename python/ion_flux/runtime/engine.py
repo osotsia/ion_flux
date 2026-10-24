@@ -127,25 +127,6 @@ class Engine:
                 t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
         """
         Executes a single continuous simulation trajectory.
-
-        The primary execution boundary bridging Python to the Native Solver. Maps user 
-        parameters directly into C-ABI flat arrays, dynamically evaluates Initial Conditions, 
-        and drives the implicit BDF integration without Python GIL interference.
-
-        Args:
-            t_span (tuple): A tuple of (start_time, end_time) in seconds.
-            protocol (Any, optional): Defines dynamic algebraic boundary constraints (e.g., Constant 
-                Current, Constant Voltage sequences). Overrides `t_span` if provided.
-            parameters (Dict[str, float], optional): Dictionary of parameter overrides.
-            t_eval (np.ndarray, optional): Specific time points to record the solution.
-            requires_grad (List[str], optional): Declares parameters for sensitivity analysis. 
-                Instructs the native solver to record the forward integration trajectory, enabling 
-                continuous reverse-mode Automatic Differentiation (AD).
-            threads (int): Number of OpenMP threads to allocate natively if using a data-parallel target.
-            show_progress (bool): Whether to display a terminal progress bar.
-
-        Returns:
-            SimulationResult: A data object containing the multidimensional trajectory arrays.
         """
         if threads > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = str(threads)
@@ -196,21 +177,6 @@ class Engine:
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), protocols: Any = None, max_workers: int = 1, show_progress: bool = False) -> List[SimulationResult]:
         """
         Executes an array of independent models across multiple vCPUs concurrently.
-
-        Resolves Python's multi-processing bottlenecks. Pushes the entire task matrix 
-        down into the compiled Rust Rayon thread-pool, achieving near-linear scaling.
-
-        Args:
-            parameters (List[Dict[str, float]]): List of parameter dictionary permutations to solve.
-            t_span (tuple): A tuple of (start_time, end_time) in seconds.
-            protocols (Any, optional): Can be a single `Sequence` (which is automatically broadcast 
-                to every parameter payload in the batch) or a `List[Sequence]` mapping exactly 1:1 
-                with the `parameters` list to run unique, isolated protocols per model.
-            max_workers (int): Size of the Native thread-pool. Completely bypasses the Python GIL.
-            show_progress (bool): Whether to display a terminal progress bar.
-
-        Returns:
-            List[SimulationResult]: A list of result objects corresponding to the input parameters.
         """
         from ion_flux.protocols import Sequence
         if protocols:
@@ -229,7 +195,6 @@ class Engine:
         from ion_flux.runtime._2_initializers import evaluate_ic
         from ion_flux.runtime._3_dispatch import run_batch
         
-        # In batch mode, y0 is evaluated using the default parameters to prevent O(N) evaluation bounds overhead.
         default_params = {k: v.value for k, v in self.parameters.items()}
         y0, ydot0 = evaluate_ic(self.manifest, default_params)
         
@@ -257,20 +222,6 @@ class Engine:
     async def solve_async(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, t_eval: Optional[np.ndarray] = None, scheduler: Any = None) -> SimulationResult:
         """
         Asynchronous wrapper for `solve`.
-
-        Prevents blocking the event loop in high-throughput environments (e.g., FastAPI, 
-        WebSockets) while waiting for the native executable. 
-
-        Args:
-            t_span (tuple): A tuple of (start_time, end_time) in seconds.
-            protocol (Any, optional): Defines dynamic algebraic boundary constraints.
-            parameters (Dict[str, float], optional): Dictionary of parameter overrides.
-            t_eval (np.ndarray, optional): Specific time points to record the solution.
-            scheduler (Any, optional): A `MultiTenantScheduler` or asyncio Semaphore to limit 
-                concurrent native solver invocations and prevent host OOM conditions.
-
-        Returns:
-            SimulationResult: A data object containing the multidimensional trajectory arrays.
         """
         if scheduler:
             async with scheduler: 
@@ -279,11 +230,28 @@ class Engine:
 
     # --- Internal Sequence Orchestration ---
 
+    def _apply_protocol_step(self, session: Session, step: Any, step_name: str) -> None:
+        if session.terminal:
+            if step_name == "CC":
+                session.terminal.set_current(step.rate)
+            elif step_name == "CV":
+                session.terminal.set_voltage(step.voltage)
+            elif step_name == "Rest":
+                session.terminal.rest()
+        else:
+            if step_name == "CC":
+                if "i_target" in self.parameters: session.set_parameter("i_target", step.rate)
+                elif "i_app" in self.parameters: session.set_parameter("i_app", step.rate)
+            elif step_name == "CV":
+                if "v_target" in self.parameters: session.set_parameter("v_target", step.voltage)
+            elif step_name == "Rest":
+                if "i_target" in self.parameters: session.set_parameter("i_target", 0.0)
+                elif "i_app" in self.parameters: session.set_parameter("i_app", 0.0)
+
     def _orchestrate_sequence(self, protocol, parameters, requires_grad, show_progress) -> SimulationResult:
         """
         Drives piece-wise protocols natively. Preserves Python control flow specifically 
-        to execute exact algebraic Bisection Root triggers across Sequence boundaries, allowing 
-        events like 'voltage == 4.2V' to be met exactly.
+        to execute exact algebraic Bisection Root triggers across Sequence boundaries.
         """
         session = self.start_session(parameters)
         data_hist = {"Time [s]": []}
@@ -297,20 +265,19 @@ class Engine:
         for step in protocol.steps:
             target_condition = getattr(step, "until", None)
             step_name = type(step).__name__
-            inputs = self._map_protocol_inputs(step, step_name)
+            self._apply_protocol_step(session, step, step_name)
             
             t_max = getattr(step, "time", float('inf'))
             t_elapsed = 0.0
             
             while t_elapsed < t_max:
-                # FIX: Clamp the evaluation step to exactly the remaining time limit
                 dt_step = min(1.0, t_max - t_elapsed)
                 
                 session.checkpoint()
-                session.step(dt_step, inputs=inputs)
+                session.step(dt_step)
                 
                 if target_condition and session.triggered(target_condition):
-                    low = self._find_trigger_root(session, target_condition, inputs, dt_step)
+                    low = self._find_trigger_root(session, target_condition, dt_step)
                     t_elapsed += low
                     self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
                     break
@@ -339,44 +306,20 @@ class Engine:
             }
         return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
 
-    def _map_protocol_inputs(self, step: Any, step_name: str) -> Dict[str, float]:
-        """Maps sequence parameters to algebraic terminal constraints."""
-        inputs = {}
-        if step_name == "CC":
-            if "_term_mode" in self.parameters: inputs.update({"_term_mode": 1.0, "_term_i_target": step.rate})
-            else: 
-                if "mode" in self.parameters: inputs["mode"] = 1.0
-                if "i_target" in self.parameters: inputs["i_target"] = step.rate
-                elif "i_app" in self.parameters: inputs["i_app"] = step.rate
-        elif step_name == "CV":
-            if "_term_mode" in self.parameters: inputs.update({"_term_mode": 0.0, "_term_v_target": step.voltage})
-            else: 
-                if "mode" in self.parameters: inputs["mode"] = 0.0
-                if "v_target" in self.parameters: inputs["v_target"] = step.voltage
-        elif step_name == "Rest":
-            if "_term_mode" in self.parameters: inputs.update({"_term_mode": 1.0, "_term_i_target": 0.0})
-            else: 
-                if "mode" in self.parameters: inputs["mode"] = 1.0
-                if "i_target" in self.parameters: inputs["i_target"] = 0.0
-                elif "i_app" in self.parameters: inputs["i_app"] = 0.0
-        return inputs
-
-    def _find_trigger_root(self, session: Session, target_condition: Any, inputs: Dict[str, float], dt_step: float) -> float:
+    def _find_trigger_root(self, session: Session, target_condition: Any, dt_step: float) -> float:
         """Executes a dense bisection to land mathematically exactly on discontinuous sequence triggers."""
         session.restore()
         
-        # Prevent speculative bisection steps from writing false branches to the AD tape
         with session.suspend_history():
             low, high = 0.0, dt_step
             for _ in range(15):
                 mid = (low + high) / 2.0
-                session.step(mid, inputs=inputs)
+                session.step(mid)
                 if session.triggered(target_condition): high = mid
                 else: low = mid
                 session.restore()
                 
-        # Tape automatically resumes after context exit
-        session.step(low, inputs=inputs)
+        session.step(low)
         return low
 
     def _initialize_ad_history(self, session: Session) -> None:
@@ -406,8 +349,8 @@ class Engine:
             data_hist[k].append(obs[offset:offset+size] if size > 1 else obs[offset])
 
     def _print_progress(self, session: Session, step_name: str, t_elapsed: float, t_max: float, is_final: bool = False) -> None:
-        try: v_str = f" | V: {session.get('V_cell'):.3f}V"
-        except KeyError: v_str = ""
+        try: v_str = f" | V: {session.get_scalar('V_cell'):.3f}V"
+        except (KeyError, ValueError): v_str = ""
         
         if is_final:
             sys.stdout.write(f"\r▶ {step_name:<4} [██████████████████████████████] 100.0% | t: {session.time:.1f}s{v_str}   \n")

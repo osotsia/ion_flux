@@ -36,6 +36,13 @@ class ExecutableManifest:
         self.state_domain_map = state_domain_map
         self.cpp_source = cpp_source
         
+        self.terminal_meta = {
+            "has_terminal": "_term_mode" in self.layout.param_offsets,
+            "mode_offset": self.layout.param_offsets.get("_term_mode", (None, 0))[0],
+            "i_target_offset": self.layout.param_offsets.get("_term_i_target", (None, 0))[0],
+            "v_target_offset": self.layout.param_offsets.get("_term_v_target", (None, 0))[0],
+        }
+
         self.runtime = NativeRuntime(lib_path, layout.n_states) if lib_path else None
 
     def pack_parameters(self, overrides: Dict[str, float]) -> List[float]:
