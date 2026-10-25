@@ -3,13 +3,9 @@
 ![CI Status](https://github.com/osotsia/ion_flux/actions/workflows/build_and_test_and_publish.yml/badge.svg)
 [![PyPI version](https://badge.fury.io/py/ion-flux.svg)](https://badge.fury.io/py/ion-flux)
 
-`ion_flux` is a next-generation execution engine for battery simulations. 
+An end-to-end differentiable execution engine for battery physics utilizing a strict compiler-and-runtime architecture. You write physics in declarative Python, and the engine automatically figures out how to discretize, differentiate, compile, and solve them using a native Rust orchestrator, LLVM compilation, and Enzyme Automatic Differentiation.
 
-It is built on a radical philosophy: **Ruthlessly separate *Physical Intent* from *Computational Execution*.** 
-
-You write physics in pure, declarative Python almost exactly as they appear in a textbook. Behind the scenes, the engine automatically figures out how to discretize, differentiate, compile, and solve them using a native Rust orchestrator, Ahead-of-Time (AOT) LLVM compilation, and Enzyme Automatic Differentiation (AD).
-
-No flattened arrays. No massive Python memory graphs. No "math gymnastics." Just zero boilerplate and infinite scalability.
+**Target:** macOS, Linux | Python 3.10–3.14
 
 ---
 
@@ -20,7 +16,6 @@ Because `ion_flux` leverages Ahead-of-Time (AOT) compilation and LLVM-level Auto
 **1. Install and Configure `ion_flux`**
 ```bash
 # Create a virtual environment (recommended)
-# Requires python 3.10–3.14
 mkdir my_battery_project && cd my_battery_project
 python -m venv .venv && source .venv/bin/activate
 
@@ -98,7 +93,7 @@ class ModularSPM(fx.PDE):
         
         macro_physics = {
             "equations": {
-                # Omitting fx.dt() inherently flags this as a Spatial DAE!
+                # Omitting fx.dt() inherently flags this as a Spatial DAE
                 self.V_cell: self.V_cell == (4.2 - 0.001 * self.cathode.c_s.right) \
                                           - (0.1 - 0.001 * self.anode.c_s.right)
             },
@@ -119,9 +114,6 @@ class ModularSPM(fx.PDE):
 # Compile the unified physics and execute a 1-hour simulation
 engine = fx.Engine(model=ModularSPM())
 result = engine.solve(t_span=(0, 3600))
-
-# Export the compiled native C++ binary for zero-overhead deployments
-engine.export_binary("models/spm_prod.so")
 ```
 
 ### 3. Native Multi-Scale Meshes & DAEs
@@ -137,7 +129,10 @@ Because `ion_flux` relies on **Ahead-of-Time (AOT) C++ binaries** and strictly s
 Deploy to serverless environments (AWS Lambda, APIs) by exporting your compiled physics to a portable `.so` shared library. Instantiation takes `0ms`. 
 
 ```python
-# 1. Load a compiled model instantly on a serverless worker (Bypasses Python AST/Clang entirely)
+# 0. Export the compiled native C++ binary
+engine.export_binary("models/spm_prod.so")
+
+# 1. Load a compiled model instantly on a serverless worker (Bypasses Python AST/Clang)
 stateless_engine = fx.Engine.load("models/spm_prod.so", target="cpu:serial")
 
 # 2. Distribute 10,000 implicit solves across all available vCPUs
@@ -173,7 +168,7 @@ grads = loss.backward()
 print(grads["anode_D_s"]) 
 ```
 
-### Scenario C: Microsecond-Latency Hardware-in-the-Loop (HIL)
+### Scenario C: Microsecond-Latency Software-in-the-Loop (SIL)
 Engineers couple physics models directly to control software because validating the software (e.g., fast-charging, thermal management) requires closed-loop feedback and cannot be done with pre-recorded test data. For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session** with deterministic execution profiles. The BDF history vectors, sparse LU factorizations, and exact analytical Jacobians stay "hot" in hardware memory.
 
 ```python
@@ -181,19 +176,19 @@ Engineers couple physics models directly to control software because validating 
 session = engine.start_session(mode="realtime", parameters={"anode_D_s": 1e-14})
 
 while session.time < 3600.0:
-    # Read scalar state directly without allocation churn or silent spatial reductions
+    # Read scalar state
     current_v = session.get_scalar("V_cell")
     
-    # Evaluate external C++ / Python BMS logic
+    # Evaluate external BMS logic
     i_req = custom_bms.compute_current(v_cell=current_v)
     
-    # Actuate the terminal directly without magic compiler strings
+    # Apply computed current to the cell model
     session.terminal.set_current(i_req)
     session.step(dt=0.01)
     
     if session.triggered(fx.Condition(model.V_cell > 4.25)):
         session.terminal.set_voltage(4.25) # Smoothly hand off to CV mode
-        print("BMS Safety Clamped to CV Mode!")
+        print("BMS Safety Clamped to CV Mode")
         break
 ```
 
