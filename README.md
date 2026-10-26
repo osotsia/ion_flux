@@ -168,7 +168,7 @@ grads = loss.backward()
 print(grads["anode_D_s"]) 
 ```
 
-### Scenario C: Microsecond-Latency Software-in-the-Loop (SIL)
+### Scenario C: Low-Latency Software-in-the-Loop (SIL)
 Engineers couple physics models directly to control software because validating the software (e.g., fast-charging, thermal management) requires closed-loop feedback and cannot be done with pre-recorded test data. For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session** with deterministic execution profiles. The BDF history vectors, sparse LU factorizations, and exact analytical Jacobians stay "hot" in hardware memory.
 
 ```python
@@ -191,6 +191,9 @@ while session.time < 3600.0:
         print("BMS Safety Clamped to CV Mode")
         break
 ```
+Benchmarked on an Apple Silicon host, we have:
+1. **Asymptotic Reduced Models (TSPMe, $N \approx 180$):** Low millisecond-scale ($\sim 1.3\,\text{ms}$ active, $\sim 150\,\mu\text{s}$ rest), suitable for single-rate execution at standard BMS frequencies ($100\,\text{Hz}$) with full electrolyte and thermal dynamics.
+2. **Full-Order P2D Models (DFN, $N \ge 1,200$):** Millisecond-scale ($\sim 11.0\,\text{ms}$), suitable for multi-rate co-simulation architectures ($10\,\text{Hz}$) if detailed through-thickness particle saturation gradients are strictly required.
 
 ---
 ## 🧠 How it Works Under the Hood

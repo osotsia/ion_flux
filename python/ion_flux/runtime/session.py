@@ -28,26 +28,34 @@ class TerminalController:
         self._i_offset = meta["i_target_offset"]
         self._v_offset = meta["v_target_offset"]
 
-    def set_current(self, amps: float) -> None:
+    def set_current(self, amps: float, reinitialize: bool = True) -> None:
         mode_changed = (self._session._current_term_mode != 1.0)
+        curr_amps = self._session.parameters.get("_term_i_target")
+        val_changed = (curr_amps is None or abs(curr_amps - amps) > 1e-12)
+
         if mode_changed:
             self._session.set_parameter_by_offset(self._mode_offset, 1.0)
             self._session._current_term_mode = 1.0
         self._session.set_parameter_by_offset(self._i_offset, float(amps))
-        if mode_changed:
+
+        if (mode_changed or val_changed) and reinitialize:
             self._session.reinitialize_algebraic()
 
-    def set_voltage(self, volts: float) -> None:
+    def set_voltage(self, volts: float, reinitialize: bool = True) -> None:
         mode_changed = (self._session._current_term_mode != 0.0)
+        curr_volts = self._session.parameters.get("_term_v_target")
+        val_changed = (curr_volts is None or abs(curr_volts - volts) > 1e-12)
+
         if mode_changed:
             self._session.set_parameter_by_offset(self._mode_offset, 0.0)
             self._session._current_term_mode = 0.0
         self._session.set_parameter_by_offset(self._v_offset, float(volts))
-        if mode_changed:
+
+        if (mode_changed or val_changed) and reinitialize:
             self._session.reinitialize_algebraic()
 
-    def rest(self) -> None:
-        self.set_current(0.0)
+    def rest(self, reinitialize: bool = True) -> None:
+        self.set_current(0.0, reinitialize=reinitialize)
 
 
 class Session:
