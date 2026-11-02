@@ -261,13 +261,16 @@ class Engine:
         for k in self.manifest.layout.obs_offsets.keys(): data_hist[k] = []
         raw_y_hist, raw_p_hist = [], []
 
-        if requires_grad:
-            self._initialize_ad_history(session)
-
-        for step in protocol.steps:
+        for step_idx, step in enumerate(protocol.steps):
             target_condition = getattr(step, "until", None)
             step_name = type(step).__name__
             self._apply_protocol_step(session, step, step_name)
+            
+            # Record t=0.0 initial state post-algebraic reinitialization under protocol load
+            if step_idx == 0:
+                if requires_grad:
+                    self._initialize_ad_history(session)
+                self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
             
             t_max = getattr(step, "time", float('inf'))
             t_elapsed = 0.0
@@ -331,7 +334,7 @@ class Engine:
         ydot0 = np.zeros(self.manifest.layout.n_states)
         p0 = self.manifest.pack_parameters(session.parameters)
         
-        session.micro_t = [np.array([0.0])]
+        session.micro_t = [np.array([session.time])]
         session.micro_y = [y0[np.newaxis, :]]
         session.micro_ydot = [ydot0[np.newaxis, :]]
         session.micro_p = [np.array(p0)[np.newaxis, :]]

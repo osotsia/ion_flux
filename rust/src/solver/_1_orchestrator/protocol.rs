@@ -18,20 +18,26 @@ pub fn run_sequence(
 ) -> Result<(), SolverError> {
     
     let mut step_obs = vec![0.0; prob.n_obs];
-    if prob.n_obs > 0 {
-        if let Some(obs_fn) = prob.fns.obs_fn {
-            unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
-            out_obs.extend_from_slice(&step_obs);
-        }
-    }
     
-    for step in steps {
+    for (step_idx, step) in steps.iter().enumerate() {
         if step.s_type == 0 { wk.p[step.p_mode] = 1.0; wk.p[step.p_i] = step.target_val; }
         else if step.s_type == 1 { wk.p[step.p_mode] = 0.0; wk.p[step.p_v] = step.target_val; }
         else if step.s_type == 2 { wk.p[step.p_mode] = 1.0; wk.p[step.p_i] = 0.0; }
         
         // Propagate algebraic initialization failures immediately
         newton::calc_algebraic_roots(prob, wk)?;
+        
+        // Capture t=0.0 state post-algebraic solve for the initial protocol step
+        if step_idx == 0 {
+            out_t.push(wk.t);
+            out_traj.extend_from_slice(&wk.y);
+            if prob.n_obs > 0 {
+                if let Some(obs_fn) = prob.fns.obs_fn {
+                    unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                    out_obs.extend_from_slice(&step_obs);
+                }
+            }
+        }
         
         let mut t_elapsed = 0.0;
         

@@ -140,9 +140,9 @@ pub fn solve_batch_native<'py>(
                 let step_list = if let Some(ref protos) = protocol_steps { protos.get(b_idx).cloned().unwrap_or_default() } else { Vec::new() };
                 let has_protocol = !step_list.is_empty();
                 
-                let mut out_t = vec![0.0];
-                let mut out_traj = wk.y.clone();
-                let mut out_obs = vec![];
+                let mut out_t = Vec::new();
+                let mut out_traj = Vec::new();
+                let mut out_obs = Vec::new();
                 
                 if has_protocol {
                     let mut mapped_steps = Vec::new();
