@@ -86,14 +86,13 @@ pub fn step(
                     err_kp1 = constraints::wrms_norm_mask(&delta, &wk.weights, &prob.id, prob.config.suppress_alg) / ((wk.history.order + 2) as f64);
                 }
 
-                let ee_clone = wk.ee.clone();
                 if prob.config.is_realtime {
                     wk.history.k_used = 1;
                     wk.history.h_used = wk.history.h;
-                    for i in 0..prob.n { wk.history.phi[1][i] += ee_clone[i]; }
+                    for i in 0..prob.n { wk.history.phi[1][i] += wk.ee[i]; }
                     for i in 0..prob.n { wk.history.phi[0][i] += wk.history.phi[1][i]; }
                 } else {
-                    wk.history.complete_step(err_k, err_km1, err_km2, err_kp1, &ee_clone, prob.config.min_dt, prob.config.max_dt);
+                    wk.history.complete_step(err_k, err_km1, err_km2, err_kp1, &wk.ee, prob.config.min_dt, prob.config.max_dt);
                 }
                 
                 wk.diag.accepted_steps += 1;

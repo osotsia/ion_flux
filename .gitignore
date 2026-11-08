@@ -3,6 +3,7 @@
 *.dylib.*
 .hypothesis
 .vscode
+.cadence/
 plan
 *ion_flux_diagnostics/
 # =============================================================================

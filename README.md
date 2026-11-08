@@ -192,8 +192,8 @@ while session.time < 3600.0:
         break
 ```
 Benchmarked on an Apple Silicon host, we have:
-1. **Asymptotic Reduced Models (TSPMe, $N \approx 180$):** Low millisecond-scale ($\sim 1.3\,\text{ms}$ active, $\sim 150\,\mu\text{s}$ rest), suitable for single-rate execution at standard BMS frequencies ($100\,\text{Hz}$) with full electrolyte and thermal dynamics.
-2. **Full-Order P2D Models (DFN, $N \ge 1,200$):** Millisecond-scale ($\sim 11.0\,\text{ms}$), suitable for multi-rate co-simulation architectures ($10\,\text{Hz}$) if detailed through-thickness particle saturation gradients are strictly required.
+1. **Asymptotic Reduced Models (TSPMe, N ≈ 180):** Low millisecond-scale (~1.3 ms active, ~150 µs rest), suitable for single-rate execution at standard BMS frequencies (100 Hz) with full electrolyte and thermal dynamics.
+2. **Full-Order P2D Models (DFN, N ≥ 1,200):** Millisecond-scale (~11.0 ms), suitable for multi-rate co-simulation architectures (10 Hz) if detailed through-thickness particle saturation gradients are strictly required.
 
 ---
 ## 🧠 How it Works Under the Hood

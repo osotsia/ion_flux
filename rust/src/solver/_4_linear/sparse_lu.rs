@@ -15,6 +15,11 @@ pub struct NativeSparseLuSolver {
     pub triplets: Vec<(usize, usize, f64)>,
     cached_pattern: Vec<(usize, usize)>,
     pub row_scales: Vec<f64>,
+    pub jvp_scratch: Vec<f64>,
+    pub dp_scratch: Vec<f64>,
+    pub dy_scratch: Vec<f64>,
+    pub dydot_scratch: Vec<f64>,
+    pub lambda_scratch: Vec<f64>,
 }
 
 impl NativeSparseLuSolver {
@@ -26,6 +31,11 @@ impl NativeSparseLuSolver {
             triplets: Vec::with_capacity(estimated_nnz),
             cached_pattern: Vec::with_capacity(estimated_nnz),
             row_scales: vec![1.0; n],
+            jvp_scratch: vec![0.0; n],
+            dp_scratch: Vec::new(),
+            dy_scratch: vec![0.0; n],
+            dydot_scratch: vec![0.0; n],
+            lambda_scratch: vec![0.0; n],
         }
     }
 
