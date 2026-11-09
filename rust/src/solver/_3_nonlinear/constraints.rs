@@ -1,6 +1,6 @@
 use crate::solver::_3_nonlinear::newton::{NewtonFailure, NewtonResult};
 
-pub fn evaluate(n: usize, y: &[f64], ee: &[f64], phi_0: &[f64], constraints: &[f64], iter: usize) -> NewtonResult {
+pub fn evaluate(n: usize, y: &[f64], _ee: &[f64], phi_0: &[f64], constraints: &[f64], iter: usize) -> NewtonResult {
     let mut min_eta = 1.0;
     let mut violated = false;
 

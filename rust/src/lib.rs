@@ -1,3 +1,5 @@
+pub mod ffi;
+pub mod vendor;
 mod solver;
 
 #[cfg(test)]

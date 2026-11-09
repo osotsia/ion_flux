@@ -47,14 +47,7 @@ impl SolverConfig {
     }
 }
 
-#[derive(Clone)]
-pub struct Callbacks {
-    pub res_fn: NativeResFn,
-    pub obs_fn: Option<NativeObsFn>,
-    pub jvp_fn: Option<NativeJvpFn>,
-    pub vjp_fn: Option<NativeVjpFn>,
-    pub set_threads_fn: Option<NativeSetThreadsFn>,
-}
+pub use crate::ffi::callbacks::Callbacks;
 
 #[derive(Clone)]
 pub struct Problem {

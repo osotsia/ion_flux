@@ -241,3 +241,14 @@ fn test_mock_bdf_single_step() {
         assert!(val.is_finite(), "State y[{i}] is not finite: {val}");
     }
 }
+
+#[test]
+fn test_sundials_context_isolation() {
+    unsafe {
+        let ctx = crate::vendor::sundials::sys::get_safe_sundials_context();
+        assert!(!ctx.is_null(), "Failed to allocate isolated SUNDIALS context");
+        let mut ctx_ptr = ctx;
+        let free_res = crate::vendor::sundials::sys::SUNContext_Free(&mut ctx_ptr);
+        assert_eq!(free_res, 0, "SUNContext_Free failed");
+    }
+}

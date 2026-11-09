@@ -1,1 +1,1 @@
-pub mod wrapper;
+pub use crate::vendor::sundials::*;

@@ -20,12 +20,6 @@ extern void __enzyme_fwddiff(void*, ...);
 extern void __enzyme_autodiff(void*, ...);
 #endif
 
-namespace {
-    thread_local std::vector<double> tl_jvp_dy;
-    thread_local std::vector<double> tl_jvp_dydot;
-    thread_local std::vector<double> tl_res_dummy;
-}
-
 extern "C" {
 
 void set_spatial_threads(int num_threads) {
@@ -34,51 +28,43 @@ void set_spatial_threads(int num_threads) {
 #endif
 }
 
-void evaluate_residual(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ res) {
+void evaluate_residual(const double* y, const double* ydot, const double* p, const double* m, double* res) {
 {{ body | indent(4) }}
 }
 
-void evaluate_observables(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ obs) {
+void evaluate_observables(const double* y, const double* ydot, const double* p, const double* m, double* obs) {
 {{ obs_body | indent(4) }}
 }
 
-void evaluate_jvp(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double c_j, const double* __restrict__ v, double* __restrict__ jvp_out) {
+void evaluate_jvp(const double* y, const double* ydot, const double* p, const double* m, double c_j, const double* v, double* jvp_out) {
     int N = {{ n_states }};
-    if ((int)tl_jvp_dy.size() < N) {
-        tl_jvp_dy.resize(N);
-        tl_jvp_dydot.resize(N);
-        tl_res_dummy.resize(N);
-    }
+    std::vector<double> jvp_dy(N);
+    std::vector<double> jvp_dydot(N);
+    std::vector<double> res_dummy(N, 0.0);
 
     for (int i = 0; i < N; ++i) {
-        tl_jvp_dy[i] = v[i];
-        tl_jvp_dydot[i] = c_j * v[i];
+        jvp_dy[i] = v[i];
+        jvp_dydot[i] = c_j * v[i];
         jvp_out[i] = 0.0;
-        tl_res_dummy[i] = 0.0;
     }
 
 #ifdef ENZYME_ACTIVE
     __enzyme_fwddiff((void*)evaluate_residual, 
-        enzyme_dup, y, tl_jvp_dy.data(), 
-        enzyme_dup, ydot, tl_jvp_dydot.data(), 
+        enzyme_dup, y, jvp_dy.data(), 
+        enzyme_dup, ydot, jvp_dydot.data(), 
         enzyme_const, p, 
         enzyme_const, m,
-        enzyme_dupnoneed, tl_res_dummy.data(), jvp_out);
+        enzyme_dupnoneed, res_dummy.data(), jvp_out);
 #endif
 }
 
-void evaluate_vjp(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, const double* __restrict__ lambda_vec, double* __restrict__ dp_out, double* __restrict__ dy_out, double* __restrict__ dydot_out) {
+void evaluate_vjp(const double* y, const double* ydot, const double* p, const double* m, const double* lambda_vec, double* dp_out, double* dy_out, double* dydot_out) {
     int N = {{ n_states }};
     int N_P = {{ n_params }};
-    if ((int)tl_res_dummy.size() < N) {
-        tl_res_dummy.resize(N);
-    }
-    for (int i = 0; i < N; ++i) {
-        tl_res_dummy[i] = 0.0;
-    }
+    std::vector<double> res_dummy(N, 0.0);
     
-    for(int i=0; i<N_P; ++i) dp_out[i] = 0.0;
-    for(int i=0; i<N; ++i) { dy_out[i] = 0.0; dydot_out[i] = 0.0; }
+    for(int i = 0; i < N_P; ++i) dp_out[i] = 0.0;
+    for(int i = 0; i < N; ++i) { dy_out[i] = 0.0; dydot_out[i] = 0.0; }
 
 #ifdef ENZYME_ACTIVE
     __enzyme_autodiff((void*)evaluate_residual, 
@@ -86,7 +72,7 @@ void evaluate_vjp(const double* __restrict__ y, const double* __restrict__ ydot,
         enzyme_dup, ydot, dydot_out, 
         enzyme_dup, p, dp_out, 
         enzyme_const, m,
-        enzyme_dupnoneed, tl_res_dummy.data(), (double*)lambda_vec);
+        enzyme_dupnoneed, res_dummy.data(), (double*)lambda_vec);
 #endif
 }
 } // extern "C"
