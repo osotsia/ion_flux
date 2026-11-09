@@ -1,5 +1,8 @@
 mod solver;
 
+#[cfg(test)]
+pub mod tests;
+
 use pyo3::prelude::*;
 use solver::_0_ffi::api_batch::{solve_ida_native, solve_batch_native};
 use solver::_0_ffi::api_adjoint::discrete_adjoint_native;
