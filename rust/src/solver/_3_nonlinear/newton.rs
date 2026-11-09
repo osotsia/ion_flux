@@ -20,7 +20,10 @@ pub enum NewtonResult {
     Diverged(NewtonFailure),    
 }
 
-pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
+pub use crate::nonlinear::newton::*;
+
+#[allow(dead_code)]
+fn _unused_legacy_newton() {
     let c_j = wk.history.c_j;
     let mut cj_ratio = if wk.history.c_j_old == 0.0 { 1.0 } else { c_j / wk.history.c_j_old };
     if !prob.config.is_realtime && (cj_ratio < 0.6 || cj_ratio > 1.6666666666666667) { 

@@ -1,5 +1,8 @@
 #[derive(Clone)]
-pub struct BdfHistory {
+pub use crate::stepper::history::*;
+
+#[allow(dead_code)]
+struct _UnusedLegacyHistory {
     pub order: usize,
     pub max_order: usize,
     pub k_used: usize,

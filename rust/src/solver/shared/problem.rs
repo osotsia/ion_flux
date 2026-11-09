@@ -1,5 +1,3 @@
-use super::callbacks::*;
-
 #[derive(Clone, Default)]
 pub struct CprData {
     pub color_seeds: Vec<Vec<f64>>,

@@ -1,5 +1,8 @@
 use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
-use crate::solver::shared::workspace::Workspace;
+use crate::stepper::state::{SystemState, StepScratchpad};
+use crate::stepper::history::BdfHistory;
+use crate::linear::solver::LinearSolver;
+use crate::solver::shared::diagnostics::Diagnostics;
 
 pub const MOCK_N: usize = 6;
 pub const MOCK_N_PARAMS: usize = 2;
@@ -141,8 +144,8 @@ pub fn build_mock_cpr() -> CprData {
     }
 }
 
-/// Constructs an in-memory Problem and Workspace pair for deterministic testing
-pub fn create_mock_fixture() -> (Problem, Workspace) {
+/// Constructs an in-memory Problem and segregated execution components for deterministic testing
+pub fn create_mock_fixture() -> (Problem, SystemState, BdfHistory, StepScratchpad, LinearSolver, Diagnostics) {
     let fns = Callbacks {
         res_fn: mock_evaluate_residual,
         obs_fn: Some(mock_evaluate_obs),
@@ -177,7 +180,11 @@ pub fn create_mock_fixture() -> (Problem, Workspace) {
     let y0 = vec![1.0, 1.0, 1.0, 1.0, 1.0, 6.0];
     let ydot0 = vec![0.0; MOCK_N];
 
-    let wk = Workspace::new(MOCK_N, 0, y0, ydot0, p);
+    let state = SystemState::new(y0, ydot0, p);
+    let history = BdfHistory::new(MOCK_N);
+    let scratch = StepScratchpad::new(MOCK_N);
+    let linear_solver = LinearSolver::new(MOCK_N, 0);
+    let diag = Diagnostics::new(MOCK_N);
 
-    (prob, wk)
+    (prob, state, history, scratch, linear_solver, diag)
 }

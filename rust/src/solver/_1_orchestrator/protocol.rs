@@ -1,8 +1,11 @@
 use std::io::Write;
 use crate::solver::shared::problem::Problem;
-use crate::solver::shared::workspace::Workspace;
-use crate::solver::_3_nonlinear::newton;
-use crate::solver::_2_stepper::bdf;
+use crate::stepper::state::{SystemState, StepScratchpad};
+use crate::stepper::history::BdfHistory;
+use crate::linear::solver::LinearSolver;
+use crate::solver::shared::diagnostics::Diagnostics;
+use crate::nonlinear::algebraic_roots;
+use crate::stepper::bdf;
 use crate::solver::_1_orchestrator::bisection::{TrigInfo, check_trigger, execute_bisection};
 use crate::solver::_0_ffi::SolverError;
 
@@ -12,28 +15,34 @@ pub struct ProtocolStep {
 }
 
 pub fn run_sequence(
-    prob: &Problem, wk: &mut Workspace, steps: &[ProtocolStep],
-    out_t: &mut Vec<f64>, out_traj: &mut Vec<f64>, out_obs: &mut Vec<f64>,
-    show_progress: bool, v_idx: i32
+    prob: &Problem,
+    state: &mut SystemState,
+    history: &mut BdfHistory,
+    scratch: &mut StepScratchpad,
+    linear_solver: &mut LinearSolver,
+    diag: &mut Diagnostics,
+    steps: &[ProtocolStep],
+    out_t: &mut Vec<f64>,
+    out_traj: &mut Vec<f64>,
+    out_obs: &mut Vec<f64>,
+    show_progress: bool,
+    v_idx: i32
 ) -> Result<(), SolverError> {
-    
     let mut step_obs = vec![0.0; prob.n_obs];
     
     for (step_idx, step) in steps.iter().enumerate() {
-        if step.s_type == 0 { wk.p[step.p_mode] = 1.0; wk.p[step.p_i] = step.target_val; }
-        else if step.s_type == 1 { wk.p[step.p_mode] = 0.0; wk.p[step.p_v] = step.target_val; }
-        else if step.s_type == 2 { wk.p[step.p_mode] = 1.0; wk.p[step.p_i] = 0.0; }
+        if step.s_type == 0 { state.p[step.p_mode] = 1.0; state.p[step.p_i] = step.target_val; }
+        else if step.s_type == 1 { state.p[step.p_mode] = 0.0; state.p[step.p_v] = step.target_val; }
+        else if step.s_type == 2 { state.p[step.p_mode] = 1.0; state.p[step.p_i] = 0.0; }
         
-        // Propagate algebraic initialization failures immediately
-        newton::calc_algebraic_roots(prob, wk)?;
+        algebraic_roots::calc_algebraic_roots(prob, state, history, scratch, linear_solver, diag)?;
         
-        // Capture t=0.0 state post-algebraic solve for the initial protocol step
         if step_idx == 0 {
-            out_t.push(wk.t);
-            out_traj.extend_from_slice(&wk.y);
+            out_t.push(state.t);
+            out_traj.extend_from_slice(&state.y);
             if prob.n_obs > 0 {
                 if let Some(obs_fn) = prob.fns.obs_fn {
-                    unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                    unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
                     out_obs.extend_from_slice(&step_obs);
                 }
             }
@@ -44,40 +53,38 @@ pub fn run_sequence(
         while t_elapsed < step.t_limit {
             if step.t_limit == std::f64::INFINITY && !step.trig.has_trig { break; } 
             let dt_step = 1.0_f64.min(step.t_limit - t_elapsed);
-            let ckpt = wk.clone_state();
+            let ckpt = state.clone_tuple();
             
-            // Explicitly execute the step and propagate any solver crashes.
-            // Only check the protocol triggers if the step was mathematically successful.
-            bdf::step(prob, wk, dt_step, None)?;
+            bdf::step(prob, state, history, scratch, linear_solver, diag, dt_step, None)?;
             
-            if check_trigger(prob, wk, &step.trig, &mut step_obs) {
-                let low = execute_bisection(prob, wk, dt_step, &step.trig, ckpt);
+            if check_trigger(prob, state, &step.trig, &mut step_obs) {
+                let low = execute_bisection(prob, state, history, scratch, linear_solver, diag, dt_step, &step.trig, ckpt);
                 t_elapsed += low;
-                out_t.push(wk.t);
-                out_traj.extend_from_slice(&wk.y);
+                out_t.push(state.t);
+                out_traj.extend_from_slice(&state.y);
                 if prob.n_obs > 0 {
                     if let Some(obs_fn) = prob.fns.obs_fn {
-                        unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                        unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
                         out_obs.extend_from_slice(&step_obs);
                     }
                 }
-                if show_progress { print_progress(step.s_type, wk.t, 1.0, v_idx, &wk.y, true); }
+                if show_progress { print_progress(step.s_type, state.t, 1.0, v_idx, &state.y, true); }
                 break;
             }
             
             t_elapsed += dt_step;
-            out_t.push(wk.t);
-            out_traj.extend_from_slice(&wk.y);
+            out_t.push(state.t);
+            out_traj.extend_from_slice(&state.y);
             if prob.n_obs > 0 {
                 if let Some(obs_fn) = prob.fns.obs_fn {
-                    unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                    unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
                     out_obs.extend_from_slice(&step_obs);
                 }
             }
-            if show_progress { print_progress(step.s_type, wk.t, t_elapsed / step.t_limit, v_idx, &wk.y, false); }
+            if show_progress { print_progress(step.s_type, state.t, t_elapsed / step.t_limit, v_idx, &state.y, false); }
         }
         if show_progress && t_elapsed >= step.t_limit && step.t_limit != std::f64::INFINITY {
-            print_progress(step.s_type, wk.t, 1.0, v_idx, &wk.y, true);
+            print_progress(step.s_type, state.t, 1.0, v_idx, &state.y, true);
         }
     }
     Ok(())

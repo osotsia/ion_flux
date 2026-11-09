@@ -148,7 +148,7 @@ impl NativeSparseLuSolver {
         Ok(())
     }
 
-    pub fn solve(&self, b: &mut [f64], diag: &mut Diagnostics) -> Result<(), String> {
+    pub fn solve(&mut self, b: &mut [f64], diag: &mut Diagnostics) -> Result<(), String> {
         let start_time = Instant::now();
         if let Some(lu) = &self.numeric {
             for i in 0..self.n { b[i] *= self.row_scales[i]; }

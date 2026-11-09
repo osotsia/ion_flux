@@ -6,10 +6,9 @@ static GLOBAL_ALLOCATOR: alloc_tracker::TrackingAllocator = alloc_tracker::Track
 
 use alloc_tracker::track_allocations;
 use mock_c_abi::*;
-use crate::solver::shared::diagnostics::Diagnostics;
-use crate::solver::_4_linear::jacobian::assemble;
-use crate::solver::_3_nonlinear::newton;
-use crate::solver::_2_stepper::bdf;
+use crate::linear::jacobian::assemble;
+use crate::stepper::bdf;
+use crate::nonlinear::algebraic_roots;
 
 #[test]
 fn test_mock_c_abi_jvp_and_vjp_duality() {
@@ -153,23 +152,24 @@ fn test_alloc_tracker_detects_allocations() {
 
 #[test]
 fn test_mock_cpr_jacobian_assembly_exactness() {
-    let (prob, mut wk) = create_mock_fixture();
+    let (prob, state, _history, _scratch, mut linear_solver, _diag) = create_mock_fixture();
     let c_j = 2.5;
 
-    assemble(&prob, &mut wk, c_j);
+    assemble(&prob, &state, &mut linear_solver, c_j);
 
-    let j_true = mock_analytical_jacobian(wk.p[0], c_j);
+    let j_true = mock_analytical_jacobian(state.p[0], c_j);
     let mut expected_nonzeros = 0;
     for r in 0..MOCK_N {
         for c in 0..MOCK_N {
-            if j_true[r][c] != 0.0 {
+            let val = j_true[r][c];
+            if val != 0.0 {
                 expected_nonzeros += 1;
             }
         }
     }
-    assert_eq!(wk.linear_solver.triplets().len(), expected_nonzeros);
+    assert_eq!(linear_solver.triplets().len(), expected_nonzeros);
 
-    for &(r, c, val) in wk.linear_solver.triplets() {
+    for &(r, c, val) in linear_solver.triplets() {
         let expected = j_true[r][c];
         assert!(
             (val - expected).abs() < 1e-14,
@@ -180,19 +180,18 @@ fn test_mock_cpr_jacobian_assembly_exactness() {
 
 #[test]
 fn test_mock_sparse_lu_solve_exactness() {
-    let (prob, mut wk) = create_mock_fixture();
+    let (prob, state, _history, _scratch, mut linear_solver, mut diag) = create_mock_fixture();
     let c_j = 1.5;
 
-    assemble(&prob, &mut wk, c_j);
+    assemble(&prob, &state, &mut linear_solver, c_j);
 
-    let mut diag = Diagnostics::new(MOCK_N);
-    wk.linear_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
+    linear_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
 
     let b_orig = vec![1.0, 2.0, -1.0, 3.0, 0.5, 4.0];
     let mut b = b_orig.clone();
-    wk.linear_solver.solve(&mut b, &mut diag).expect("Linear solve failed");
+    linear_solver.solve(&mut b, &mut diag).expect("Linear solve failed");
 
-    let j_true = mock_analytical_jacobian(wk.p[0], c_j);
+    let j_true = mock_analytical_jacobian(state.p[0], c_j);
     let mut j_times_x = vec![0.0; MOCK_N];
     for r in 0..MOCK_N {
         for c in 0..MOCK_N {
@@ -212,32 +211,32 @@ fn test_mock_sparse_lu_solve_exactness() {
 
 #[test]
 fn test_mock_algebraic_root_convergence() {
-    let (prob, mut wk) = create_mock_fixture();
-    wk.y[5] = 0.0;
+    let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+    state.y[5] = 0.0;
 
-    let res = newton::calc_algebraic_roots(&prob, &mut wk);
+    let res = algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag);
     assert!(res.is_ok(), "calc_algebraic_roots failed: {:?}", res);
 
-    let p1 = wk.p[1];
-    let sum_0_to_4: f64 = wk.y[0..5].iter().sum();
+    let p1 = state.p[1];
+    let sum_0_to_4: f64 = state.y[0..5].iter().sum();
     let expected_y5 = sum_0_to_4 + p1;
 
     assert!(
-        (wk.y[5] - expected_y5).abs() < 1e-8,
+        (state.y[5] - expected_y5).abs() < 1e-8,
         "Algebraic state did not converge: y[5]={}, expected={expected_y5}",
-        wk.y[5]
+        state.y[5]
     );
 }
 
 #[test]
 fn test_mock_bdf_single_step() {
-    let (prob, mut wk) = create_mock_fixture();
+    let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
 
-    let res = bdf::step(&prob, &mut wk, 0.01, None);
+    let res = bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, 0.01, None);
     assert!(res.is_ok(), "bdf::step failed on mock problem");
-    assert!((wk.t - 0.01).abs() < 1e-12, "Time did not advance to 0.01: t={}", wk.t);
+    assert!((state.t - 0.01).abs() < 1e-12, "Time did not advance to 0.01: t={}", state.t);
 
-    for (i, val) in wk.y.iter().enumerate() {
+    for (i, val) in state.y.iter().enumerate() {
         assert!(val.is_finite(), "State y[{i}] is not finite: {val}");
     }
 }
@@ -255,15 +254,14 @@ fn test_sundials_context_isolation() {
 
 #[test]
 fn test_sparsity_stability_across_assemblies() {
-    let (prob, mut wk) = create_mock_fixture();
+    let (prob, mut state, _history, _scratch, mut linear_solver, _diag) = create_mock_fixture();
     let mut triplet_counts = Vec::new();
 
     for i in 0..100 {
-        // Perturb state near float magnitude thresholds (1e-18 to 1e-15)
-        wk.y[0] = 1.0 + (i as f64) * 1e-17;
+        state.y[0] = 1.0 + (i as f64) * 1e-17;
         let c_j = 1.0 + (i as f64) * 0.01;
-        assemble(&prob, &mut wk, c_j);
-        triplet_counts.push(wk.linear_solver.triplets().len());
+        assemble(&prob, &state, &mut linear_solver, c_j);
+        triplet_counts.push(linear_solver.triplets().len());
     }
 
     let first_count = triplet_counts[0];
@@ -278,14 +276,13 @@ fn test_sparsity_stability_across_assemblies() {
 
 #[test]
 fn test_symbolic_lu_reuse_single_execution() {
-    let (prob, mut wk) = create_mock_fixture();
-    let mut diag = Diagnostics::new(MOCK_N);
+    let (prob, mut state, _history, _scratch, mut linear_solver, mut diag) = create_mock_fixture();
 
     for i in 0..10 {
-        wk.y[0] = 1.0 + (i as f64) * 0.05;
+        state.y[0] = 1.0 + (i as f64) * 0.05;
         let c_j = 1.0 + (i as f64) * 0.1;
-        assemble(&prob, &mut wk, c_j);
-        wk.linear_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
+        assemble(&prob, &state, &mut linear_solver, c_j);
+        linear_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
     }
 
     assert_eq!(diag.numeric_factorizations, 10, "Expected 10 numeric factorizations");
@@ -299,26 +296,24 @@ fn test_symbolic_lu_reuse_single_execution() {
 fn test_closed_enum_linear_solver_dispatch() {
     use crate::linear::solver::LinearSolver;
 
-    let (prob, mut wk) = create_mock_fixture();
+    let (prob, state, _history, _scratch, mut linear_solver, mut diag) = create_mock_fixture();
     let c_j = 1.0;
-    assemble(&prob, &mut wk, c_j);
+    assemble(&prob, &state, &mut linear_solver, c_j);
 
-    assert!(!wk.linear_solver.is_gmres());
-    let mut diag = Diagnostics::new(MOCK_N);
-    wk.linear_solver.factorize_from_triplets(&mut diag).expect("SparseLU factorization failed");
+    assert!(!linear_solver.is_gmres());
+    linear_solver.factorize_from_triplets(&mut diag).expect("SparseLU factorization failed");
 
     let b_orig = vec![1.0, 2.0, -1.0, 3.0, 0.5, 4.0];
     let mut b_lu = b_orig.clone();
-    wk.linear_solver.solve(&mut b_lu, &mut diag).expect("SparseLU solve failed");
+    linear_solver.solve(&mut b_lu, &mut diag).expect("SparseLU solve failed");
 
-    // Construct GMRES variant
     let mut gmres_solver = LinearSolver::new(MOCK_N, -1);
     assert!(gmres_solver.is_gmres());
 
     gmres_solver.set_gmres_context(
-        wk.y.as_ptr(),
-        wk.ydot.as_ptr(),
-        wk.p.as_ptr(),
+        state.y.as_ptr(),
+        state.ydot.as_ptr(),
+        state.p.as_ptr(),
         prob.m.as_ptr(),
         c_j,
         prob.id.as_ptr(),
@@ -329,7 +324,7 @@ fn test_closed_enum_linear_solver_dispatch() {
     let mut b_gmres = b_orig.clone();
     gmres_solver.solve(&mut b_gmres, &mut diag).expect("GMRES solve failed");
 
-    let j_true = mock_analytical_jacobian(wk.p[0], c_j);
+    let j_true = mock_analytical_jacobian(state.p[0], c_j);
     for r in 0..MOCK_N {
         let mut row_sum_lu = 0.0;
         let mut row_sum_gmres = 0.0;
@@ -341,3 +336,31 @@ fn test_closed_enum_linear_solver_dispatch() {
         assert!((row_sum_gmres - b_orig[r]).abs() < 1e-4);
     }
 }
+
+// Note: test_bdf_step_zero_allocations is disabled pending pre-allocated faer factorization arenas.
+// #[test]
+// fn test_bdf_step_zero_allocations() {
+//     let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+//
+//     // Pre-converge algebraic equations to guarantee exact thermodynamic equilibrium
+//     algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag)
+//         .expect("Algebraic initialization failed");
+//
+//     // Warm-up step: step 0 sets up initial step size and warms up caches
+//     bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, 0.001, None)
+//         .expect("Warmup step failed");
+//
+//     // Active time-stepping loop: assert 0 heap allocations
+//     let (_res, stats) = track_allocations(|| {
+//         for _ in 0..5 {
+//             bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, 0.001, None)
+//                 .expect("Active step failed");
+//         }
+//     });
+//
+//     assert_eq!(
+//         stats.alloc_count, 0,
+//         "Active bdf::step executed {} allocations (expected 0 hot-loop allocations)!",
+//         stats.alloc_count
+//     );
+// }

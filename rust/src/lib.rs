@@ -1,5 +1,7 @@
 pub mod ffi;
 pub mod linear;
+pub mod stepper;
+pub mod nonlinear;
 pub mod vendor;
 mod solver;
 

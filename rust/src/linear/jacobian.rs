@@ -1,6 +1,6 @@
 use crate::solver::shared::problem::{Problem, CprData};
 use crate::ffi::callbacks::{NativeJvpFn, NativeVjpFn};
-use crate::solver::shared::workspace::Workspace;
+use crate::stepper::state::SystemState;
 use crate::linear::solver::LinearSolver;
 
 pub fn assemble_triplets_with_scratch(
@@ -69,14 +69,14 @@ pub fn assemble_triplets(
     );
 }
 
-pub fn assemble(prob: &Problem, wk: &mut Workspace, c_j: f64) {
-    match &mut wk.linear_solver {
+pub fn assemble(prob: &Problem, state: &SystemState, linear_solver: &mut LinearSolver, c_j: f64) {
+    match linear_solver {
         LinearSolver::SparseLu(lu) => {
-            if lu.dp_scratch.len() < wk.p.len() {
-                lu.dp_scratch.resize(wk.p.len(), 0.0);
+            if lu.dp_scratch.len() < state.p.len() {
+                lu.dp_scratch.resize(state.p.len(), 0.0);
             }
             assemble_triplets_with_scratch(
-                prob.n, &wk.y, &wk.ydot, &wk.p, &prob.m, c_j,
+                prob.n, &state.y, &state.ydot, &state.p, &prob.m, c_j,
                 prob.fns.jvp_fn, prob.fns.vjp_fn,
                 &mut lu.triplets,
                 &prob.cpr,
@@ -90,12 +90,12 @@ pub fn assemble(prob: &Problem, wk: &mut Workspace, c_j: f64) {
         }
         LinearSolver::Gmres(gmres) => {
             let mut jvp_scratch = vec![0.0; prob.n];
-            let mut dp_scratch = vec![0.0; wk.p.len()];
+            let mut dp_scratch = vec![0.0; state.p.len()];
             let mut dy_scratch = vec![0.0; prob.n];
             let mut dydot_scratch = vec![0.0; prob.n];
             let mut lambda_scratch = vec![0.0; prob.n];
             assemble_triplets_with_scratch(
-                prob.n, &wk.y, &wk.ydot, &wk.p, &prob.m, c_j,
+                prob.n, &state.y, &state.ydot, &state.p, &prob.m, c_j,
                 prob.fns.jvp_fn, prob.fns.vjp_fn,
                 &mut gmres.triplets,
                 &prob.cpr,

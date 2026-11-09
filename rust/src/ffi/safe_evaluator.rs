@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_safe_evaluator_valid_execution() {
-        let (prob, _) = create_mock_fixture();
+        let (prob, ..) = create_mock_fixture();
         let evaluator = SafeEvaluator::new(prob.fns, MOCK_N, MOCK_N_PARAMS, MOCK_N_OBS);
 
         let y = [1.0, 1.0, 1.0, 1.0, 1.0, 6.0];
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_safe_evaluator_slice_mismatch_panics() {
-        let (prob, _) = create_mock_fixture();
+        let (prob, ..) = create_mock_fixture();
         let evaluator = SafeEvaluator::new(prob.fns, MOCK_N, MOCK_N_PARAMS, MOCK_N_OBS);
 
         let y_short = [1.0; 5]; // Mismatched: 5 vs 6

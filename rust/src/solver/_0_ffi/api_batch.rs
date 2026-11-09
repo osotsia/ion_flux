@@ -5,8 +5,12 @@ use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
-use crate::solver::shared::workspace::Workspace;
-use crate::solver::_2_stepper::bdf;
+use crate::stepper::state::{SystemState, StepScratchpad};
+use crate::stepper::history::BdfHistory;
+use crate::linear::solver::LinearSolver;
+use crate::solver::shared::diagnostics::Diagnostics;
+use crate::stepper::bdf;
+use crate::nonlinear::algebraic_roots;
 use crate::solver::_1_orchestrator::protocol::{ProtocolStep, run_sequence};
 use crate::solver::_1_orchestrator::bisection::TrigInfo;
 use crate::NativeSolverCrash;
@@ -34,19 +38,25 @@ pub fn solve_ida_native<'py>(
     let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
     let n = y0_py.len();
     let prob = Problem { n, bw: bandwidth, n_obs, id: id_py, constraints: vec![0.0; n], m: m_list, spatial_diag, max_steps, cpr, config: SolverConfig::default(), fns };
-    let mut wk = Workspace::new(n, bandwidth, y0_py, ydot0_py, p_list);
+
+    let mut state = SystemState::new(y0_py, ydot0_py, p_list);
+    let mut history = BdfHistory::new(n);
+    let mut scratch = StepScratchpad::new(n);
+    let mut linear_solver = LinearSolver::new(n, bandwidth);
+    let mut diag = Diagnostics::new(n);
     
-    crate::solver::_3_nonlinear::newton::calc_algebraic_roots(&prob, &mut wk).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     
     let mut out_traj = vec![0.0; t_eval.len() * n];
     let mut out_obs = vec![0.0; t_eval.len() * n_obs];
-    let mut history = if record_history { Some(vec![(t_eval[0], wk.y.clone(), wk.ydot.clone())]) } else { None };
+    let mut history_record = if record_history { Some(vec![(t_eval[0], state.y.clone(), state.ydot.clone())]) } else { None };
 
-    for i in 0..n { out_traj[i] = wk.y[i]; }
+    for i in 0..n { out_traj[i] = state.y[i]; }
     
     let mut step_obs = vec![0.0; n_obs];
     if let Some(obs_fn) = prob.fns.obs_fn {
-        unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+        unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
         for i in 0..n_obs { out_obs[i] = step_obs[i]; }
     }
     
@@ -54,21 +64,21 @@ pub fn solve_ida_native<'py>(
     for step in 1..t_eval.len() {
         let dt = t_eval[step] - t_eval[step - 1];
         
-        bdf::step(&prob, &mut wk, dt, history.as_mut()).map_err(|report| {
+        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, dt, history_record.as_mut()).map_err(|report| {
             NativeSolverCrash::new_err(crash_report_to_pydict(py, &report).unbind())
         })?;
         
-        for i in 0..n { out_traj[step * n + i] = wk.y[i]; }
+        for i in 0..n { out_traj[step * n + i] = state.y[i]; }
         
         if let Some(obs_fn) = prob.fns.obs_fn {
-            unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+            unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
             for i in 0..n_obs { out_obs[step * n_obs + i] = step_obs[i]; }
         }
         
         if show_progress && total_steps > 0 {
             let is_final = step == total_steps;
             let pct = (step as f64 / total_steps as f64).clamp(0.0, 1.0);
-            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", wk.y[v_idx as usize]) } else { String::new() };
+            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", state.y[v_idx as usize]) } else { String::new() };
             if is_final {
                 print!("\r▶ {:<4} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", "Natv", t_eval[step], v_str);
             } else {
@@ -83,7 +93,7 @@ pub fn solve_ida_native<'py>(
     let res_y = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n), out_traj).unwrap().to_pyarray(py);
     let res_obs = numpy::ndarray::Array2::from_shape_vec((t_eval.len(), n_obs), out_obs).unwrap().to_pyarray(py);
     
-    if let Some(hist) = history {
+    if let Some(hist) = history_record {
         let h_len = hist.len();
         let mut micro_t = vec![0.0; h_len];
         let mut micro_y = vec![0.0; h_len * n];
@@ -134,7 +144,12 @@ pub fn solve_batch_native<'py>(
         pool.install(|| {
             p_batch.par_iter().enumerate().map(|(b_idx, p)| {
                 let prob = prob_base.clone();
-                let mut wk = Workspace::new(prob.n, prob.bw, y0.clone(), ydot0.clone(), p.clone());
+                let mut state = SystemState::new(y0.clone(), ydot0.clone(), p.clone());
+                let mut history = BdfHistory::new(prob.n);
+                let mut scratch = StepScratchpad::new(prob.n);
+                let mut linear_solver = LinearSolver::new(prob.n, prob.bw);
+                let mut diag = Diagnostics::new(prob.n);
+
                 if let Some(f) = prob.fns.set_threads_fn { unsafe { f(1) }; }
                 
                 let step_list = if let Some(ref protos) = protocol_steps { protos.get(b_idx).cloned().unwrap_or_default() } else { Vec::new() };
@@ -153,24 +168,26 @@ pub fn solve_batch_native<'py>(
                             p_mode: s.4, p_i: s.5, p_v: s.6
                         });
                     }
-                    run_sequence(&prob, &mut wk, &mapped_steps, &mut out_t, &mut out_traj, &mut out_obs, show_progress, v_idx)?;
+                    run_sequence(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, &mapped_steps, &mut out_t, &mut out_traj, &mut out_obs, show_progress, v_idx)?;
                 } else {
                     out_t = t_eval.clone();
                     out_traj = vec![0.0; t_eval.len() * prob.n];
                     out_obs = vec![0.0; t_eval.len() * prob.n_obs];
-                    crate::solver::_3_nonlinear::newton::calc_algebraic_roots(&prob, &mut wk).map_err(|e| SolverError::Message(e))?;
-                    for i in 0..prob.n { out_traj[i] = wk.y[i]; }
+                    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag)
+                        .map_err(|e| SolverError::Message(e))?;
+                    for i in 0..prob.n { out_traj[i] = state.y[i]; }
                     if let Some(obs_fn) = prob.fns.obs_fn {
                         let mut step_obs = vec![0.0; prob.n_obs];
-                        unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                        unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
                         for i in 0..prob.n_obs { out_obs[i] = step_obs[i]; }
                     }
                     for step in 1..t_eval.len() {
-                        bdf::step(&prob, &mut wk, t_eval[step] - t_eval[step - 1], None).map_err(SolverError::Crash)?;
-                        for i in 0..prob.n { out_traj[step * prob.n + i] = wk.y[i]; }
+                        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, t_eval[step] - t_eval[step - 1], None)
+                            .map_err(SolverError::Crash)?;
+                        for i in 0..prob.n { out_traj[step * prob.n + i] = state.y[i]; }
                         if let Some(obs_fn) = prob.fns.obs_fn {
                             let mut step_obs = vec![0.0; prob.n_obs];
-                            unsafe { obs_fn(wk.y.as_ptr(), wk.ydot.as_ptr(), wk.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                            unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
                             for i in 0..prob.n_obs { out_obs[step * prob.n_obs + i] = step_obs[i]; }
                         }
                     }

@@ -61,9 +61,12 @@ impl Diagnostics {
             total_steps: 0, accepted_steps: 0, rejected_steps: 0, newton_iterations: 0,
             jacobian_evaluations: 0, numeric_factorizations: 0, symbolic_factorizations: 0,
             jacobian_assembly_time_us: 0, linear_solve_time_us: 0, residual_time_us: 0,
-            trace_t: Vec::new(), trace_dt: Vec::new(), trace_order: Vec::new(), trace_iters: Vec::new(), trace_err: Vec::new(),
+            trace_t: Vec::with_capacity(1000), trace_dt: Vec::with_capacity(1000),
+            trace_order: Vec::with_capacity(1000), trace_iters: Vec::with_capacity(1000),
+            trace_err: Vec::with_capacity(1000),
             last_res: vec![0.0; n], last_dy: vec![0.0; n], last_weights: vec![0.0; n], last_rho: 0.0,
-            jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0, recent_newton_norms: std::collections::VecDeque::new(),
+            jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0,
+            recent_newton_norms: std::collections::VecDeque::with_capacity(10),
         }
     }
 

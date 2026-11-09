@@ -1,6 +1,9 @@
 use crate::solver::_3_nonlinear::newton::{NewtonFailure, NewtonResult};
 
-pub fn evaluate(n: usize, y: &[f64], _ee: &[f64], phi_0: &[f64], constraints: &[f64], iter: usize) -> NewtonResult {
+pub use crate::nonlinear::constraints::*;
+
+#[allow(dead_code)]
+fn _unused_legacy_constraints() {
     let mut min_eta = 1.0;
     let mut violated = false;
 
