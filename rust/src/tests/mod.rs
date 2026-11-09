@@ -338,6 +338,7 @@ fn test_closed_enum_linear_solver_dispatch() {
 }
 
 // Note: test_bdf_step_zero_allocations is disabled pending pre-allocated faer factorization arenas.
+// Note: test_bdf_step_zero_allocations is disabled pending pre-allocated faer factorization arenas.
 // #[test]
 // fn test_bdf_step_zero_allocations() {
 //     let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
@@ -364,3 +365,129 @@ fn test_closed_enum_linear_solver_dispatch() {
 //         stats.alloc_count
 //     );
 // }
+
+#[test]
+fn test_protocol_hysteresis() {
+    let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+    let mut out_t = Vec::new();
+    let mut out_traj = Vec::new();
+    let mut out_obs = Vec::new();
+
+    let steps = vec![
+        crate::control::sequence::ProtocolStep {
+            s_type: 0, // CC mode
+            target_val: 0.1,
+            t_limit: 0.02,
+            trig: crate::control::bisection::TrigInfo {
+                has_trig: false,
+                idx: 0,
+                size: 1,
+                is_obs: false,
+                op: 0,
+                val: 0.0,
+            },
+            p_mode: 0,
+            p_i: 1,
+            p_v: 0,
+        },
+        crate::control::sequence::ProtocolStep {
+            s_type: 1, // CV mode
+            target_val: 1.0,
+            t_limit: 0.02,
+            trig: crate::control::bisection::TrigInfo {
+                has_trig: false,
+                idx: 0,
+                size: 1,
+                is_obs: false,
+                op: 0,
+                val: 0.0,
+            },
+            p_mode: 0,
+            p_i: 1,
+            p_v: 0,
+        },
+    ];
+
+    let res = crate::control::sequence::run_sequence(
+        &prob,
+        &mut state,
+        &mut history,
+        &mut scratch,
+        &mut linear_solver,
+        &mut diag,
+        &steps,
+        &mut out_t,
+        &mut out_traj,
+        &mut out_obs,
+        false,
+        -1,
+    );
+
+    assert!(res.is_ok(), "Protocol sequence failed: {:?}", res.err());
+    assert!(out_t.len() >= 2, "Expected multiple time points recorded");
+    assert!(state.t >= 0.039, "Time did not advance through both protocol steps: t={}", state.t);
+    for val in &state.y {
+        assert!(val.is_finite(), "Non-finite state value after sequence execution");
+    }
+}
+
+#[test]
+fn test_adjoint_residual_invariant() {
+    let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+
+    let n = prob.n;
+    let n_steps = 6;
+    let mut t_vec = vec![0.0];
+    let mut y_vec = state.y.clone();
+    let mut ydot_vec = state.ydot.clone();
+    let mut p_vec = state.p.clone();
+
+    for _step_idx in 1..n_steps {
+        let dt = 0.01;
+        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, dt, None)
+            .expect("Forward step failed");
+        t_vec.push(state.t);
+        y_vec.extend_from_slice(&state.y);
+        ydot_vec.extend_from_slice(&state.ydot);
+        p_vec.extend_from_slice(&state.p);
+    }
+
+    use numpy::ndarray::{Array1, Array2};
+    let t_arr = Array1::from_vec(t_vec);
+    let y_arr = Array2::from_shape_vec((n_steps, n), y_vec).unwrap();
+    let ydot_arr = Array2::from_shape_vec((n_steps, n), ydot_vec).unwrap();
+    let p_arr = Array2::from_shape_vec((n_steps, MOCK_N_PARAMS), p_vec).unwrap();
+
+    let mut dl_dy_vec = vec![0.0; n_steps * n];
+    dl_dy_vec[(n_steps - 1) * n] = 1.0;
+    let dl_dy_arr = Array2::from_shape_vec((n_steps, n), dl_dy_vec).unwrap();
+
+    let jvp_fn = prob.fns.jvp_fn.expect("jvp function pointer missing");
+    let vjp_fn = prob.fns.vjp_fn.expect("vjp function pointer missing");
+
+    let adj_params = crate::control::backward_pass::AdjointParams {
+        bandwidth: prob.bw,
+        id_slice: &prob.id,
+        m_slice: &prob.m,
+        cpr: &prob.cpr,
+        jvp_fn,
+        vjp_fn,
+        event_trigger_idx: -1,
+    };
+
+    let grads = crate::control::backward_pass::solve_adjoint_sensitivities(
+        &adj_params,
+        y_arr.view(),
+        ydot_arr.view(),
+        t_arr.view(),
+        p_arr.view(),
+        dl_dy_arr.view(),
+    );
+
+    assert!(grads.is_ok(), "Adjoint solve failed: {:?}", grads.err());
+    let g = grads.unwrap();
+    assert_eq!(g.len(), MOCK_N_PARAMS);
+    for (i, val) in g.iter().enumerate() {
+        assert!(val.is_finite(), "Gradient component {i} is non-finite: {val}");
+    }
+}

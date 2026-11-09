@@ -128,3 +128,20 @@ pub fn step(
     state.t = abs_t + t_local;
     Ok(())
 }
+
+pub fn advance_to(
+    prob: &Problem,
+    state: &mut SystemState,
+    history: &mut BdfHistory,
+    scratch: &mut StepScratchpad,
+    linear_solver: &mut LinearSolver,
+    diag: &mut Diagnostics,
+    target_t: f64,
+    history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+) -> Result<(), CrashReport> {
+    let dt = target_t - state.t;
+    if dt <= 1e-14 {
+        return Ok(());
+    }
+    step(prob, state, history, scratch, linear_solver, diag, dt, history_cache)
+}
