@@ -31,6 +31,7 @@ pub struct Diagnostics {
     pub newton_iterations: usize,
     pub jacobian_evaluations: usize,
     pub numeric_factorizations: usize,
+    pub symbolic_factorizations: usize,
     
     pub jacobian_assembly_time_us: u128,
     pub linear_solve_time_us: u128,
@@ -58,7 +59,7 @@ impl Diagnostics {
     pub fn new(n: usize) -> Self {
         Self {
             total_steps: 0, accepted_steps: 0, rejected_steps: 0, newton_iterations: 0,
-            jacobian_evaluations: 0, numeric_factorizations: 0,
+            jacobian_evaluations: 0, numeric_factorizations: 0, symbolic_factorizations: 0,
             jacobian_assembly_time_us: 0, linear_solve_time_us: 0, residual_time_us: 0,
             trace_t: Vec::new(), trace_dt: Vec::new(), trace_order: Vec::new(), trace_iters: Vec::new(), trace_err: Vec::new(),
             last_res: vec![0.0; n], last_dy: vec![0.0; n], last_weights: vec![0.0; n], last_rho: 0.0,

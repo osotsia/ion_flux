@@ -1,4 +1,5 @@
 pub mod ffi;
+pub mod linear;
 pub mod vendor;
 mod solver;
 

@@ -167,9 +167,9 @@ fn test_mock_cpr_jacobian_assembly_exactness() {
             }
         }
     }
-    assert_eq!(wk.lu_solver.triplets.len(), expected_nonzeros);
+    assert_eq!(wk.linear_solver.triplets().len(), expected_nonzeros);
 
-    for &(r, c, val) in &wk.lu_solver.triplets {
+    for &(r, c, val) in wk.linear_solver.triplets() {
         let expected = j_true[r][c];
         assert!(
             (val - expected).abs() < 1e-14,
@@ -186,11 +186,11 @@ fn test_mock_sparse_lu_solve_exactness() {
     assemble(&prob, &mut wk, c_j);
 
     let mut diag = Diagnostics::new(MOCK_N);
-    wk.lu_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
+    wk.linear_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
 
     let b_orig = vec![1.0, 2.0, -1.0, 3.0, 0.5, 4.0];
     let mut b = b_orig.clone();
-    wk.lu_solver.solve(&mut b, &mut diag).expect("Linear solve failed");
+    wk.linear_solver.solve(&mut b, &mut diag).expect("Linear solve failed");
 
     let j_true = mock_analytical_jacobian(wk.p[0], c_j);
     let mut j_times_x = vec![0.0; MOCK_N];
@@ -250,5 +250,94 @@ fn test_sundials_context_isolation() {
         let mut ctx_ptr = ctx;
         let free_res = crate::vendor::sundials::sys::SUNContext_Free(&mut ctx_ptr);
         assert_eq!(free_res, 0, "SUNContext_Free failed");
+    }
+}
+
+#[test]
+fn test_sparsity_stability_across_assemblies() {
+    let (prob, mut wk) = create_mock_fixture();
+    let mut triplet_counts = Vec::new();
+
+    for i in 0..100 {
+        // Perturb state near float magnitude thresholds (1e-18 to 1e-15)
+        wk.y[0] = 1.0 + (i as f64) * 1e-17;
+        let c_j = 1.0 + (i as f64) * 0.01;
+        assemble(&prob, &mut wk, c_j);
+        triplet_counts.push(wk.linear_solver.triplets().len());
+    }
+
+    let first_count = triplet_counts[0];
+    assert_eq!(first_count, 20); // 14 sparse + 6 dense entries
+    for (step, &count) in triplet_counts.iter().enumerate() {
+        assert_eq!(
+            count, first_count,
+            "Sparsity pattern mutated at step {step}: count={count}, expected={first_count}"
+        );
+    }
+}
+
+#[test]
+fn test_symbolic_lu_reuse_single_execution() {
+    let (prob, mut wk) = create_mock_fixture();
+    let mut diag = Diagnostics::new(MOCK_N);
+
+    for i in 0..10 {
+        wk.y[0] = 1.0 + (i as f64) * 0.05;
+        let c_j = 1.0 + (i as f64) * 0.1;
+        assemble(&prob, &mut wk, c_j);
+        wk.linear_solver.factorize_from_triplets(&mut diag).expect("Factorization failed");
+    }
+
+    assert_eq!(diag.numeric_factorizations, 10, "Expected 10 numeric factorizations");
+    assert_eq!(
+        diag.symbolic_factorizations, 1,
+        "Symbolic factorization must run exactly once on step 1 and be cached thereafter!"
+    );
+}
+
+#[test]
+fn test_closed_enum_linear_solver_dispatch() {
+    use crate::linear::solver::LinearSolver;
+
+    let (prob, mut wk) = create_mock_fixture();
+    let c_j = 1.0;
+    assemble(&prob, &mut wk, c_j);
+
+    assert!(!wk.linear_solver.is_gmres());
+    let mut diag = Diagnostics::new(MOCK_N);
+    wk.linear_solver.factorize_from_triplets(&mut diag).expect("SparseLU factorization failed");
+
+    let b_orig = vec![1.0, 2.0, -1.0, 3.0, 0.5, 4.0];
+    let mut b_lu = b_orig.clone();
+    wk.linear_solver.solve(&mut b_lu, &mut diag).expect("SparseLU solve failed");
+
+    // Construct GMRES variant
+    let mut gmres_solver = LinearSolver::new(MOCK_N, -1);
+    assert!(gmres_solver.is_gmres());
+
+    gmres_solver.set_gmres_context(
+        wk.y.as_ptr(),
+        wk.ydot.as_ptr(),
+        wk.p.as_ptr(),
+        prob.m.as_ptr(),
+        c_j,
+        prob.id.as_ptr(),
+        prob.spatial_diag.as_ptr(),
+        prob.fns.jvp_fn,
+    );
+
+    let mut b_gmres = b_orig.clone();
+    gmres_solver.solve(&mut b_gmres, &mut diag).expect("GMRES solve failed");
+
+    let j_true = mock_analytical_jacobian(wk.p[0], c_j);
+    for r in 0..MOCK_N {
+        let mut row_sum_lu = 0.0;
+        let mut row_sum_gmres = 0.0;
+        for c in 0..MOCK_N {
+            row_sum_lu += j_true[r][c] * b_lu[c];
+            row_sum_gmres += j_true[r][c] * b_gmres[c];
+        }
+        assert!((row_sum_lu - b_orig[r]).abs() < 1e-10);
+        assert!((row_sum_gmres - b_orig[r]).abs() < 1e-4);
     }
 }

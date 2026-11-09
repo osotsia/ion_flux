@@ -24,7 +24,7 @@ pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
     let c_j = wk.history.c_j;
     let mut cj_ratio = if wk.history.c_j_old == 0.0 { 1.0 } else { c_j / wk.history.c_j_old };
     if !prob.config.is_realtime && (cj_ratio < 0.6 || cj_ratio > 1.6666666666666667) { 
-        wk.lu_solver.mark_stale(); 
+        wk.linear_solver.mark_stale(); 
     }
 
     wk.ee.fill(0.0);
@@ -48,34 +48,41 @@ pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
 
         for i in 0..prob.n { wk.dy[i] = -wk.res[i]; }
 
-        if prob.bw == -1 {
-            let jvp = prob.fns.jvp_fn.expect("evaluate_jvp missing.");
-            let y_ptr = wk.y.as_ptr(); let ydot_ptr = wk.ydot.as_ptr(); let p_ptr = wk.p.as_ptr(); let m_ptr = prob.m.as_ptr();
-            let jvp_closure = |v: &[f64], out: &mut [f64]| { unsafe { jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v.as_ptr(), out.as_mut_ptr()) }; };
-            let precond = |v: &[f64], out: &mut [f64]| { for i in 0..prob.n { out[i] = v[i] / (c_j * prob.id[i] + prob.spatial_diag[i] + 1.0); } };
-            if let Err(e) = gmres::solve_gmres(prob.n, &mut wk.dy, jvp_closure, precond) { return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e)); }
-            cj_ratio = 1.0;
-        } else {
-            if wk.lu_solver.is_stale {
-                if prob.config.is_realtime && wk.diag.accepted_steps > 0 {
-                    wk.lu_solver.is_stale = false;
-                } else {
-                    let start = Instant::now();
-                    jacobian::assemble(prob, wk, c_j);
-                    wk.diag.jacobian_assembly_time_us += start.elapsed().as_micros();
-                    wk.diag.jacobian_evaluations += 1;
-                    
-                    if let Err(e) = wk.lu_solver.factorize_from_triplets(&mut wk.diag) { return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e)); }
-                    
-                    wk.history.c_j_old = c_j; 
-                    cj_ratio = 1.0; 
-                    wk.lu_solver.is_stale = false;
+        wk.linear_solver.set_gmres_context(
+            wk.y.as_ptr(),
+            wk.ydot.as_ptr(),
+            wk.p.as_ptr(),
+            prob.m.as_ptr(),
+            c_j,
+            prob.id.as_ptr(),
+            prob.spatial_diag.as_ptr(),
+            prob.fns.jvp_fn,
+        );
+
+        if wk.linear_solver.is_stale() {
+            if prob.config.is_realtime && wk.diag.accepted_steps > 0 {
+                wk.linear_solver.set_stale(false);
+            } else {
+                let start = Instant::now();
+                jacobian::assemble(prob, wk, c_j);
+                wk.diag.jacobian_assembly_time_us += start.elapsed().as_micros();
+                wk.diag.jacobian_evaluations += 1;
+                
+                if let Err(e) = wk.linear_solver.factorize_from_triplets(&mut wk.diag) {
+                    return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e));
                 }
+                
+                wk.history.c_j_old = c_j; 
+                cj_ratio = 1.0; 
+                wk.linear_solver.set_stale(false);
             }
-            if let Err(e) = wk.lu_solver.solve(&mut wk.dy, &mut wk.diag) { return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e)); }
         }
 
-        if prob.bw != -1 && cj_ratio != 1.0 {
+        if let Err(e) = wk.linear_solver.solve(&mut wk.dy, &mut wk.diag) {
+            return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e));
+        }
+
+        if !wk.linear_solver.is_gmres() && cj_ratio != 1.0 {
             let scale = 2.0 / (1.0 + cj_ratio);
             for i in 0..prob.n { wk.dy[i] *= scale; }
         }
@@ -108,7 +115,7 @@ pub fn solve(prob: &Problem, wk: &mut Workspace) -> NewtonResult {
             wk.diag.last_rho = rate;
             
             if !prob.config.is_realtime && rate > prob.config.max_rho && !is_clamped {
-                if !wk.lu_solver.is_stale { wk.lu_solver.mark_stale(); continue; }
+                if !wk.linear_solver.is_stale() { wk.linear_solver.mark_stale(); continue; }
                 return NewtonResult::Diverged(NewtonFailure::ContractionThrashing(rate));
             }
             let ss = rate / (1.0 - rate);
@@ -128,8 +135,8 @@ pub fn calc_algebraic_roots(prob: &Problem, wk: &mut Workspace) -> Result<(), St
 
         jacobian::assemble(prob, wk, 0.0);
 
-        if prob.bw == -1 {
-            for &(r, c, val) in &wk.lu_solver.triplets {
+        if wk.linear_solver.is_gmres() {
+            for &(r, c, val) in wk.linear_solver.triplets() {
                 if r == c && prob.id[r] < 0.5 && val.abs() > 1e-12 {
                     let mut step = -wk.res[r] / val;
                     if prob.max_steps[r] > 0.0 && step.abs() > prob.max_steps[r] { step = step.signum() * prob.max_steps[r]; }
@@ -138,11 +145,11 @@ pub fn calc_algebraic_roots(prob: &Problem, wk: &mut Workspace) -> Result<(), St
             }
         } else {
             for i in 0..prob.n {
-                if prob.id[i] > 0.5 { wk.res[i] = 0.0; wk.lu_solver.triplets.push((i, i, 1.0)); }
+                if prob.id[i] > 0.5 { wk.res[i] = 0.0; wk.linear_solver.triplets_mut().push((i, i, 1.0)); }
             }
             for i in 0..prob.n { wk.dy[i] = -wk.res[i]; }
-            if wk.lu_solver.factorize_from_triplets(&mut wk.diag).is_err() { break; }
-            if wk.lu_solver.solve(&mut wk.dy, &mut wk.diag).is_err() { break; }
+            if wk.linear_solver.factorize_from_triplets(&mut wk.diag).is_err() { break; }
+            if wk.linear_solver.solve(&mut wk.dy, &mut wk.diag).is_err() { break; }
 
             let mut max_step = 0.0;
             for i in 0..prob.n {
@@ -157,7 +164,7 @@ pub fn calc_algebraic_roots(prob: &Problem, wk: &mut Workspace) -> Result<(), St
         }
     }
     wk.history.restore_state();
-    wk.lu_solver.mark_stale();
+    wk.linear_solver.mark_stale();
     wk.diag.accepted_steps = 0; 
     Ok(())
 }

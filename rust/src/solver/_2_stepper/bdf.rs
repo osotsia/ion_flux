@@ -30,7 +30,7 @@ pub fn step(
             wk.history.max_order = 1;
         }
         wk.history.k_used = 0;
-        wk.lu_solver.mark_stale();
+        wk.linear_solver.mark_stale();
     }
 
     while target_dt - t_local > 1e-10 * target_dt.abs() {
@@ -59,7 +59,7 @@ pub fn step(
 
                 if !prob.config.is_realtime && ck * enorm_k > 1.0 {
                     error_fails += 1; wk.diag.rejected_steps += 1;
-                    wk.history.restore(); wk.lu_solver.mark_stale();
+                    wk.history.restore(); wk.linear_solver.mark_stale();
                     
                     if error_fails == 1 {
                         let mut knew = wk.history.order;
@@ -113,7 +113,7 @@ pub fn step(
                     t_local += wk.history.h;
                     break;
                 }
-                wk.diag.rejected_steps += 1; wk.history.restore(); wk.history.h *= 0.25; wk.lu_solver.mark_stale();
+                wk.diag.rejected_steps += 1; wk.history.restore(); wk.history.h *= 0.25; wk.linear_solver.mark_stale();
                 if wk.history.h <= prob.config.min_dt {
                     let reason = format!("Nonlinear Divergence: {:?} (Step collapsed below min_dt). t={}", failure, abs_t + t_local);
                     return Err(wk.diag.build_crash_report(&wk.y, &wk.ydot, &prob.id, reason));

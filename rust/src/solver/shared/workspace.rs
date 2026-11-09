@@ -1,5 +1,5 @@
 use crate::solver::_2_stepper::history::BdfHistory;
-use crate::solver::_4_linear::sparse_lu::NativeSparseLuSolver;
+use crate::linear::solver::LinearSolver;
 use crate::solver::shared::diagnostics::Diagnostics;
 
 pub struct Workspace {
@@ -17,7 +17,7 @@ pub struct Workspace {
     pub weights: Vec<f64>,
 
     pub history: BdfHistory,
-    pub lu_solver: NativeSparseLuSolver,
+    pub linear_solver: LinearSolver,
     pub diag: Diagnostics,
 }
 
@@ -28,7 +28,7 @@ impl Workspace {
             y_pred: vec![0.0; n], ydot_pred: vec![0.0; n], res: vec![0.0; n],
             dy: vec![0.0; n], ee: vec![0.0; n], weights: vec![0.0; n],
             history: BdfHistory::new(n),
-            lu_solver: NativeSparseLuSolver::new(n, bw),
+            linear_solver: LinearSolver::new(n, bw),
             diag: Diagnostics::new(n),
         }
     }
@@ -39,7 +39,7 @@ impl Workspace {
 
     pub fn restore_state(&mut self, t: f64, y: Vec<f64>, ydot: Vec<f64>) {
         self.t = t; self.y = y; self.ydot = ydot;
-        self.lu_solver.mark_stale();
+        self.linear_solver.mark_stale();
         self.diag.accepted_steps = 0; 
         self.history.restore_state();
     }
