@@ -4,7 +4,7 @@
     *   **Frontend (The DSL - `compiler/_1_frontend`):** Pure Python captures mathematical intent via operator overloading into an immutable Abstract Syntax Tree (AST). It performs no calculus, discretization, or execution.
     *   **Middle-end (Topology & Semantic Pass - `compiler/_2_middle_end`):** Validates manifold closure and topological continuity. Resolves boundary conditions and regional sub-meshes, lowering the AST into an N-Dimensional **Math IR**.
     *   **Backend (Discretization, Optimization, Codegen - `compiler/_3_backend` & `_4_codegen`):** Discretizes Math IR into a 1D loop-level **Compute IR**. Flattens multi-scale domains into contiguous C-array strides, applies Finite Volume Method (FVM) stencils, auto-stitches piecewise interfaces via harmonic mean flux balancing, and applies Arbitrary Lagrangian-Eulerian (ALE) grid kinematics. Analyzes Jacobian column intersections via Curtis-Powell-Reid (CPR) graph coloring, stringifies Compute IR to C++, and invokes Clang with the Enzyme LLVM plugin to emit a native `.so` binary with compiled JVP and VJP routines.
-    *   **Runtime (Execution & Native Solver - `runtime/` & `rust/`):** Python handles high-level protocol state machines, telemetry, and FFI packing. Rust takes over numerical execution, architected as a chronological "Nested Doll" (`_0_ffi` $\rightarrow$ `_4_linear`), strictly separating immutable topological definitions (`Problem`) from pre-allocated mutable execution memory (`Workspace`). This eliminates memory fragmentation and avoids God objects during stiff implicit integration.
+    *   **Runtime (Execution & Native Solver - `runtime/` & `rust/`):** Python handles high-level protocol state machines, telemetry, and FFI packing. Rust takes over numerical execution, architected as a **Data-Oriented Modular Design** (`api/`, `ffi/`, `stepper/`, `nonlinear/`, `linear/`, `control/`, `diagnostics/`, `vendor/`), strictly segregating persistent physical states (`SystemState`), polynomial history (`BdfHistory`), and transient iteration scratchpads (`StepScratchpad`). This eliminates state cloning, ensures static sparsity retention, and avoids god-objects during stiff implicit integration.
 
 ---
 
@@ -26,11 +26,11 @@
 [Codegen + Clang/LLVM]─(Compile-Time AD)───────> [.so Binary]       # Stringifies Compute IR to C++, invokes Clang with
                                                                     Enzyme to emit exact analytical Jacobians & VJPs.
                                                       │
-[Rust FFI Boundary] ───(Struct Unpacking)──────> [Problem + Wkspc]  # Maps multidimensional arrays to flat C-ABI pointers.
-                                                                    Pre-allocates mutable Workspace arena.
+[Rust FFI Boundary] ───(Struct Unpacking)──────> [Problem + State]  # Maps multidimensional arrays to flat C-ABI pointers.
+                                                                    Pre-allocates SystemState, History, & Scratchpad.
                                                       │
-[Rust Native Solver] ──(Orchestrator -> Linear)> [Time Stepping]    # Integrates stiff DAEs by passing Workspace down call
-                                                                    stack without hot-loop allocations.
+[Rust Native Solver] ──(Control -> Stepper)────> [Time Stepping]    # Integrates stiff DAEs by passing disjoint state and
+                                                                    scratchpad references without state cloning.
                                                       │
                                                       ▼
                                        [Hardware: CPU Execution]    # Orchestrates Rayon CPU batching or OpenMP threads.
@@ -40,7 +40,7 @@
 
 ### **Project Structure: `ion_flux/`**
 
-The directory structure reflects a strict chronological execution flow. The numbered prefixes (`_1_` to `_4_` in the compiler, `_0_` to `_4_` in the solver) explicitly dictate the data dependency and call stack depth. A module is strictly prohibited from importing logic from a deeper chronological module.
+The compiler directory structure reflects a strict chronological lowering pipeline (`_1_` to `_4_`). The native Rust solver is organized as a **Data-Oriented Modular Architecture** partitioned by functional domain and memory lifecycle (`api/`, `ffi/`, `stepper/`, `nonlinear/`, `linear/`, `control/`, `diagnostics/`, `vendor/`), eliminating circular dependencies while ensuring deterministic memory access patterns.
 
 ```text
 ion_flux/
@@ -108,43 +108,58 @@ ion_flux/
 │           └── protocols/
 │               └── profiles.py     # Declarative cycler protocols (CC, CV, Rest, Sequence) and triggers.
 │
-├── rust/                           # --- NATIVE BACKEND (Nested Doll Solver) ---
+├── rust/                           # --- NATIVE BACKEND (Data-Oriented Modular Solver) ---
 │   ├── Cargo.toml                  
-│   ├── build.rs                    # Dynamically links SUNDIALS for the C-ABI verification oracle.
+│   ├── build.rs                    # Links SUNDIALS archives and configures Mach-O dynamic lookup.
 │   └── src/
-│       ├── lib.rs                  # PyO3 module bindings and NativeSolverCrash exception definition.
-│       └── solver/                 
-│           ├── _0_ffi/             # Python C-ABI boundary, Workspace allocation, and thread spawning.
-│           │   ├── api_session.rs  # SolverHandle exposing stateful step(), get_state(), and checkpoint().
-│           │   ├── api_batch.rs    # Rayon-distributed task-parallel batching bypassing the GIL.
-│           │   ├── api_adjoint.rs  # Reverse-mode continuous discrete adjoint integration.
-│           │   └── mod.rs          # Translates Rust CrashReports into structured Python dictionaries.
-│           │
-│           ├── _1_orchestrator/    # Control flow, absolute time advancement, and protocol state machines.
-│           │   ├── protocol.rs     # Hot-swaps CC/CV/Rest terminal constraints without rebuilding factorizations.
-│           │   └── bisection.rs    # Dense bisection root-finding for discontinuous event triggers.
-│           │
-│           ├── _2_stepper/         # Variable-Step Variable-Order (VSVO) time integration and error control.
-│           │   ├── bdf.rs          # BDF integration loop (orders 1-5), step rejection, and step-size adaptation.
-│           │   └── history.rs      # Nordsieck history arrays, polynomial predictors, and state checkpoints.
-│           │
-│           ├── _3_nonlinear/       # Non-linear algebraic root-finding and state-clamping constraints.
-│           │   ├── newton.rs       # Modified Newton-Raphson solver with contraction-rate thrashing detection.
-│           │   └── constraints.rs  # WRMS norms and physical state clamping (e.g., non-negative concentration).
-│           │
-│           ├── _4_linear/          # Linear system factorizations and Enzyme Jacobian evaluations.
-│           │   ├── jacobian.rs     # Executes JVP/VJP function pointers to assemble the Sparse Jacobian.
-│           │   ├── sparse_lu.rs    # Faer Sparse LU symbolic factorization, numeric factorization, and substitution.
-│           │   └── gmres.rs        # Matrix-free restarted GMRES solver for 3D unstructured CSR meshes.
-│           │
-│           ├── shared/             # Unidirectional state separation eliminating God Objects.
-│           │   ├── problem.rs      # IMMUTABLE: Topology definitions, CPR data, and solver tolerances.
-│           │   ├── workspace.rs    # MUTABLE: Pre-allocated hot-loop execution arena (y, ydot, res, dy, ee).
-│           │   ├── callbacks.rs    # Raw C-ABI function pointer signatures.
-│           │   └── diagnostics.rs  # Performance timers, NaN tracking, and structured CrashReport builders.
-│           │
-│           └── sundials/           # External C-ABI reference oracle.
-│               └── wrapper.rs      # Embedded LLNL SUNDIALS (IDA) solver wrapper for numerical cross-checks.
+│       ├── lib.rs                  # PyO3 module definition and Python C-extension exports.
+│       ├── api/                    # --- PYTHON/RUST FFI BOUNDARY ---
+│       │   ├── mod.rs              # PyO3 exception mapping and error conversion utilities.
+│       │   ├── batch_dispatcher.rs # Rayon thread-pool batch solver bypassing Python GIL.
+│       │   ├── session_handle.rs   # SolverHandle exposing stateful step(), get_state(), and checkpoint().
+│       │   └── adjoint_dispatcher.rs # Reverse-mode continuous discrete adjoint entrypoint.
+│       │
+│       ├── ffi/                    # --- C-ABI ENCAPSULATION LAYER ---
+│       │   ├── mod.rs
+│       │   ├── callbacks.rs        # Native function pointer signatures (JVP, VJP, Residual).
+│       │   └── safe_evaluator.rs   # Bounds-checked slice wrapper over compiled C++ shared libraries.
+│       │
+│       ├── stepper/                # --- TIME-DOMAIN INTEGRATION & MEMORY ---
+│       │   ├── mod.rs
+│       │   ├── problem.rs          # Immutable system problem, CPR data, and solver tolerances.
+│       │   ├── state.rs            # Segregated memory layouts: SystemState and StepScratchpad.
+│       │   ├── history.rs          # Nordsieck history arrays and polynomial predictors (BdfHistory).
+│       │   └── bdf.rs              # Variable-Step Variable-Order (VSVO) BDF integration loop.
+│       │
+│       ├── nonlinear/              # --- NON-LINEAR ROOT-FINDING ---
+│       │   ├── mod.rs
+│       │   ├── newton.rs           # Modified Newton-Raphson solver with contraction-rate monitoring.
+│       │   ├── constraints.rs      # WRMS norms and physical state clamping (non-negative concentrations).
+│       │   └── algebraic_roots.rs  # Pre-step DAE algebraic manifold root-finding.
+│       │
+│       ├── linear/                 # --- LINEAR ALGEBRA & JACOBIAN ASSEMBLY ---
+│       │   ├── mod.rs
+│       │   ├── solver.rs           # Closed LinearSolver enum dispatch (SparseLu vs. Gmres).
+│       │   ├── sparse_lu.rs        # Faer Sparse LU solver with cached SymbolicLu reuse.
+│       │   ├── gmres.rs            # Preconditioned matrix-free restarted GMRES for 3D CSR meshes.
+│       │   └── jacobian.rs         # CPR color-sweep Jacobian assembly into pre-allocated scratch.
+│       │
+│       ├── control/                # --- HIGH-LEVEL CONTROL FLOW & SENSITIVITIES ---
+│       │   ├── mod.rs
+│       │   ├── sequence.rs         # Declarative multi-stage protocol runner (CC, CV, Rest).
+│       │   ├── bisection.rs        # Dense bisection root-finding for discontinuous event triggers.
+│       │   └── backward_pass.rs    # Reverse-mode discrete adjoint loop with factorization caching.
+│       │
+│       ├── diagnostics/            # --- TELEMETRY & CRASH REPORTING ---
+│       │   ├── mod.rs
+│       │   ├── crash_report.rs     # Structured CrashReport data structures (Offender, condition numbers).
+│       │   └── telemetry.rs        # Non-allocating diagnostics tracking and performance timers.
+│       │
+│       └── vendor/                 # --- EXTERNAL ORACLES ---
+│           └── sundials/
+│               ├── mod.rs
+│               ├── sys.rs          # Dynamic linking isolation and MPI workarounds.
+│               └── wrapper.rs      # Embedded LLNL SUNDIALS (IDA) verification oracle.
 │
 ├── tests/                          # --- COMPREHENSIVE ORACLE TEST SUITE ---
 │   ├── conftest.py                 

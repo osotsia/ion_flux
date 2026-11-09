@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 use crate::ffi::callbacks::{NativeJvpFn, NativeVjpFn};
-use crate::solver::shared::problem::CprData;
+use crate::stepper::problem::CprData;
 use crate::control::backward_pass::{AdjointParams, solve_adjoint_sensitivities};
 
 #[pyfunction]

@@ -4,17 +4,11 @@ use rayon::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
-use crate::stepper::state::{SystemState, StepScratchpad};
-use crate::stepper::history::BdfHistory;
-use crate::linear::solver::LinearSolver;
-use crate::solver::shared::diagnostics::Diagnostics;
-use crate::stepper::bdf;
-use crate::nonlinear::algebraic_roots;
-use crate::solver::_1_orchestrator::protocol::{ProtocolStep, run_sequence};
-use crate::solver::_1_orchestrator::bisection::TrigInfo;
-use crate::NativeSolverCrash;
-use crate::solver::_0_ffi::{SolverError, crash_report_to_pydict};
+use crate::stepper::problem::{Problem, Callbacks, CprData, SolverConfig};
+use crate::stepper::state::SolverInstance;
+use crate::control::sequence::{ProtocolStep, run_sequence};
+use crate::control::bisection::TrigInfo;
+use crate::api::{NativeSolverCrash, SolverError, crash_report_to_pydict};
 
 #[pyfunction]
 #[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, bandwidth, spatial_diag, max_steps, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, record_history=false, debug=false, show_progress=true, v_idx=-1))]
@@ -39,24 +33,20 @@ pub fn solve_ida_native<'py>(
     let n = y0_py.len();
     let prob = Problem { n, bw: bandwidth, n_obs, id: id_py, constraints: vec![0.0; n], m: m_list, spatial_diag, max_steps, cpr, config: SolverConfig::default(), fns };
 
-    let mut state = SystemState::new(y0_py, ydot0_py, p_list);
-    let mut history = BdfHistory::new(n);
-    let mut scratch = StepScratchpad::new(n);
-    let mut linear_solver = LinearSolver::new(n, bandwidth);
-    let mut diag = Diagnostics::new(n);
+    let mut instance = SolverInstance::new(n, bandwidth, y0_py, ydot0_py, p_list);
     
-    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag)
+    instance.calc_algebraic_roots(&prob)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     
     let mut out_traj = vec![0.0; t_eval.len() * n];
     let mut out_obs = vec![0.0; t_eval.len() * n_obs];
-    let mut history_record = if record_history { Some(vec![(t_eval[0], state.y.clone(), state.ydot.clone())]) } else { None };
+    let mut history_record = if record_history { Some(vec![(t_eval[0], instance.state.y.clone(), instance.state.ydot.clone())]) } else { None };
 
-    for i in 0..n { out_traj[i] = state.y[i]; }
+    for i in 0..n { out_traj[i] = instance.state.y[i]; }
     
     let mut step_obs = vec![0.0; n_obs];
     if let Some(obs_fn) = prob.fns.obs_fn {
-        unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+        unsafe { obs_fn(instance.state.y.as_ptr(), instance.state.ydot.as_ptr(), instance.state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
         for i in 0..n_obs { out_obs[i] = step_obs[i]; }
     }
     
@@ -64,21 +54,21 @@ pub fn solve_ida_native<'py>(
     for step in 1..t_eval.len() {
         let dt = t_eval[step] - t_eval[step - 1];
         
-        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, dt, history_record.as_mut()).map_err(|report| {
+        instance.step(&prob, dt, history_record.as_mut()).map_err(|report| {
             NativeSolverCrash::new_err(crash_report_to_pydict(py, &report).unbind())
         })?;
         
-        for i in 0..n { out_traj[step * n + i] = state.y[i]; }
+        for i in 0..n { out_traj[step * n + i] = instance.state.y[i]; }
         
         if let Some(obs_fn) = prob.fns.obs_fn {
-            unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+            unsafe { obs_fn(instance.state.y.as_ptr(), instance.state.ydot.as_ptr(), instance.state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
             for i in 0..n_obs { out_obs[step * n_obs + i] = step_obs[i]; }
         }
         
         if show_progress && total_steps > 0 {
             let is_final = step == total_steps;
             let pct = (step as f64 / total_steps as f64).clamp(0.0, 1.0);
-            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", state.y[v_idx as usize]) } else { String::new() };
+            let v_str = if v_idx >= 0 { format!(" | V: {:.3}V", instance.state.y[v_idx as usize]) } else { String::new() };
             if is_final {
                 print!("\r▶ {:<4} [██████████████████████████████] 100.0% | t: {:.1}s{}   \n", "Natv", t_eval[step], v_str);
             } else {
@@ -125,9 +115,8 @@ pub fn solve_batch_native<'py>(
 ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)>> {
     let _ = debug;
     
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().unwrap();
-    let completed = AtomicUsize::new(0);
     let total = p_batch.len();
+    let completed = AtomicUsize::new(0);
     
     let lib = unsafe { libloading::Library::new(&lib_path).unwrap() };
     let fns = Callbacks {
@@ -141,74 +130,81 @@ pub fn solve_batch_native<'py>(
     let prob_base = Problem { n: y0.len(), bw: bandwidth, n_obs, id, constraints: vec![0.0; y0.len()], m: m_list, spatial_diag, max_steps, cpr, config: SolverConfig::default(), fns };
 
     let results: Result<Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, SolverError> = py.detach(|| {
-        pool.install(|| {
-            p_batch.par_iter().enumerate().map(|(b_idx, p)| {
-                let prob = prob_base.clone();
-                let mut state = SystemState::new(y0.clone(), ydot0.clone(), p.clone());
-                let mut history = BdfHistory::new(prob.n);
-                let mut scratch = StepScratchpad::new(prob.n);
-                let mut linear_solver = LinearSolver::new(prob.n, prob.bw);
-                let mut diag = Diagnostics::new(prob.n);
+        let execute_model = |b_idx: usize, p: &Vec<f64>| -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), SolverError> {
+            let prob = prob_base.clone();
+            let mut instance = SolverInstance::new(prob.n, prob.bw, y0.clone(), ydot0.clone(), p.clone());
 
+            if total > 1 {
                 if let Some(f) = prob.fns.set_threads_fn { unsafe { f(1) }; }
-                
-                let step_list = if let Some(ref protos) = protocol_steps { protos.get(b_idx).cloned().unwrap_or_default() } else { Vec::new() };
-                let has_protocol = !step_list.is_empty();
-                
-                let mut out_t = Vec::new();
-                let mut out_traj = Vec::new();
-                let mut out_obs = Vec::new();
-                
-                if has_protocol {
-                    let mut mapped_steps = Vec::new();
-                    for s in step_list {
-                        mapped_steps.push(ProtocolStep {
-                            s_type: s.0, target_val: s.1, t_limit: s.2,
-                            trig: TrigInfo { has_trig: s.3.0, idx: s.3.1, size: s.3.2, is_obs: s.3.3, op: s.3.4, val: s.3.5 },
-                            p_mode: s.4, p_i: s.5, p_v: s.6
-                        });
-                    }
-                    run_sequence(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, &mapped_steps, &mut out_t, &mut out_traj, &mut out_obs, show_progress, v_idx)?;
-                } else {
-                    out_t = t_eval.clone();
-                    out_traj = vec![0.0; t_eval.len() * prob.n];
-                    out_obs = vec![0.0; t_eval.len() * prob.n_obs];
-                    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag)
-                        .map_err(|e| SolverError::Message(e))?;
-                    for i in 0..prob.n { out_traj[i] = state.y[i]; }
+            }
+            
+            let step_list = if let Some(ref protos) = protocol_steps { protos.get(b_idx).cloned().unwrap_or_default() } else { Vec::new() };
+            let has_protocol = !step_list.is_empty();
+            
+            let mut out_t = Vec::new();
+            let mut out_traj = Vec::new();
+            let mut out_obs = Vec::new();
+            
+            if has_protocol {
+                let mut mapped_steps = Vec::new();
+                for s in step_list {
+                    mapped_steps.push(ProtocolStep {
+                        s_type: s.0, target_val: s.1, t_limit: s.2,
+                        trig: TrigInfo { has_trig: s.3.0, idx: s.3.1, size: s.3.2, is_obs: s.3.3, op: s.3.4, val: s.3.5 },
+                        p_mode: s.4, p_i: s.5, p_v: s.6
+                    });
+                }
+                run_sequence(&prob, &mut instance, &mapped_steps, &mut out_t, &mut out_traj, &mut out_obs, show_progress, v_idx)?;
+            } else {
+                out_t = t_eval.clone();
+                out_traj = vec![0.0; t_eval.len() * prob.n];
+                out_obs = vec![0.0; t_eval.len() * prob.n_obs];
+                instance.calc_algebraic_roots(&prob)
+                    .map_err(SolverError::Message)?;
+                for i in 0..prob.n { out_traj[i] = instance.state.y[i]; }
+                if let Some(obs_fn) = prob.fns.obs_fn {
+                    let mut step_obs = vec![0.0; prob.n_obs];
+                    unsafe { obs_fn(instance.state.y.as_ptr(), instance.state.ydot.as_ptr(), instance.state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                    for i in 0..prob.n_obs { out_obs[i] = step_obs[i]; }
+                }
+                for step in 1..t_eval.len() {
+                    instance.step(&prob, t_eval[step] - t_eval[step - 1], None)
+                        .map_err(SolverError::Crash)?;
+                    for i in 0..prob.n { out_traj[step * prob.n + i] = instance.state.y[i]; }
                     if let Some(obs_fn) = prob.fns.obs_fn {
                         let mut step_obs = vec![0.0; prob.n_obs];
-                        unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
-                        for i in 0..prob.n_obs { out_obs[i] = step_obs[i]; }
+                        unsafe { obs_fn(instance.state.y.as_ptr(), instance.state.ydot.as_ptr(), instance.state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                        for i in 0..prob.n_obs { out_obs[step * prob.n_obs + i] = step_obs[i]; }
                     }
-                    for step in 1..t_eval.len() {
-                        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, t_eval[step] - t_eval[step - 1], None)
-                            .map_err(SolverError::Crash)?;
-                        for i in 0..prob.n { out_traj[step * prob.n + i] = state.y[i]; }
-                        if let Some(obs_fn) = prob.fns.obs_fn {
-                            let mut step_obs = vec![0.0; prob.n_obs];
-                            unsafe { obs_fn(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
-                            for i in 0..prob.n_obs { out_obs[step * prob.n_obs + i] = step_obs[i]; }
+                }
+            }
+            Ok((out_t, out_traj, out_obs))
+        };
+
+        if total == 1 {
+            execute_model(0, &p_batch[0]).map(|res| vec![res])
+        } else {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(max_workers).build().unwrap();
+            pool.install(|| {
+                p_batch.par_iter().enumerate().map(|(b_idx, p)| {
+                    let res = execute_model(b_idx, p)?;
+                    let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if show_progress {
+                        let is_final = c == total;
+                        let pct = (c as f64 / total as f64).clamp(0.0, 1.0);
+                        if is_final {
+                            print!("\r▶ {:<4} [██████████████████████████████] 100.0% | {}/{} models   \n", "Btch", c, total);
+                        } else {
+                            let filled = (pct * 30.0) as usize;
+                            let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
+                            print!("\r▶ {:<4} [{}] {:.1}% | {}/{} models   ", "Btch", bar, pct * 100.0, c, total);
                         }
+                        std::io::stdout().flush().unwrap();
                     }
-                }
-                
-                let c = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if show_progress {
-                    let is_final = c == total;
-                    let pct = (c as f64 / total as f64).clamp(0.0, 1.0);
-                    if is_final {
-                        print!("\r▶ {:<4} [██████████████████████████████] 100.0% | {}/{} models   \n", "Btch", c, total);
-                    } else {
-                        let filled = (pct * 30.0) as usize;
-                        let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('-').take(30 - filled)).collect();
-                        print!("\r▶ {:<4} [{}] {:.1}% | {}/{} models   ", "Btch", bar, pct * 100.0, c, total);
-                    }
-                    std::io::stdout().flush().unwrap();
-                }
-                Ok((out_t, out_traj, out_obs))
-            }).collect()
-        })
+                    Ok(res)
+                }).collect()
+            })
+        }
     });
 
     let unwrapped = results.map_err(|e| match e {

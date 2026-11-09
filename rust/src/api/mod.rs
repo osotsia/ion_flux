@@ -1,11 +1,16 @@
-// rust/src/solver/_0_ffi/mod.rs
-pub mod api_batch;
-pub mod api_adjoint;
-pub mod api_session;
+pub mod session_handle;
+pub mod batch_dispatcher;
+pub mod adjoint_dispatcher;
+
+pub use session_handle::*;
+pub use batch_dispatcher::*;
+pub use adjoint_dispatcher::*;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use crate::solver::shared::diagnostics::CrashReport;
+use crate::diagnostics::CrashReport;
+
+pyo3::create_exception!(_core, NativeSolverCrash, pyo3::exceptions::PyRuntimeError);
 
 #[derive(Debug)]
 pub enum SolverError {

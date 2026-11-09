@@ -45,6 +45,9 @@ pub fn solve_adjoint_sensitivities(
     let mut rhs_orig = vec![0.0; n];
     let mut delta_lambda = vec![0.0; n];
     let mut jvp_out = vec![0.0; n];
+    let mut jvp_dy = vec![0.0; n];
+    let mut jvp_dydot = vec![0.0; n];
+    let mut res_dummy = vec![0.0; n];
     let mut dp_out = vec![0.0; n_params];
     let mut dy_out = vec![0.0; n];
     let mut dydot_out = vec![0.0; n];
@@ -55,6 +58,7 @@ pub fn solve_adjoint_sensitivities(
     let mut gmres_dp = vec![0.0; n_params];
     let mut gmres_dy = vec![0.0; n];
     let mut gmres_dydot = vec![0.0; n];
+    let mut gmres_res_dummy = vec![0.0; n];
 
     for step in (1..n_steps).rev() {
         let dt = t_arr[step] - t_arr[step - 1];
@@ -93,6 +97,7 @@ pub fn solve_adjoint_sensitivities(
                         p_ptr,
                         m_ptr,
                         v.as_ptr(),
+                        gmres_res_dummy.as_mut_ptr(),
                         gmres_dp.as_mut_ptr(),
                         gmres_dy.as_mut_ptr(),
                         gmres_dydot.as_mut_ptr(),
@@ -116,6 +121,7 @@ pub fn solve_adjoint_sensitivities(
                     p_ptr,
                     m_ptr,
                     rhs.as_ptr(),
+                    res_dummy.as_mut_ptr(),
                     dp_out.as_mut_ptr(),
                     dy_out.as_mut_ptr(),
                     dydot_out.as_mut_ptr(),
@@ -136,6 +142,7 @@ pub fn solve_adjoint_sensitivities(
                             p_list.as_ptr(),
                             m_slice.as_ptr(),
                             rhs.as_ptr(),
+                            res_dummy.as_mut_ptr(),
                             dp_out.as_mut_ptr(),
                             dy_out.as_mut_ptr(),
                             dydot_out.as_mut_ptr(),
@@ -155,7 +162,7 @@ pub fn solve_adjoint_sensitivities(
                         let abs_b = rhs_orig[i].abs();
                         if abs_b > max_b { max_b = abs_b; }
                     }
-                    let tol = (1e-6 * max_b).max(1e-9);
+                    let tol = (1e-7 * max_b).max(1e-10);
                     if max_res <= tol {
                         solved_by_cache = true;
                     } else if max_res.is_finite() && max_res <= 0.05 * (max_b + 1.0) {
@@ -171,6 +178,7 @@ pub fn solve_adjoint_sensitivities(
                                     p_list.as_ptr(),
                                     m_slice.as_ptr(),
                                     rhs.as_ptr(),
+                                    res_dummy.as_mut_ptr(),
                                     dp_out.as_mut_ptr(),
                                     dy_out.as_mut_ptr(),
                                     dydot_out.as_mut_ptr(),
@@ -206,6 +214,9 @@ pub fn solve_adjoint_sensitivities(
                                 m_slice.as_ptr(),
                                 c_j,
                                 seed.as_ptr(),
+                                jvp_dy.as_mut_ptr(),
+                                jvp_dydot.as_mut_ptr(),
+                                res_dummy.as_mut_ptr(),
                                 jvp_out.as_mut_ptr(),
                             );
                         }
@@ -227,6 +238,7 @@ pub fn solve_adjoint_sensitivities(
                                     p_list.as_ptr(),
                                     m_slice.as_ptr(),
                                     lambda_vjp.as_ptr(),
+                                    res_dummy.as_mut_ptr(),
                                     vjp_dp.as_mut_ptr(),
                                     vjp_dy.as_mut_ptr(),
                                     vjp_dydot.as_mut_ptr(),
@@ -254,6 +266,7 @@ pub fn solve_adjoint_sensitivities(
                         p_list.as_ptr(),
                         m_slice.as_ptr(),
                         rhs.as_ptr(),
+                        res_dummy.as_mut_ptr(),
                         dp_out.as_mut_ptr(),
                         dy_out.as_mut_ptr(),
                         dydot_out.as_mut_ptr(),

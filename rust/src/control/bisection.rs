@@ -1,9 +1,5 @@
 use crate::solver::shared::problem::Problem;
-use crate::stepper::state::{SystemState, StepScratchpad};
-use crate::stepper::history::BdfHistory;
-use crate::linear::solver::LinearSolver;
-use crate::solver::shared::diagnostics::Diagnostics;
-use crate::stepper::bdf;
+use crate::stepper::state::{SystemState, SolverInstance, Checkpoint};
 
 #[derive(Clone, Debug)]
 pub struct TrigInfo {
@@ -35,29 +31,35 @@ pub fn check_trigger(prob: &Problem, state: &SystemState, info: &TrigInfo, step_
 
 pub fn execute_bisection(
     prob: &Problem,
-    state: &mut SystemState,
-    history: &mut BdfHistory,
-    scratch: &mut StepScratchpad,
-    linear_solver: &mut LinearSolver,
-    diag: &mut Diagnostics,
+    instance: &mut SolverInstance,
     dt_step: f64,
     info: &TrigInfo,
-    ckpt: (f64, Vec<f64>, Vec<f64>)
+    ckpt: &Checkpoint,
 ) -> f64 {
-    state.restore(ckpt.0, ckpt.1.clone(), ckpt.2.clone());
-    history.restore_state();
-    linear_solver.mark_stale();
     let mut step_obs = vec![0.0; prob.n_obs];
     let (mut low, mut high) = (0.0, dt_step);
 
     for _ in 0..15 {
+        instance.rollback(ckpt);
+
         let mid = (low + high) / 2.0;
-        if bdf::step(prob, state, history, scratch, linear_solver, diag, mid, None).is_err() { break; }
-        if check_trigger(prob, state, info, &mut step_obs) { high = mid; } else { low = mid; }
-        state.restore(ckpt.0, ckpt.1.clone(), ckpt.2.clone());
-        history.restore_state();
-        linear_solver.mark_stale();
+        if instance.step(prob, mid, None).is_err() {
+            high = mid;
+            continue;
+        }
+        if check_trigger(prob, &instance.state, info, &mut step_obs) {
+            high = mid;
+        } else {
+            low = mid;
+        }
     }
-    bdf::step(prob, state, history, scratch, linear_solver, diag, low, None).unwrap_or(());
+
+    instance.rollback(ckpt);
+    if low > 1e-12 {
+        if instance.step(prob, low, None).is_err() {
+            instance.rollback(ckpt);
+            return 0.0;
+        }
+    }
     low
 }

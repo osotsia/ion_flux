@@ -140,6 +140,14 @@ class Engine:
 
         from ion_flux.protocols import Sequence
         if protocol and isinstance(protocol, Sequence):
+            if self.solver_backend == "native" and requires_grad is None:
+                current_params = {**{k: v.value for k, v in self.parameters.items()}, **(parameters or {})}
+                return self.solve_batch(
+                    parameters=[current_params],
+                    protocols=[protocol],
+                    max_workers=1,
+                    show_progress=show_progress
+                )[0]
             return self._orchestrate_sequence(protocol, parameters, requires_grad, show_progress)
             
         from ion_flux.runtime._2_initializers import evaluate_ic
@@ -278,7 +286,8 @@ class Engine:
             while t_elapsed < t_max:
                 dt_step = min(1.0, t_max - t_elapsed)
                 
-                session.checkpoint()
+                if target_condition:
+                    session.checkpoint()
                 session.step(dt_step)
                 
                 if target_condition and session.triggered(target_condition):

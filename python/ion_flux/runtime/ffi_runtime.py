@@ -35,7 +35,9 @@ class NativeRuntime:
             self.dll.evaluate_jvp.argtypes = [
                 ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
                 ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
-                ctypes.c_double, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)
+                ctypes.c_double, ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ]
             self.dll.evaluate_jvp.restype = None
 
@@ -44,6 +46,7 @@ class NativeRuntime:
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
         ]
         self.dll.evaluate_vjp.restype = None
 
@@ -57,10 +60,13 @@ class NativeRuntime:
         p_arr = (ctypes.c_double * len(p))(*p)
         m_arr = (ctypes.c_double * len(m))(*m)
         v_arr = (ctypes.c_double * self.n_states)(*v)
+        jvp_dy = (ctypes.c_double * self.n_states)()
+        jvp_dydot = (ctypes.c_double * self.n_states)()
+        res_dummy = (ctypes.c_double * self.n_states)()
         out_arr = (ctypes.c_double * self.n_states)()
         
         if hasattr(self.dll, "evaluate_jvp"):
-            self.dll.evaluate_jvp(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), v_arr, out_arr)
+            self.dll.evaluate_jvp(y_arr, ydot_arr, p_arr, m_arr, ctypes.c_double(c_j), v_arr, jvp_dy, jvp_dydot, res_dummy, out_arr)
         return list(out_arr)
 
     def evaluate_vjp(self, y: List[float], ydot: List[float], p: List[float], m: List[float], lambda_vec: List[float]) -> Tuple[List[float], List[float], List[float]]:
@@ -69,12 +75,13 @@ class NativeRuntime:
         p_arr = (ctypes.c_double * len(p))(*p)
         m_arr = (ctypes.c_double * len(m))(*m)
         lam_arr = (ctypes.c_double * self.n_states)(*lambda_vec)
+        res_dummy = (ctypes.c_double * self.n_states)()
         
         dp_out = (ctypes.c_double * len(p))()
         dy_out = (ctypes.c_double * self.n_states)()
         dydot_out = (ctypes.c_double * self.n_states)()
         
-        self.dll.evaluate_vjp(y_arr, ydot_arr, p_arr, m_arr, lam_arr, dp_out, dy_out, dydot_out)
+        self.dll.evaluate_vjp(y_arr, ydot_arr, p_arr, m_arr, lam_arr, res_dummy, dp_out, dy_out, dydot_out)
         return list(dp_out), list(dy_out), list(dydot_out)
 
     def evaluate_residual(self, y: List[float], ydot: List[float], p: List[float], m: List[float]) -> List[float]:

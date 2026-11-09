@@ -3,19 +3,20 @@ pub mod linear;
 pub mod stepper;
 pub mod nonlinear;
 pub mod control;
+pub mod diagnostics;
+pub mod api;
 pub mod vendor;
-mod solver;
+pub mod solver;
 
 #[cfg(test)]
 pub mod tests;
 
 use pyo3::prelude::*;
-use solver::_0_ffi::api_batch::{solve_ida_native, solve_batch_native};
-use solver::_0_ffi::api_adjoint::discrete_adjoint_native;
-use solver::_0_ffi::api_session::SolverHandle;
-use solver::sundials::wrapper::{SundialsHandle, solve_ida_sundials};
-
-pyo3::create_exception!(_core, NativeSolverCrash, pyo3::exceptions::PyRuntimeError);
+use api::batch_dispatcher::{solve_ida_native, solve_batch_native};
+use api::adjoint_dispatcher::discrete_adjoint_native;
+use api::session_handle::SolverHandle;
+use api::NativeSolverCrash;
+use vendor::sundials::wrapper::{SundialsHandle, solve_ida_sundials};
 
 #[pymodule]
 fn _core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {

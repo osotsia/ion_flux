@@ -216,8 +216,8 @@ Benchmarked on an Apple Silicon host, we have:
 *   **Why:** Completely eliminates runtime Python graph traversal. Contiguous 1D C-arrays ensure cache locality and SIMD vectorization, while compile-time Enzyme AD eliminates out-of-memory crashes inherent to tape-based symbolic AD.
 
 **Stage 4: FFI Boundary & Native Implicit Solver (Runtime)**
-*   **Elements:** Rust Implicit Solver (`runtime/` & `rust/src/solver/`: `_0_ffi` $\rightarrow$ `_1_orchestrator` $\rightarrow$ `_2_stepper` $\rightarrow$ `_3_nonlinear` $\rightarrow$ `_4_linear`).
-*   **How:** Python packs parameters and initial conditions into flat C-ABI pointers. The native Rust solver loads the compiled `.so` binary. It integrates stiff non-linear Differential-Algebraic Equations (DAEs) by passing a pre-allocated memory arena (`Workspace`) down a layered call stack (BDF stepper $\rightarrow$ Newton-Raphson $\rightarrow$ Faer Sparse LU / Matrix-Free GMRES), mutating state without hot-loop heap reallocations.
+*   **Elements:** Rust Data-Oriented Solver (`runtime/` & `rust/src/`: `api` $\rightarrow$ `control` $\rightarrow$ `stepper` $\rightarrow$ `nonlinear` $\rightarrow$ `linear`, with quarantined `ffi`, `diagnostics`, and `vendor`).
+*   **How:** Python packs parameters and initial conditions into flat C-ABI pointers. The native Rust solver loads the compiled `.so` binary. It integrates stiff non-linear Differential-Algebraic Equations (DAEs) using lifecycle-segregated structures (`SystemState`, `BdfHistory`, and `StepScratchpad`) passing disjoint references down the execution hierarchy (BDF stepper $\rightarrow$ Newton-Raphson $\rightarrow$ Faer Sparse LU / Matrix-Free GMRES), eliminating state cloning and maintaining deterministic memory layouts.
 *   **Why:** Completely bypasses the Python Global Interpreter Lock (GIL). Zero-allocation hot loops sustain microsecond-latency control loops for Hardware-in-the-Loop (HIL) testing and unlock linear task-parallel CPU scaling across vCPUs via Rayon.
 
 For more details, see the [Project Structure Documentation](/docs/Ion_Flux_project_structure.md).

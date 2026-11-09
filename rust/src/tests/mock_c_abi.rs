@@ -39,6 +39,9 @@ pub unsafe extern "C" fn mock_evaluate_jvp(
     _m: *const f64,
     c_j: f64,
     v: *const f64,
+    _jvp_dy: *mut f64,
+    _jvp_dydot: *mut f64,
+    _res_dummy: *mut f64,
     jvp_out: *mut f64,
 ) {
     let p = std::slice::from_raw_parts(p, MOCK_N_PARAMS);
@@ -63,6 +66,7 @@ pub unsafe extern "C" fn mock_evaluate_vjp(
     p: *const f64,
     _m: *const f64,
     lambda_vec: *const f64,
+    _res_dummy: *mut f64,
     dp_out: *mut f64,
     dy_out: *mut f64,
     dydot_out: *mut f64,

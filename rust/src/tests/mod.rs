@@ -21,6 +21,9 @@ fn test_mock_c_abi_jvp_and_vjp_duality() {
     let v = [0.5, -0.3, 0.8, -0.2, 0.4, 1.2];
     let lambda = [0.2, 0.4, -0.1, 0.6, -0.3, 0.5];
 
+    let mut jvp_dy = [0.0; MOCK_N];
+    let mut jvp_dydot = [0.0; MOCK_N];
+    let mut res_dummy = [0.0; MOCK_N];
     let mut jvp_out = [0.0; MOCK_N];
     unsafe {
         mock_evaluate_jvp(
@@ -30,6 +33,9 @@ fn test_mock_c_abi_jvp_and_vjp_duality() {
             m.as_ptr(),
             c_j,
             v.as_ptr(),
+            jvp_dy.as_mut_ptr(),
+            jvp_dydot.as_mut_ptr(),
+            res_dummy.as_mut_ptr(),
             jvp_out.as_mut_ptr(),
         );
     }
@@ -44,6 +50,7 @@ fn test_mock_c_abi_jvp_and_vjp_duality() {
             p.as_ptr(),
             m.as_ptr(),
             lambda.as_ptr(),
+            res_dummy.as_mut_ptr(),
             dp_out.as_mut_ptr(),
             dy_out.as_mut_ptr(),
             dydot_out.as_mut_ptr(),
@@ -79,6 +86,9 @@ fn test_mock_c_abi_finite_difference_jvp() {
 
     let v = [1.0, 0.5, -0.5, 0.2, -0.1, 1.1];
 
+    let mut jvp_dy = [0.0; MOCK_N];
+    let mut jvp_dydot = [0.0; MOCK_N];
+    let mut res_dummy = [0.0; MOCK_N];
     let mut jvp_analytical = [0.0; MOCK_N];
     unsafe {
         mock_evaluate_jvp(
@@ -88,6 +98,9 @@ fn test_mock_c_abi_finite_difference_jvp() {
             m.as_ptr(),
             c_j,
             v.as_ptr(),
+            jvp_dy.as_mut_ptr(),
+            jvp_dydot.as_mut_ptr(),
+            res_dummy.as_mut_ptr(),
             jvp_analytical.as_mut_ptr(),
         );
     }
@@ -368,7 +381,7 @@ fn test_closed_enum_linear_solver_dispatch() {
 
 #[test]
 fn test_protocol_hysteresis() {
-    let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+    let (prob, state, history, scratch, linear_solver, diag) = create_mock_fixture();
     let mut out_t = Vec::new();
     let mut out_traj = Vec::new();
     let mut out_obs = Vec::new();
@@ -408,13 +421,16 @@ fn test_protocol_hysteresis() {
         },
     ];
 
+    let mut instance = crate::stepper::state::SolverInstance {
+        state,
+        history,
+        scratch,
+        linear_solver,
+        diag,
+    };
     let res = crate::control::sequence::run_sequence(
         &prob,
-        &mut state,
-        &mut history,
-        &mut scratch,
-        &mut linear_solver,
-        &mut diag,
+        &mut instance,
         &steps,
         &mut out_t,
         &mut out_traj,
@@ -425,9 +441,75 @@ fn test_protocol_hysteresis() {
 
     assert!(res.is_ok(), "Protocol sequence failed: {:?}", res.err());
     assert!(out_t.len() >= 2, "Expected multiple time points recorded");
-    assert!(state.t >= 0.039, "Time did not advance through both protocol steps: t={}", state.t);
-    for val in &state.y {
+    assert!(instance.state.t >= 0.039, "Time did not advance through both protocol steps: t={}", instance.state.t);
+    for val in &instance.state.y {
         assert!(val.is_finite(), "Non-finite state value after sequence execution");
+    }
+}
+
+#[test]
+fn test_protocol_bisection_trigger_rollback() {
+    let (prob, state, history, scratch, linear_solver, diag) = create_mock_fixture();
+    let mut instance = crate::stepper::state::SolverInstance {
+        state,
+        history,
+        scratch,
+        linear_solver,
+        diag,
+    };
+    let mut out_t = Vec::new();
+    let mut out_traj = Vec::new();
+    let mut out_obs = Vec::new();
+
+    let steps = vec![
+        crate::control::sequence::ProtocolStep {
+            s_type: 0,
+            target_val: 0.1,
+            t_limit: 0.1,
+            trig: crate::control::bisection::TrigInfo {
+                has_trig: true,
+                idx: 0,
+                size: 1,
+                is_obs: false,
+                op: 1,
+                val: 1.001,
+            },
+            p_mode: 0,
+            p_i: 1,
+            p_v: 0,
+        },
+        crate::control::sequence::ProtocolStep {
+            s_type: 2,
+            target_val: 0.0,
+            t_limit: 0.05,
+            trig: crate::control::bisection::TrigInfo {
+                has_trig: false,
+                idx: 0,
+                size: 1,
+                is_obs: false,
+                op: 0,
+                val: 0.0,
+            },
+            p_mode: 0,
+            p_i: 1,
+            p_v: 0,
+        },
+    ];
+
+    let res = crate::control::sequence::run_sequence(
+        &prob,
+        &mut instance,
+        &steps,
+        &mut out_t,
+        &mut out_traj,
+        &mut out_obs,
+        false,
+        -1,
+    );
+
+    assert!(res.is_ok(), "Protocol sequence with bisection failed: {:?}", res.err());
+    for val in &instance.state.y {
+        assert!(val.is_finite(), "Non-finite state value after bisection sequence execution");
     }
 }
 

@@ -6,8 +6,8 @@ use numpy::{PyArray1, PyArray2, ToPyArray};
 use std::os::raw::{c_double, c_int, c_void};
 use std::io::Write;
 use crate::ffi::callbacks::{NativeResFn, NativeJvpFn, NativeVjpFn, NativeObsFn};
-use crate::solver::shared::problem::CprData;
-use crate::solver::_4_linear::jacobian::assemble_triplets;
+use crate::stepper::problem::CprData;
+use crate::linear::jacobian::assemble_triplets;
 use crate::vendor::sundials::sys::*;
 
 pub struct SundialsUserData {

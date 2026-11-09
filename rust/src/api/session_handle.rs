@@ -1,24 +1,14 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, PyReadwriteArray1, ToPyArray};
-use crate::solver::shared::problem::{Problem, Callbacks, CprData, SolverConfig};
-use crate::stepper::state::{SystemState, StepScratchpad};
-use crate::stepper::history::BdfHistory;
-use crate::linear::solver::LinearSolver;
-use crate::solver::shared::diagnostics::Diagnostics;
-use crate::stepper::bdf;
-use crate::nonlinear::algebraic_roots;
-use crate::NativeSolverCrash;
-use crate::solver::_0_ffi::crash_report_to_pydict;
+use crate::stepper::problem::{Problem, Callbacks, CprData, SolverConfig};
+use crate::stepper::state::{SolverInstance, Checkpoint};
+use crate::api::{NativeSolverCrash, crash_report_to_pydict};
 
 #[pyclass(unsendable)]
 pub struct SolverHandle {
     _lib: libloading::Library,
     pub prob: Problem,
-    pub state: SystemState,
-    pub history: BdfHistory,
-    pub scratch: StepScratchpad,
-    pub linear_solver: LinearSolver,
-    pub diag: Diagnostics,
+    pub instance: SolverInstance,
 }
 
 #[pymethods]
@@ -49,27 +39,22 @@ impl SolverHandle {
         let config = if is_realtime { SolverConfig::realtime() } else { SolverConfig::default() };
         let prob = Problem { n, bw, n_obs, id, constraints, m, spatial_diag, max_steps, cpr, config, fns };
 
-        let mut state = SystemState::new(y0, ydot0, p);
-        let mut history = BdfHistory::new(n);
-        let mut scratch = StepScratchpad::new(n);
-        let mut linear_solver = LinearSolver::new(n, bw);
-        let mut diag = Diagnostics::new(n);
-        
-        algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag)
+        let mut instance = SolverInstance::new(n, bw, y0, ydot0, p);
+        instance.calc_algebraic_roots(&prob)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
             
-        Ok(SolverHandle { _lib: lib, prob, state, history, scratch, linear_solver, diag })
+        Ok(SolverHandle { _lib: lib, prob, instance })
     }
 
     pub fn step(&mut self, py: Python<'_>, dt: f64) -> PyResult<()> {
-        bdf::step(&self.prob, &mut self.state, &mut self.history, &mut self.scratch, &mut self.linear_solver, &mut self.diag, dt, None).map_err(|e| {
+        self.instance.step(&self.prob, dt, None).map_err(|e| {
             NativeSolverCrash::new_err(crash_report_to_pydict(py, &e).unbind())
         })
     }
 
     pub fn step_history<'py>(&mut self, py: Python<'py>, dt: f64) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
         let mut history = vec![];
-        bdf::step(&self.prob, &mut self.state, &mut self.history, &mut self.scratch, &mut self.linear_solver, &mut self.diag, dt, Some(&mut history)).map_err(|e| {
+        self.instance.step(&self.prob, dt, Some(&mut history)).map_err(|e| {
             NativeSolverCrash::new_err(crash_report_to_pydict(py, &e).unbind())
         })?;
         
@@ -94,16 +79,16 @@ impl SolverHandle {
     }
 
     pub fn get_time(&self) -> f64 { 
-        self.state.t 
+        self.instance.state.t 
     }
 
     pub fn calc_algebraic_roots(&mut self) -> PyResult<()> {
-        algebraic_roots::calc_algebraic_roots(&self.prob, &mut self.state, &mut self.history, &mut self.scratch, &mut self.linear_solver, &mut self.diag)
+        self.instance.calc_algebraic_roots(&self.prob)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
     }
 
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> { 
-        numpy::ndarray::Array1::from_vec(self.state.y.clone()).to_pyarray(py) 
+        numpy::ndarray::Array1::from_vec(self.instance.state.y.clone()).to_pyarray(py) 
     }
 
     pub fn read_state_into(&self, mut target: PyReadwriteArray1<f64>) -> PyResult<()> {
@@ -116,14 +101,14 @@ impl SolverHandle {
                 slice.len(), self.prob.n
             )));
         }
-        slice.copy_from_slice(&self.state.y);
+        slice.copy_from_slice(&self.instance.state.y);
         Ok(())
     }
 
     pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let mut obs = vec![0.0; self.prob.n_obs];
         if let Some(obs_fn) = self.prob.fns.obs_fn {
-            unsafe { obs_fn(self.state.y.as_ptr(), self.state.ydot.as_ptr(), self.state.p.as_ptr(), self.prob.m.as_ptr(), obs.as_mut_ptr()); }
+            unsafe { obs_fn(self.instance.state.y.as_ptr(), self.instance.state.ydot.as_ptr(), self.instance.state.p.as_ptr(), self.prob.m.as_ptr(), obs.as_mut_ptr()); }
         }
         Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray(py))
     }
@@ -140,7 +125,7 @@ impl SolverHandle {
         }
         if let Some(obs_fn) = self.prob.fns.obs_fn {
             unsafe {
-                obs_fn(self.state.y.as_ptr(), self.state.ydot.as_ptr(), self.state.p.as_ptr(), self.prob.m.as_ptr(), slice.as_mut_ptr());
+                obs_fn(self.instance.state.y.as_ptr(), self.instance.state.ydot.as_ptr(), self.instance.state.p.as_ptr(), self.prob.m.as_ptr(), slice.as_mut_ptr());
             }
         } else {
             slice.fill(0.0);
@@ -149,16 +134,16 @@ impl SolverHandle {
     }
     
     pub fn set_parameter(&mut self, idx: usize, val: f64) { 
-        if idx < self.state.p.len() { self.state.p[idx] = val; } 
+        if idx < self.instance.state.p.len() { self.instance.state.p[idx] = val; } 
     }
     
     pub fn reach_steady_state(&mut self, py: Python<'_>) -> PyResult<()> { self.step(py, 1000.0) }
-    pub fn clone_state(&self) -> PyResult<(f64, Vec<f64>, Vec<f64>)> { Ok(self.state.clone_tuple()) }
+    pub fn clone_state(&self) -> PyResult<(f64, Vec<f64>, Vec<f64>)> { 
+        let ckpt = self.instance.checkpoint();
+        Ok((ckpt.t, ckpt.y, ckpt.ydot))
+    }
     pub fn restore_state(&mut self, t: f64, y: Vec<f64>, ydot: Vec<f64>) -> PyResult<()> {
-        self.state.restore(t, y, ydot);
-        self.linear_solver.mark_stale();
-        self.diag.accepted_steps = 0;
-        self.history.restore_state();
+        self.instance.rollback(&Checkpoint { t, y, ydot });
         Ok(())
     }
 }

@@ -13,6 +13,9 @@ pub struct GmresSolver {
     g: Vec<f64>,
     b_pre: Vec<f64>,
     temp_jvp: Vec<f64>,
+    jvp_dy: Vec<f64>,
+    jvp_dydot: Vec<f64>,
+    res_scratch: Vec<f64>,
     y_sol: Vec<f64>,
 
     y_ptr: *const f64,
@@ -42,6 +45,9 @@ impl GmresSolver {
             g: vec![0.0; m + 1],
             b_pre: vec![0.0; n],
             temp_jvp: vec![0.0; n],
+            jvp_dy: vec![0.0; n],
+            jvp_dydot: vec![0.0; n],
+            res_scratch: vec![0.0; n],
             y_sol: vec![0.0; m],
             y_ptr: std::ptr::null(),
             ydot_ptr: std::ptr::null(),
@@ -114,7 +120,18 @@ impl GmresSolver {
         while k < m {
             let v_k = &self.v[k];
             unsafe {
-                jvp(y_ptr, ydot_ptr, p_ptr, m_ptr, c_j, v_k.as_ptr(), self.temp_jvp.as_mut_ptr());
+                jvp(
+                    y_ptr,
+                    ydot_ptr,
+                    p_ptr,
+                    m_ptr,
+                    c_j,
+                    v_k.as_ptr(),
+                    self.jvp_dy.as_mut_ptr(),
+                    self.jvp_dydot.as_mut_ptr(),
+                    self.res_scratch.as_mut_ptr(),
+                    self.temp_jvp.as_mut_ptr(),
+                );
             }
 
             for i in 0..n {

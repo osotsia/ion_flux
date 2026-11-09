@@ -1,3 +1,5 @@
+pub use crate::ffi::callbacks::Callbacks;
+
 #[derive(Clone, Default)]
 pub struct CprData {
     pub color_seeds: Vec<Vec<f64>>,
@@ -44,8 +46,6 @@ impl SolverConfig {
         }
     }
 }
-
-pub use crate::ffi::callbacks::Callbacks;
 
 #[derive(Clone)]
 pub struct Problem {

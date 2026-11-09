@@ -66,11 +66,17 @@ impl SafeEvaluator {
         m: &[f64],
         c_j: f64,
         v: &[f64],
+        jvp_dy: &mut [f64],
+        jvp_dydot: &mut [f64],
+        res_dummy: &mut [f64],
         out: &mut [f64],
     ) {
         assert_eq!(y.len(), self.n_states, "y slice length must equal n_states");
         assert_eq!(ydot.len(), self.n_states, "ydot slice length must equal n_states");
         assert_eq!(v.len(), self.n_states, "v slice length must equal n_states");
+        assert_eq!(jvp_dy.len(), self.n_states, "jvp_dy slice length must equal n_states");
+        assert_eq!(jvp_dydot.len(), self.n_states, "jvp_dydot slice length must equal n_states");
+        assert_eq!(res_dummy.len(), self.n_states, "res_dummy slice length must equal n_states");
         assert_eq!(out.len(), self.n_states, "out slice length must equal n_states");
         assert_eq!(p.len(), self.n_params, "p slice length must equal n_params");
 
@@ -83,6 +89,9 @@ impl SafeEvaluator {
                 m.as_ptr(),
                 c_j,
                 v.as_ptr(),
+                jvp_dy.as_mut_ptr(),
+                jvp_dydot.as_mut_ptr(),
+                res_dummy.as_mut_ptr(),
                 out.as_mut_ptr(),
             );
         }
@@ -96,6 +105,7 @@ impl SafeEvaluator {
         p: &[f64],
         m: &[f64],
         lambda_vec: &[f64],
+        res_dummy: &mut [f64],
         dp_out: &mut [f64],
         dy_out: &mut [f64],
         dydot_out: &mut [f64],
@@ -103,6 +113,7 @@ impl SafeEvaluator {
         assert_eq!(y.len(), self.n_states, "y slice length must equal n_states");
         assert_eq!(ydot.len(), self.n_states, "ydot slice length must equal n_states");
         assert_eq!(lambda_vec.len(), self.n_states, "lambda_vec slice length must equal n_states");
+        assert_eq!(res_dummy.len(), self.n_states, "res_dummy slice length must equal n_states");
         assert_eq!(dp_out.len(), self.n_params, "dp_out slice length must equal n_params");
         assert_eq!(dy_out.len(), self.n_states, "dy_out slice length must equal n_states");
         assert_eq!(dydot_out.len(), self.n_states, "dydot_out slice length must equal n_states");
@@ -116,6 +127,7 @@ impl SafeEvaluator {
                 p.as_ptr(),
                 m.as_ptr(),
                 lambda_vec.as_ptr(),
+                res_dummy.as_mut_ptr(),
                 dp_out.as_mut_ptr(),
                 dy_out.as_mut_ptr(),
                 dydot_out.as_mut_ptr(),

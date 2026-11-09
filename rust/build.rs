@@ -17,4 +17,10 @@ fn main() {
     println!("cargo:rustc-link-lib=static=sundials_sunmatrixband");
     println!("cargo:rustc-link-lib=static=sundials_sunlinsolband");
     println!("cargo:rustc-link-lib=static=sundials_core"); 
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "macos" {
+        println!("cargo:rustc-link-arg=-undefined");
+        println!("cargo:rustc-link-arg=dynamic_lookup");
+    }
 }
