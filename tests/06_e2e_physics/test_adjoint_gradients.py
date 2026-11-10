@@ -20,7 +20,7 @@ def _has_compiler() -> bool:
 REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires native C++ toolchain.")
 
 try:
-    from ion_flux._core import solve_ida_native
+    from ion_flux._core import solve_native
     RUST_FFI_AVAILABLE = True
 except ImportError:
     RUST_FFI_AVAILABLE = False
@@ -40,7 +40,7 @@ import shutil
 import platform
 from ion_flux.runtime.scheduler import MultiTenantScheduler
 from ion_flux.protocols import Sequence, CC, CV, Rest
-from ion_flux._core import solve_ida_native
+from ion_flux._core import solve_native
 
 
 
@@ -132,6 +132,51 @@ def test_continuous_adjoint_accuracy(engine):
     # We use a 2% rtol to comfortably account for the adaptation noise floor.
     np.testing.assert_allclose(grad_ad, grad_fd, rtol=2e-2, atol=1e-5, 
                                err_msg="Analytical Adjoint gradient drifted from Finite Difference baseline.")
+
+
+
+def test_batch_continuous_adjoints(engine):
+    """
+    Validates batch continuous adjoint sensitivities.
+    Executes multiple independent parameter guesses in parallel via solve_batch with requires_grad,
+    and backpropagates through each resulting trajectory independently.
+    """
+    t_eval = np.linspace(0, 5.0, 50)
+    p_base = {"_term_mode": 1.0, "_term_i_target": 1.0}
+
+    # 1. Target data at k = 3.0
+    res_target = engine.solve(t_eval=t_eval, parameters={**p_base, "k": 3.0})
+    v_target = res_target["v"].data
+
+    # 2. Parallel batch of 3 parameter guesses with gradient tracking
+    k_guesses = [1.5, 2.0, 2.5]
+    batch_params = [{**p_base, "k": k_val} for k_val in k_guesses]
+
+    batch_results = engine.solve_batch(
+        parameters=batch_params,
+        t_eval=t_eval,
+        requires_grad=["k"],
+        max_workers=3
+    )
+
+    assert len(batch_results) == 3
+
+    # 3. For each model in the batch, backward() evaluates exact gradients
+    batch_grads = []
+    for res in batch_results:
+        loss = fx.metrics.rmse(predicted=res["v"], target=v_target)
+        grads = loss.backward()
+        assert "k" in grads
+        assert np.isfinite(grads["k"])
+        batch_grads.append(grads["k"])
+
+    # 4. Verify batch gradients match single solve reference gradients
+    for k_val, bg in zip(k_guesses, batch_grads):
+        res_single = engine.solve(t_eval=t_eval, parameters={**p_base, "k": k_val}, requires_grad=["k"])
+        loss_single = fx.metrics.rmse(predicted=res_single["v"], target=v_target)
+        grad_single = loss_single.backward()["k"]
+        np.testing.assert_allclose(bg, grad_single, rtol=1e-4, atol=1e-6,
+            err_msg=f"Batch adjoint gradient for k={k_val} did not match single solve gradient.")
 
 
 

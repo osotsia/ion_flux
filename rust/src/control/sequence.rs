@@ -17,6 +17,7 @@ pub fn run_sequence(
     out_t: &mut Vec<f64>,
     out_traj: &mut Vec<f64>,
     out_obs: &mut Vec<f64>,
+    mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
     show_progress: bool,
     v_idx: i32
 ) -> Result<(), SolverError> {
@@ -38,6 +39,9 @@ pub fn run_sequence(
                     out_obs.extend_from_slice(&step_obs);
                 }
             }
+            if let Some(ref mut hist) = history_cache {
+                hist.push((instance.state.t, instance.state.y.clone(), instance.state.ydot.clone()));
+            }
         }
         
         let mut t_elapsed = 0.0;
@@ -47,12 +51,24 @@ pub fn run_sequence(
             let dt_step = 1.0_f64.min(step.t_limit - t_elapsed);
             let ckpt = if step.trig.has_trig { Some(instance.checkpoint()) } else { None };
             let target_t = instance.state.t + dt_step;
+            let hist_len_before = history_cache.as_ref().map(|h| h.len()).unwrap_or(0);
             
-            instance.advance_to(prob, target_t, None)?;
+            let hist_arg = match history_cache {
+                Some(ref mut h) => Some(&mut **h),
+                None => None,
+            };
+            instance.advance_to(prob, target_t, hist_arg)?;
             
             if check_trigger(prob, &instance.state, &step.trig, &mut step_obs) {
+                if let Some(ref mut hist) = history_cache {
+                    hist.truncate(hist_len_before);
+                }
+                let hist_bisection = match history_cache {
+                    Some(ref mut h) => Some(&mut **h),
+                    None => None,
+                };
                 let low = if let Some(ref c) = ckpt {
-                    execute_bisection(prob, instance, dt_step, &step.trig, c)
+                    execute_bisection(prob, instance, dt_step, &step.trig, c, hist_bisection)
                 } else {
                     0.0
                 };

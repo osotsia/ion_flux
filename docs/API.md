@@ -237,7 +237,7 @@ print(eis_spectrum["Z_real"].data, eis_spectrum["Z_imag"].data)
 ```
 
 #### Continuous Adjoint Sensitivities
-To optimize parameters against lab data, trigger reverse-mode Automatic Differentiation via the `discrete_adjoint_native` backend loop. It calculates exact, continuous sensitivities backward through the time-stepping trajectory. This $\mathcal{O}(1)$ memory approach perfectly integrates over discrete trigger jumps (e.g., CC to CV sequence crossovers) without diverging.
+To optimize parameters against lab data, trigger reverse-mode Automatic Differentiation via the `discrete_adjoint_native` backend loop. It calculates exact, continuous sensitivities backward through the time-stepping trajectory. This $\mathcal{O}(1)$ memory approach perfectly integrates over discrete trigger jumps (e.g., CC to CV sequence crossovers) without diverging. It is supported across both single runs (`solve`) and concurrent multi-model batches (`solve_batch`).
 
 ```python
 # The `requires_grad` flag instructs the solver to record the trajectory history

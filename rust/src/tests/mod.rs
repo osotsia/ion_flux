@@ -435,6 +435,7 @@ fn test_protocol_hysteresis() {
         &mut out_t,
         &mut out_traj,
         &mut out_obs,
+        None,
         false,
         -1,
     );
@@ -503,6 +504,7 @@ fn test_protocol_bisection_trigger_rollback() {
         &mut out_t,
         &mut out_traj,
         &mut out_obs,
+        None,
         false,
         -1,
     );
@@ -571,5 +573,82 @@ fn test_adjoint_residual_invariant() {
     assert_eq!(g.len(), MOCK_N_PARAMS);
     for (i, val) in g.iter().enumerate() {
         assert!(val.is_finite(), "Gradient component {i} is non-finite: {val}");
+    }
+}
+
+#[test]
+fn test_run_sequence_microstep_tape_capture() {
+    let (prob, state, history, scratch, linear_solver, diag) = create_mock_fixture();
+    let mut instance = crate::stepper::state::SolverInstance {
+        state,
+        history,
+        scratch,
+        linear_solver,
+        diag,
+    };
+    let mut out_t = Vec::new();
+    let mut out_traj = Vec::new();
+    let mut out_obs = Vec::new();
+    let mut history_tape = Vec::new();
+
+    let steps = vec![
+        crate::control::sequence::ProtocolStep {
+            s_type: 0,
+            target_val: 0.1,
+            t_limit: 0.05,
+            trig: crate::control::bisection::TrigInfo {
+                has_trig: false,
+                idx: 0,
+                size: 1,
+                is_obs: false,
+                op: 0,
+                val: 0.0,
+            },
+            p_mode: 0,
+            p_i: 1,
+            p_v: 0,
+        },
+        crate::control::sequence::ProtocolStep {
+            s_type: 2,
+            target_val: 0.0,
+            t_limit: 0.05,
+            trig: crate::control::bisection::TrigInfo {
+                has_trig: false,
+                idx: 0,
+                size: 1,
+                is_obs: false,
+                op: 0,
+                val: 0.0,
+            },
+            p_mode: 0,
+            p_i: 1,
+            p_v: 0,
+        },
+    ];
+
+    let res = crate::control::sequence::run_sequence(
+        &prob,
+        &mut instance,
+        &steps,
+        &mut out_t,
+        &mut out_traj,
+        &mut out_obs,
+        Some(&mut history_tape),
+        false,
+        -1,
+    );
+
+    assert!(res.is_ok(), "Protocol sequence with tape capture failed: {:?}", res.err());
+    assert!(!history_tape.is_empty(), "History tape must not be empty");
+    assert_eq!(history_tape[0].0, 0.0, "First tape step must be t=0.0");
+    assert!((history_tape.last().unwrap().0 - 0.1).abs() < 1e-4, "Final tape step must align with end time");
+
+    for (t, y, ydot) in &history_tape {
+        assert!(t.is_finite());
+        assert_eq!(y.len(), MOCK_N);
+        assert_eq!(ydot.len(), MOCK_N);
+        for val in y.iter().chain(ydot.iter()) {
+            assert!(val.is_finite(), "Non-finite entry recorded in history tape");
+        }
     }
 }

@@ -52,7 +52,7 @@ def _has_compiler() -> bool:
 
 
 try:
-    from ion_flux._core import solve_ida_native
+    from ion_flux._core import solve_native
     RUST_FFI_AVAILABLE = True
 except ImportError:
     RUST_FFI_AVAILABLE = False

@@ -20,7 +20,7 @@ def _has_compiler() -> bool:
 REQUIRES_COMPILER = pytest.mark.skipif(not _has_compiler(), reason="Requires native C++ toolchain.")
 
 try:
-    from ion_flux._core import solve_ida_native
+    from ion_flux._core import solve_native
     RUST_FFI_AVAILABLE = True
 except ImportError:
     RUST_FFI_AVAILABLE = False
@@ -37,7 +37,7 @@ from ion_flux.compiler._2_middle_end.verification import verify_manifold, Topolo
 import numpy as np
 import shutil
 import platform
-from ion_flux._core import solve_ida_native
+from ion_flux._core import solve_native
 
 
 

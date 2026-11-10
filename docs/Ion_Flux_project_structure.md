@@ -4,7 +4,7 @@
     *   **Frontend (The DSL - `compiler/_1_frontend`):** Pure Python captures mathematical intent via operator overloading into an immutable Abstract Syntax Tree (AST). It performs no calculus, discretization, or execution.
     *   **Middle-end (Topology & Semantic Pass - `compiler/_2_middle_end`):** Validates manifold closure and topological continuity. Resolves boundary conditions and regional sub-meshes, lowering the AST into an N-Dimensional **Math IR**.
     *   **Backend (Discretization, Optimization, Codegen - `compiler/_3_backend` & `_4_codegen`):** Discretizes Math IR into a 1D loop-level **Compute IR**. Flattens multi-scale domains into contiguous C-array strides, applies Finite Volume Method (FVM) stencils, auto-stitches piecewise interfaces via harmonic mean flux balancing, and applies Arbitrary Lagrangian-Eulerian (ALE) grid kinematics. Analyzes Jacobian column intersections via Curtis-Powell-Reid (CPR) graph coloring, stringifies Compute IR to C++, and invokes Clang with the Enzyme LLVM plugin to emit a native `.so` binary with compiled JVP and VJP routines.
-    *   **Runtime (Execution & Native Solver - `runtime/` & `rust/`):** Python handles high-level protocol state machines, telemetry, and FFI packing. Rust takes over numerical execution, architected as a **Data-Oriented Modular Design** (`api/`, `ffi/`, `stepper/`, `nonlinear/`, `linear/`, `control/`, `diagnostics/`, `vendor/`), strictly segregating persistent physical states (`SystemState`), polynomial history (`BdfHistory`), and transient iteration scratchpads (`StepScratchpad`). This eliminates state cloning, ensures static sparsity retention, and avoids god-objects during stiff implicit integration.
+    *   **Runtime (Execution & Native Solver - `runtime/` & `rust/`):** Python handles declarative input normalization, telemetry, and FFI packing. Rust takes over numerical execution and protocol state-machine orchestration (`control/sequence.rs`), architected as a **Data-Oriented Modular Design** (`api/`, `ffi/`, `stepper/`, `nonlinear/`, `linear/`, `control/`, `diagnostics/`, `vendor/`), strictly segregating persistent physical states (`SystemState`), polynomial history (`BdfHistory`), and transient iteration scratchpads (`StepScratchpad`). This eliminates state cloning, ensures static sparsity retention, and avoids god-objects during stiff implicit integration.
 
 ---
 
@@ -115,7 +115,7 @@ ion_flux/
 │       ├── lib.rs                  # PyO3 module definition and Python C-extension exports.
 │       ├── api/                    # --- PYTHON/RUST FFI BOUNDARY ---
 │       │   ├── mod.rs              # PyO3 exception mapping and error conversion utilities.
-│       │   ├── batch_dispatcher.rs # Rayon thread-pool batch solver bypassing Python GIL.
+│       │   ├── batch_dispatcher.rs # Unified single and batch solver entrypoint (`solve_native`).
 │       │   ├── session_handle.rs   # SolverHandle exposing stateful step(), get_state(), and checkpoint().
 │       │   └── adjoint_dispatcher.rs # Reverse-mode continuous discrete adjoint entrypoint.
 │       │

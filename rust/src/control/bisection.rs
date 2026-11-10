@@ -35,6 +35,7 @@ pub fn execute_bisection(
     dt_step: f64,
     info: &TrigInfo,
     ckpt: &Checkpoint,
+    mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
 ) -> f64 {
     let mut step_obs = vec![0.0; prob.n_obs];
     let (mut low, mut high) = (0.0, dt_step);
@@ -56,7 +57,11 @@ pub fn execute_bisection(
 
     instance.rollback(ckpt);
     if low > 1e-12 {
-        if instance.step(prob, low, None).is_err() {
+        let hist_step = match history_cache {
+            Some(ref mut h) => Some(&mut **h),
+            None => None,
+        };
+        if instance.step(prob, low, hist_step).is_err() {
             instance.rollback(ckpt);
             return 0.0;
         }

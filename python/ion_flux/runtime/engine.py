@@ -125,65 +125,27 @@ class Engine:
         return evaluate_jacobian(self.manifest, y, ydot, c_j, parameters or {})
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
-                t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
+              t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
         """
         Executes a single continuous simulation trajectory.
+        Canonicalizes inputs and delegates directly to solve_batch.
         """
-        if threads > 1 and "omp" in self.target:
-            os.environ["OMP_NUM_THREADS"] = str(threads)
-            if getattr(self.manifest, "runtime", None): 
-                self.manifest.runtime.set_spatial_threads(threads)
-                
-        if self.mock_execution or not self.manifest: 
-            from ion_flux.runtime._3_dispatch import execute_mock
-            return execute_mock(self.manifest, parameters, protocol)
-
-        from ion_flux.protocols import Sequence
-        if protocol and isinstance(protocol, Sequence):
-            if self.solver_backend == "native" and requires_grad is None:
-                current_params = {**{k: v.value for k, v in self.parameters.items()}, **(parameters or {})}
-                return self.solve_batch(
-                    parameters=[current_params],
-                    protocols=[protocol],
-                    max_workers=1,
-                    show_progress=show_progress
-                )[0]
-            return self._orchestrate_sequence(protocol, parameters, requires_grad, show_progress)
-            
-        from ion_flux.runtime._2_initializers import evaluate_ic
-        from ion_flux.runtime._3_dispatch import run_single
-        
         current_params = {**{k: v.value for k, v in self.parameters.items()}, **(parameters or {})}
-        y0, ydot0 = evaluate_ic(self.manifest, current_params)
-        
-        t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
-        v_idx = self.manifest.layout.state_offsets.get("V_cell", (-1, 0))[0]
-        
-        y_res, obs_res, micro_t, micro_y, micro_ydot = run_single(
-            self.manifest, y0, ydot0, current_params, t_eval_arr, 
-            self.solver_backend, self.debug, show_progress, 
-            requires_grad is not None, v_idx
+        results = self.solve_batch(
+            parameters=[current_params],
+            t_span=t_span,
+            protocols=[protocol] if protocol is not None else None,
+            t_eval=t_eval,
+            requires_grad=requires_grad,
+            max_workers=1,
+            threads=threads,
+            show_progress=show_progress
         )
-        
-        data = {"Time [s]": t_eval_arr}
-        for state_name, (offset, size) in self.manifest.layout.state_offsets.items():
-            if size == 1: data[state_name] = y_res[:, offset]
-            else: data[state_name] = y_res[:, offset:offset+size]
-        for obs_name, (offset, size) in self.manifest.layout.obs_offsets.items():
-            if size == 1: data[obs_name] = obs_res[:, offset]
-            else: data[obs_name] = obs_res[:, offset:offset+size]
-            
-        trajectory = None
-        if requires_grad: 
-            p_list = self.manifest.pack_parameters(current_params)
-            trajectory = {
-                "Time [s]": t_eval_arr, "_y_raw": y_res, "_micro_t": micro_t, 
-                "_micro_y": micro_y, "_micro_ydot": micro_ydot, 
-                "_p_traj": [p_list]*len(micro_t), "requires_grad": requires_grad
-            }
-        return SimulationResult(data, current_params, status="completed", engine=self, trajectory=trajectory)
+        return results[0]
 
-    def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), protocols: Any = None, max_workers: int = 1, show_progress: bool = False) -> List[SimulationResult]:
+    def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), protocols: Any = None, 
+                    t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, 
+                    max_workers: int = 1, threads: int = 1, show_progress: bool = False) -> List[SimulationResult]:
         """
         Executes an array of independent models across multiple vCPUs concurrently.
         """
@@ -191,32 +153,48 @@ class Engine:
         if protocols:
             if isinstance(protocols, Sequence): protocols = [protocols] * len(parameters)
             elif len(protocols) != len(parameters): raise ValueError("Batch length mismatch.")
-                
-        if max_workers > 1 and "omp" in self.target:
+        else:
+            protocols = None
+
+        total = len(parameters)
+        spatial_threads = threads if total == 1 else 1
+
+        if spatial_threads > 1 and "omp" in self.target:
+            os.environ["OMP_NUM_THREADS"] = str(spatial_threads)
+        elif total > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = "1"
-            if getattr(self.manifest, "runtime", None): 
-                self.manifest.runtime.set_spatial_threads(1)
-            
-        if self.mock_execution:
-            if not protocols: protocols = [None] * len(parameters)
-            return [self.solve(t_span=t_span, protocol=prot, parameters=p) for p, prot in zip(parameters, protocols)]
+
+        if getattr(self.manifest, "runtime", None):
+            self.manifest.runtime.set_spatial_threads(spatial_threads)
+
+        if self.mock_execution or not self.manifest:
+            from ion_flux.runtime._3_dispatch import execute_mock
+            mock_protos = protocols or [None] * len(parameters)
+            return [execute_mock(self.manifest, p, prot) for p, prot in zip(parameters, mock_protos)]
 
         from ion_flux.runtime._2_initializers import evaluate_ic
-        from ion_flux.runtime._3_dispatch import run_batch
-        
-        default_params = {k: v.value for k, v in self.parameters.items()}
-        y0, ydot0 = evaluate_ic(self.manifest, default_params)
-        
-        t_eval_arr = np.linspace(t_span[0], t_span[1], 100)
-        v_idx = self.manifest.layout.state_offsets.get("V_cell", (-1, 0))[0]
-        
-        results = []
-        y_res_batch = run_batch(
-            self.manifest, y0, ydot0, parameters, t_eval_arr, protocols, 
-            max_workers, self.debug, show_progress, v_idx
+        from ion_flux.runtime._3_dispatch import dispatch_native
+
+        init_params = {**{k: v.value for k, v in self.parameters.items()}, **(parameters[0] if parameters else {})}
+        y0, ydot0 = evaluate_ic(self.manifest, init_params)
+
+        t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
+
+        def _get_v_idx():
+            for k in ["V_cell", "V", "v", "Voltage"]:
+                if k in self.manifest.layout.state_offsets:
+                    return self.manifest.layout.state_offsets[k][0]
+            return -1
+
+        v_idx = _get_v_idx()
+
+        dispatched = dispatch_native(
+            self.manifest, y0, ydot0, parameters, t_eval_arr, protocols,
+            self.solver_backend, requires_grad, max_workers, spatial_threads, show_progress, self.debug, v_idx
         )
-        
-        for p, (t_res, y_res, obs_res) in zip(parameters, y_res_batch):
+
+        results = []
+        for p, (t_res, y_res, obs_res, trajectory) in zip(parameters, dispatched):
             data = {"Time [s]": t_res}
             for state_name, (offset, size) in self.manifest.layout.state_offsets.items():
                 if size == 1: data[state_name] = y_res[:, offset]
@@ -224,7 +202,7 @@ class Engine:
             for obs_name, (offset, size) in self.manifest.layout.obs_offsets.items():
                 if size == 1: data[obs_name] = obs_res[:, offset]
                 else: data[obs_name] = obs_res[:, offset:offset+size]
-            results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=None))
+            results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=trajectory))
 
         return results
 
@@ -236,144 +214,3 @@ class Engine:
             async with scheduler: 
                 return await asyncio.to_thread(self.solve, t_span, protocol, parameters, t_eval)
         return await asyncio.to_thread(self.solve, t_span, protocol, parameters, t_eval)
-
-    # --- Internal Sequence Orchestration ---
-
-    def _apply_protocol_step(self, session: Session, step: Any, step_name: str) -> None:
-        if session.terminal:
-            if step_name == "CC":
-                session.terminal.set_current(step.rate)
-            elif step_name == "CV":
-                session.terminal.set_voltage(step.voltage)
-            elif step_name == "Rest":
-                session.terminal.rest()
-        else:
-            if step_name == "CC":
-                if "i_target" in self.parameters: session.set_parameter("i_target", step.rate)
-                elif "i_app" in self.parameters: session.set_parameter("i_app", step.rate)
-            elif step_name == "CV":
-                if "v_target" in self.parameters: session.set_parameter("v_target", step.voltage)
-            elif step_name == "Rest":
-                if "i_target" in self.parameters: session.set_parameter("i_target", 0.0)
-                elif "i_app" in self.parameters: session.set_parameter("i_app", 0.0)
-        session.reinitialize_algebraic()
-
-    def _orchestrate_sequence(self, protocol, parameters, requires_grad, show_progress) -> SimulationResult:
-        """
-        Drives piece-wise protocols natively. Preserves Python control flow specifically 
-        to execute exact algebraic Bisection Root triggers across Sequence boundaries.
-        """
-        session = self.start_session(parameters)
-        data_hist = {"Time [s]": []}
-        for k in self.manifest.layout.state_offsets.keys(): data_hist[k] = []
-        for k in self.manifest.layout.obs_offsets.keys(): data_hist[k] = []
-        raw_y_hist, raw_p_hist = [], []
-
-        for step_idx, step in enumerate(protocol.steps):
-            target_condition = getattr(step, "until", None)
-            step_name = type(step).__name__
-            self._apply_protocol_step(session, step, step_name)
-            
-            # Record t=0.0 initial state post-algebraic reinitialization under protocol load
-            if step_idx == 0:
-                if requires_grad:
-                    self._initialize_ad_history(session)
-                self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
-            
-            t_max = getattr(step, "time", float('inf'))
-            t_elapsed = 0.0
-            
-            while t_elapsed < t_max:
-                dt_step = min(1.0, t_max - t_elapsed)
-                
-                if target_condition:
-                    session.checkpoint()
-                session.step(dt_step)
-                
-                if target_condition and session.triggered(target_condition):
-                    low = self._find_trigger_root(session, target_condition, dt_step)
-                    t_elapsed += low
-                    self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
-                    break
-                
-                t_elapsed += dt_step
-                self._append_to_hist(session, data_hist, raw_y_hist, raw_p_hist, requires_grad)
-
-                if show_progress:
-                    self._print_progress(session, step_name, t_elapsed, t_max)
-
-            if show_progress:
-                self._print_progress(session, step_name, t_elapsed, t_max, is_final=True)
-
-        for k in data_hist: data_hist[k] = np.array(data_hist[k])
-        
-        trajectory = None
-        if requires_grad:
-            trajectory = {
-                "Time [s]": data_hist["Time [s]"], 
-                "_y_raw": np.array(raw_y_hist), 
-                "_micro_t": np.concatenate(session.micro_t), 
-                "_micro_y": np.vstack(session.micro_y),
-                "_micro_ydot": np.vstack(session.micro_ydot), 
-                "_p_traj": np.vstack(session.micro_p), 
-                "requires_grad": requires_grad
-            }
-        return SimulationResult(data_hist, session.parameters, engine=self, trajectory=trajectory)
-
-    def _find_trigger_root(self, session: Session, target_condition: Any, dt_step: float) -> float:
-        """Executes a dense bisection to land mathematically exactly on discontinuous sequence triggers."""
-        session.restore()
-        
-        with session.suspend_history():
-            low, high = 0.0, dt_step
-            for _ in range(15):
-                mid = (low + high) / 2.0
-                session.step(mid)
-                if session.triggered(target_condition): high = mid
-                else: low = mid
-                session.restore()
-                
-        session.step(low)
-        return low
-
-    def _initialize_ad_history(self, session: Session) -> None:
-        """Pre-allocates strictly dimensioned arrays to prevent np.vstack shape errors."""
-        session.record_history = True
-        y0 = session.handle.get_state() if session.handle else session._mock_y
-        ydot0 = np.zeros(self.manifest.layout.n_states)
-        p0 = self.manifest.pack_parameters(session.parameters)
-        
-        session.micro_t = [np.array([session.time])]
-        session.micro_y = [y0[np.newaxis, :]]
-        session.micro_ydot = [ydot0[np.newaxis, :]]
-        session.micro_p = [np.array(p0)[np.newaxis, :]]
-
-    def _append_to_hist(self, session: Session, data_hist: Dict, raw_y_hist: List, raw_p_hist: List, requires_grad: bool) -> None:
-        data_hist["Time [s]"].append(session.time)
-        y = session.handle.get_state() if session.handle else session._mock_y
-        obs = session.handle.get_observables_py() if session.handle else np.zeros(self.manifest.layout.n_obs)
-        raw_y_hist.append(y)
-        
-        if requires_grad: 
-            raw_p_hist.append(self.manifest.pack_parameters(session.parameters))
-            
-        for k, (offset, size) in self.manifest.layout.state_offsets.items(): 
-            data_hist[k].append(y[offset:offset+size] if size > 1 else y[offset])
-        for k, (offset, size) in self.manifest.layout.obs_offsets.items(): 
-            data_hist[k].append(obs[offset:offset+size] if size > 1 else obs[offset])
-
-    def _print_progress(self, session: Session, step_name: str, t_elapsed: float, t_max: float, is_final: bool = False) -> None:
-        try: v_str = f" | V: {session.get_scalar('V_cell'):.3f}V"
-        except (KeyError, ValueError): v_str = ""
-        
-        if is_final:
-            sys.stdout.write(f"\r▶ {step_name:<4} [██████████████████████████████] 100.0% | t: {session.time:.1f}s{v_str}   \n")
-        elif t_max == float('inf'): 
-            sys.stdout.write(f"\r▶ {step_name:<4} ⏳ t: {session.time:.1f}s{v_str}   ")
-        else:
-            pct = min(t_elapsed / t_max, 1.0)
-            filled = int(pct * 30)
-            bar = "█" * filled + "-" * (30 - filled)
-            sys.stdout.write(f"\r▶ {step_name:<4} [{bar}] {pct*100:.1f}% | t: {session.time:.1f}s{v_str}   ")
-            
-        sys.stdout.flush()
