@@ -299,3 +299,49 @@ def test_differentiable_analytical_eis_and_adjoints():
     assert "C" in grads
     assert isinstance(grads["R"], float)
     assert not np.isnan(grads["R"])
+
+
+class AdjointCapacityOracle(fx.PDE):
+    """Validates VJP backward sensitivity propagation through a non-unit mass matrix."""
+    y = fx.State(domain=None, name="y")
+    C_cap = fx.Parameter(default=2.0, name="C_cap")
+    k = fx.Parameter(default=1.0, name="k")
+
+    def math(self):
+        return {
+            "equations": {
+                self.y: self.C_cap * fx.dt(self.y) == -self.k * self.y
+            },
+            "boundaries": {},
+            "initial_conditions": {self.y: 1.0}
+        }
+
+
+@REQUIRES_RUNTIME
+def test_oracle_adjoint_mass_matrix_vjp():
+    """Compares Enzyme-derived continuous adjoint gradient against analytical ground truth."""
+    engine = fx.Engine(model=AdjointCapacityOracle(), target="cpu", mock_execution=False)
+    t_eval = np.linspace(0, 5.0, 50)
+
+    res = engine.solve(t_eval=t_eval, parameters={"C_cap": 2.0, "k": 1.0}, requires_grad=["C_cap"])
+    y_sim = res["y"].data
+    loss_val = float(np.sum(y_sim ** 2))
+
+    dl_dy = 2.0 * y_sim
+    res.trajectory["requires_grad"] = ["C_cap"]
+
+    loss_obj = fx.metrics.Loss(
+        loss_val, engine=engine, trajectory=res.trajectory, dl_dy_mapped=np.expand_dims(dl_dy, axis=1)
+    )
+    grads = loss_obj.backward()
+    simulated_grad = grads["C_cap"]
+
+    # Exact Analytical Derivation:
+    # y(t) = exp(-k * t / C)
+    # dLoss/dC = sum(exp(-2 * k * t / C) * (2 * k * t / C^2))
+    exact_grad = np.sum(np.exp(-2.0 * 1.0 * t_eval / 2.0) * (2.0 * 1.0 * t_eval / (2.0**2)))
+
+    np.testing.assert_allclose(
+        simulated_grad, exact_grad, rtol=2e-2,
+        err_msg="Adjoint Mass Matrix Error: VJP loop ignored capacity multiplier on dF/dydot."
+    )

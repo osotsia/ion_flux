@@ -265,3 +265,43 @@ def test_protocol_sequence_discontinuous_step_reinitialization():
     assert res.status == "completed"
     assert res["Time [s]"].data[-1] == pytest.approx(0.2, abs=1e-3)
     assert len(res["Time [s]"].data) >= 2
+
+
+class CapacitiveImpedanceOracle(fx.PDE):
+    """
+    Validates dynamic mass matrix extraction: M = C_cap * dV/dt.
+    Prevents hardcoding M = 1.0 (Identity) during frequency-domain EIS solves.
+    """
+    V = fx.State(domain=None, name="V")
+    C_cap = fx.Parameter(default=5.0, name="C_cap")
+    R = fx.Parameter(default=2.0, name="R")
+    i_app = fx.Parameter(default=1.0, name="i_app")
+
+    def math(self):
+        return {
+            "equations": {
+                self.V: self.C_cap * fx.dt(self.V) == self.i_app - self.V / self.R
+            },
+            "boundaries": {},
+            "initial_conditions": {self.V: 0.0}
+        }
+
+
+@REQUIRES_RUNTIME
+def test_oracle_eis_mass_matrix_extraction():
+    """Validates analytical transfer function extraction: Z(w) = R / (1 + j * w * R * C)."""
+    engine = fx.Engine(model=CapacitiveImpedanceOracle(), target="cpu", mock_execution=False)
+    session = engine.start_session(parameters={"C_cap": 5.0, "R": 2.0, "i_app": 1.0})
+    session.reach_steady_state()
+
+    w_arr = np.array([0.1, 1.0, 10.0])
+    eis_res = session.solve_eis(w_arr, input_var="i_app", output_var="V")
+
+    Z_sim = eis_res["Z_real"].data + 1j * eis_res["Z_imag"].data
+    w_rad = w_arr * 2 * np.pi
+    Z_exact = 2.0 / (1.0 + 1j * w_rad * 2.0 * 5.0)
+
+    np.testing.assert_allclose(
+        np.real(Z_sim), np.real(Z_exact), rtol=1e-4,
+        err_msg="EIS Mass Matrix Error: Engine hardcoded M=1.0 instead of extracting M=C_cap."
+    )

@@ -58,13 +58,15 @@ impl NativeSparseLuSolver {
     }
 
     pub fn factorize_from_triplets(&mut self, diag: &mut Diagnostics) -> Result<(), String> {
-        let n = self.n;
-        for r in 0..n { self.row_scales[r] = 1.0; }
+        self.preprocess_triplets(diag)?;
+        self.compute_factorization(diag)
+    }
 
+    fn preprocess_triplets(&mut self, diag: &mut Diagnostics) -> Result<(), String> {
+        self.row_scales.fill(1.0);
         let mut j_max = 0.0_f64;
         let mut j_min = std::f64::MAX;
 
-        // Fused pass 1: check NaNs, compute row_scales max, and track global j_max / j_min
         for &(r, _, val) in &self.triplets {
             let abs_val = val.abs();
             if abs_val.is_nan() {
@@ -73,37 +75,32 @@ impl NativeSparseLuSolver {
             if abs_val > self.row_scales[r] {
                 self.row_scales[r] = abs_val;
             }
-            if abs_val > j_max {
-                j_max = abs_val;
-            }
-            if abs_val > 0.0 && abs_val < j_min {
-                j_min = abs_val;
-            }
+            if abs_val > j_max { j_max = abs_val; }
+            if abs_val > 0.0 && abs_val < j_min { j_min = abs_val; }
         }
+
         diag.jac_max = j_max;
         diag.jac_min = j_min;
 
-        for r in 0..n {
-            self.row_scales[r] = if self.row_scales[r] > 0.0 { 1.0 / self.row_scales[r] } else { 1.0 };
+        for scale in &mut self.row_scales {
+            *scale = if *scale > 0.0 { 1.0 / *scale } else { 1.0 };
         }
 
-        // Pass 2: scale triplets in-place and clamp diagonal elements
-        for i in 0..self.triplets.len() {
-            let (r, c, val) = self.triplets[i];
+        for triplet in &mut self.triplets {
+            let (r, c, val) = *triplet;
             let mut scaled = val * self.row_scales[r];
             if r == c && scaled.abs() < 1e-14 {
                 scaled = 1e-14;
             }
-            self.triplets[i].2 = scaled;
+            triplet.2 = scaled;
         }
 
-        self.factorize_internal(diag)
+        Ok(())
     }
 
-    fn factorize_internal(&mut self, diag: &mut Diagnostics) -> Result<(), String> {
+    fn compute_factorization(&mut self, diag: &mut Diagnostics) -> Result<(), String> {
         let start_time = Instant::now();
 
-        // Bypass pattern comparison loop when triplet length matches cached pattern
         let pattern_changed = self.cached_pattern.is_empty()
             || self.triplets.len() != self.cached_pattern.len()
             || self.symbolic.is_none();
@@ -111,54 +108,37 @@ impl NativeSparseLuSolver {
         if pattern_changed {
             self.symbolic = None;
             self.cached_pattern.clear();
-            self.cached_pattern.reserve(self.triplets.len());
-            for &(r, c, _) in &self.triplets {
-                self.cached_pattern.push((r, c));
-            }
+            self.cached_pattern.extend(self.triplets.iter().map(|&(r, c, _)| (r, c)));
         }
 
-        let jac_sparse_res = catch_unwind(AssertUnwindSafe(|| {
-            SparseColMat::try_new_from_triplets(self.n, self.n, &self.triplets)
-        }));
-        let jac_sparse = match jac_sparse_res {
-            Ok(Ok(mat)) => mat,
-            _ => return Err("Sparse matrix assembly panicked.".to_string()),
-        };
+        let jac_sparse = Self::safe_execute(|| SparseColMat::try_new_from_triplets(self.n, self.n, &self.triplets))
+            .and_then(|res| res.map_err(|_| "Sparse matrix assembly failed".to_string()))?;
 
         if self.symbolic.is_none() {
-            let sym_res = catch_unwind(AssertUnwindSafe(|| {
-                SymbolicLu::try_new(jac_sparse.symbolic())
-            }));
-            self.symbolic = match sym_res {
-                Ok(Ok(s)) => {
-                    diag.symbolic_factorizations += 1;
-                    Some(s)
-                }
-                _ => return Err("Symbolic LU panicked.".to_string()),
-            };
+            self.symbolic = Some(
+                Self::safe_execute(|| SymbolicLu::try_new(jac_sparse.symbolic()))
+                    .and_then(|res| res.map_err(|_| "Symbolic LU failed".to_string()))?
+            );
+            diag.symbolic_factorizations += 1;
         }
 
-        let num_res = catch_unwind(AssertUnwindSafe(|| {
-            Lu::try_new_with_symbolic(self.symbolic.as_ref().unwrap().clone(), jac_sparse.as_ref())
-        }));
-        match num_res {
-            Ok(Ok(n_lu)) => self.numeric = Some(n_lu),
-            _ => {
-                let fallback = catch_unwind(AssertUnwindSafe(|| -> Result<(SymbolicLu<usize>, Lu<usize, f64>), String> {
-                    let sym = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Sym fail".to_string())?;
-                    let num = Lu::try_new_with_symbolic(sym.clone(), jac_sparse.as_ref()).map_err(|_| "Num fail".to_string())?;
-                    Ok((sym, num))
-                }));
-                match fallback {
-                    Ok(Ok((sym, num))) => {
-                        diag.symbolic_factorizations += 1;
-                        self.symbolic = Some(sym);
-                        self.numeric = Some(num);
-                    }
-                    _ => return Err("LU Factorization panicked.".to_string()),
-                }
+        match Self::safe_execute(|| Lu::try_new_with_symbolic(self.symbolic.as_ref().unwrap().clone(), jac_sparse.as_ref())) {
+            Ok(Ok(num)) => {
+                self.numeric = Some(num);
             }
-        };
+            _ => {
+                // Fallback: Recompute both symbolic and numeric if cached symbolic fails
+                let (sym, num) = Self::safe_execute(|| -> Result<(SymbolicLu<usize>, Lu<usize, f64>), String> {
+                    let s = SymbolicLu::try_new(jac_sparse.symbolic()).map_err(|_| "Sym fallback fail".to_string())?;
+                    let n = Lu::try_new_with_symbolic(s.clone(), jac_sparse.as_ref()).map_err(|_| "Num fallback fail".to_string())?;
+                    Ok((s, n))
+                })?.map_err(|e| e)?;
+                
+                diag.symbolic_factorizations += 1;
+                self.symbolic = Some(sym);
+                self.numeric = Some(num);
+            }
+        }
 
         self.is_stale = false;
         diag.numeric_factorizations += 1;
@@ -180,5 +160,9 @@ impl NativeSparseLuSolver {
 
     pub fn mark_stale(&mut self) {
         self.is_stale = true;
+    }
+
+    fn safe_execute<R, F: FnOnce() -> R>(f: F) -> Result<R, String> {
+        catch_unwind(AssertUnwindSafe(f)).map_err(|_| "Faer internal panic caught across FFI boundary.".to_string())
     }
 }
