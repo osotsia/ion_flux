@@ -38,7 +38,9 @@ class TerminalController:
             self._session._current_term_mode = 1.0
         self._session.set_parameter_by_offset(self._i_offset, float(amps))
 
-        if (mode_changed or val_changed) and reinitialize:
+        step_jump = (curr_amps is not None and abs(curr_amps - amps) > 0.05)
+        needs_reinit = (mode_changed or val_changed) if self._session.mode != "realtime" else (mode_changed or step_jump)
+        if needs_reinit and reinitialize:
             self._session.reinitialize_algebraic()
 
     def set_voltage(self, volts: float, reinitialize: bool = True) -> None:
@@ -51,7 +53,9 @@ class TerminalController:
             self._session._current_term_mode = 0.0
         self._session.set_parameter_by_offset(self._v_offset, float(volts))
 
-        if (mode_changed or val_changed) and reinitialize:
+        step_jump = (curr_volts is not None and abs(curr_volts - volts) > 0.005)
+        needs_reinit = (mode_changed or val_changed) if self._session.mode != "realtime" else (mode_changed or step_jump)
+        if needs_reinit and reinitialize:
             self._session.reinitialize_algebraic()
 
     def rest(self, reinitialize: bool = True) -> None:
@@ -239,13 +243,18 @@ class Session:
             self._mock_y = self._ckpt[1].copy()
 
     def triggered(self, condition: Any) -> bool:
-        if condition is None or isinstance(condition, (int, float)): return False
-        if isinstance(condition, str):
-            from ion_flux.compiler._1_frontend.core import Condition
+        if condition is None or isinstance(condition, (int, float)):
+            return False
+        from ion_flux.compiler._1_frontend.core import Condition
+        from ion_flux.compiler._1_frontend.nodes import BinaryOp
+        if isinstance(condition, BinaryOp):
             condition = Condition(condition)
+        elif isinstance(condition, Condition):
+            pass
         elif hasattr(condition, "expression"):
-            from ion_flux.compiler._1_frontend.core import Condition
             condition = Condition(condition.expression)
+        else:
+            raise TypeError(f"Invalid condition type '{type(condition).__name__}'. Expected BinaryOp or Condition.")
         return condition.evaluate(self)
 
     def reach_steady_state(self) -> None:

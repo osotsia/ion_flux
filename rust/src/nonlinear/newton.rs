@@ -70,22 +70,18 @@ pub fn solve(
         );
 
         if linear_solver.is_stale() {
-            if prob.config.is_realtime && diag.accepted_steps > 0 {
-                linear_solver.set_stale(false);
-            } else {
-                let start = Instant::now();
-                jacobian::assemble(prob, state, linear_solver, c_j);
-                diag.jacobian_assembly_time_us += start.elapsed().as_micros();
-                diag.jacobian_evaluations += 1;
-                
-                if let Err(e) = linear_solver.factorize_from_triplets(diag) {
-                    return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e));
-                }
-                
-                history.c_j_old = c_j;
-                cj_ratio = 1.0; 
-                linear_solver.set_stale(false);
+            let start = Instant::now();
+            jacobian::assemble(prob, state, linear_solver, c_j);
+            diag.jacobian_assembly_time_us += start.elapsed().as_micros();
+            diag.jacobian_evaluations += 1;
+            
+            if let Err(e) = linear_solver.factorize_from_triplets(diag) {
+                return NewtonResult::Diverged(NewtonFailure::SingularJacobian(e));
             }
+            
+            history.c_j_old = c_j;
+            cj_ratio = 1.0; 
+            linear_solver.set_stale(false);
         }
 
         if let Err(e) = linear_solver.solve(&mut scratch.dy, diag) {

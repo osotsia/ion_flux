@@ -168,7 +168,7 @@ grads = loss.backward()
 print(grads["anode_D_s"]) 
 ```
 
-### Scenario C: Low-Latency Software-in-the-Loop (SIL)
+### Scenario C: Microsecond-Latency Software-in-the-Loop (SIL)
 Engineers couple physics models directly to control software because validating the software (e.g., fast-charging, thermal management) requires closed-loop feedback and cannot be done with pre-recorded test data. For Real-Time Software-in-the-Loop (SIL) or BMS testing, use a **Stateful Session** with deterministic execution profiles. The BDF history vectors, sparse LU factorizations, and exact analytical Jacobians stay "hot" in hardware memory.
 
 ```python
@@ -192,8 +192,8 @@ while session.time < 3600.0:
         break
 ```
 Benchmarked on an Apple Silicon host, we have:
-1. **Asymptotic Reduced Models (TSPMe, N ≈ 180):** Low millisecond-scale (~1.3 ms active, ~150 µs rest), suitable for single-rate execution at standard BMS frequencies (100 Hz) with full electrolyte and thermal dynamics.
-2. **Full-Order P2D Models (DFN, N ≥ 1,200):** Millisecond-scale (~11.0 ms), suitable for multi-rate co-simulation architectures (10 Hz) if detailed through-thickness particle saturation gradients are strictly required.
+1. **Asymptotic Reduced Models (TSPMe, N ≈ 180):** Hard real-time **1 kHz capable** (median 10.5 µs active step, WCET 238.8 µs across discontinuous step jumps), consuming ~1.1% steady-state CPU load at 1 kHz (23.9% peak frame load; ~0.1% steady-state / 2.4% peak at 100 Hz) with full electrolyte and thermal dynamics.
+2. **Full-Order P2D Models (DFN, N ≥ 1,200):** Synchronous **100–200 Hz hard real-time capable** (median 67.6 µs active step, WCET 4.25 ms during Sparse LU refactorization on discontinuous step jumps), consuming < 0.7% steady-state CPU load at 100 Hz (42.5% peak frame load at 100 Hz, 85.0% at 200 Hz) when detailed through-thickness particle saturation gradients are strictly required. (At 1 kHz, steady-state stepping uses ~6.8% CPU load, while discontinuous load steps exceed the 1 ms budget).
 
 ---
 ## 🧠 How it Works Under the Hood

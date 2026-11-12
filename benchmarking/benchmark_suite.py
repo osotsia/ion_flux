@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-plan/benchmark_suite.py
-=======================
+scripts/benchmark_suite.py
+==========================
 Automated benchmarking harness for ion_flux.
 Measures execution latency across 0D, 1D, 1D-1D multi-scale, ALE, and Adjoint regimes.
 
-BUG: The benchmark label ffi_overhead_ms is misleading for fast models: For small models with high step counts, that time is spent in the native Rust BDF stepping logic, not in Python marshalling.
+Note:
+`stepper_overhead_ms` captures native Rust BDF step adaptation, polynomial prediction,
+error norm evaluations, and protocol trigger monitoring, isolating algebraic core solves
+(residuals, Jacobians, and linear factorizations) from time-marching orchestration.
 """
 
 import os
@@ -255,7 +258,7 @@ def execute_benchmarks(cases: List[BenchmarkCase]) -> Dict[str, Any]:
             diag.get("jacobian_assembly_time_us", 0) +
             diag.get("linear_solve_time_us", 0)
         ) / 1000.0
-        ffi_overhead_ms = max(0.0, median_ms - solver_time_ms) if solver_time_ms > 0 else 0.0
+        stepper_overhead_ms = max(0.0, median_ms - solver_time_ms) if solver_time_ms > 0 else 0.0
         peak_rss_mb = diag.get("peak_rss_bytes", 0) / (1024.0 * 1024.0)
 
         results["cases"][case.name] = {
@@ -268,7 +271,7 @@ def execute_benchmarks(cases: List[BenchmarkCase]) -> Dict[str, Any]:
             "std_ms": std_ms,
             "iterations": case.iterations,
             "solver_time_ms": solver_time_ms,
-            "ffi_overhead_ms": ffi_overhead_ms,
+            "stepper_overhead_ms": stepper_overhead_ms,
             "total_steps": diag.get("total_steps", 0),
             "newton_per_step": diag.get("newton_iterations_per_step", 0.0),
             "rejection_ratio": diag.get("step_rejection_ratio", 0.0),
@@ -278,7 +281,7 @@ def execute_benchmarks(cases: List[BenchmarkCase]) -> Dict[str, Any]:
         }
 
         print(
-            f"  Done: Median: {median_ms:8.2f} ms (Core: {solver_time_ms:6.2f} ms | FFI: {ffi_overhead_ms:5.2f} ms) "
+            f"  Done: Median: {median_ms:8.2f} ms (Core: {solver_time_ms:6.2f} ms | Stepper: {stepper_overhead_ms:5.2f} ms) "
             f"| P95: {p95_ms:8.2f} ms | RSS: {peak_rss_mb:5.1f} MB"
         )
 
@@ -306,18 +309,18 @@ def print_summary_table(results: Dict[str, Any]) -> None:
     print("\n\n" + "=" * 125)
     print(
         f"{'Benchmark Target':<32} | {'Category':<16} | {'N':<5} | "
-        f"{'Wall (ms)':<10} | {'Core (ms)':<10} | {'FFI (ms)':<9} | "
+        f"{'Wall (ms)':<10} | {'Core (ms)':<10} | {'Stepper (ms)':<12} | "
         f"{'Steps':<6} | {'Newton/St':<9} | {'Peak RSS':<9}"
     )
     print("-" * 125)
 
     for name, d in results["cases"].items():
         core_str = f"{d.get('solver_time_ms', 0.0):10.2f}" if d.get('solver_time_ms', 0) > 0 else "       N/A"
-        ffi_str = f"{d.get('ffi_overhead_ms', 0.0):9.2f}" if d.get('solver_time_ms', 0) > 0 else "      N/A"
+        stepper_str = f"{d.get('stepper_overhead_ms', 0.0):12.2f}" if d.get('solver_time_ms', 0) > 0 else "         N/A"
         rss_str = f"{d.get('peak_rss_mb', 0.0):7.1f} MB" if d.get('peak_rss_mb', 0) > 0 else "      N/A"
         print(
             f"{name:<32} | {d['category']:<16} | {d['n_states']:<5} | "
-            f"{d['median_ms']:10.2f} | {core_str} | {ffi_str} | "
+            f"{d['median_ms']:10.2f} | {core_str} | {stepper_str} | "
             f"{d.get('total_steps', 0):<6} | {d.get('newton_per_step', 0.0):9.2f} | {rss_str}"
         )
 

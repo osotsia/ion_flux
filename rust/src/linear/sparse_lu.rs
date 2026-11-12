@@ -39,7 +39,11 @@ pub struct NativeSparseLuSolver {
 
 impl NativeSparseLuSolver {
     pub fn new(n: usize, bw: isize) -> Self {
-        let estimated_nnz = n * (2 * bw.max(0) as usize + 1).min(n);
+        let estimated_nnz = if bw > 0 {
+            n * (2 * bw as usize + 1).min(n)
+        } else {
+            (n * 8).max(64)
+        };
         Self {
             is_stale: true, n, bw,
             symbolic: None, numeric: None,
@@ -108,6 +112,9 @@ impl NativeSparseLuSolver {
         if pattern_changed {
             self.symbolic = None;
             self.cached_pattern.clear();
+            if self.cached_pattern.capacity() < self.triplets.len() {
+                self.cached_pattern.reserve(self.triplets.len() - self.cached_pattern.capacity());
+            }
             self.cached_pattern.extend(self.triplets.iter().map(|&(r, c, _)| (r, c)));
         }
 

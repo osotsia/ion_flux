@@ -144,8 +144,11 @@ class MinimalDFN(fx.PDE):
                 self.c_s_n: fx.dt(self.c_s_n) == -fx.div(N_s_n, axis=self.r_n)
             },
             "boundaries": {
+                # Ground reference potential at anode current collector
+                self.phi_s_n: {"left": fx.Dirichlet(0.0)},
+
                 # Apply cycler current demand to the solid phase boundary via Neumann tensor.
-                i_s_n: {"left": -self.i_app, "right": 0.0},
+                i_s_n: {"right": 0.0},
                 
                 # Map volumetric macro current (j_n) to area flux at the micro boundary.
                 N_s_n: {"left": 0.0, "right": -j_n / 5.78e10}
@@ -182,7 +185,7 @@ protocol = Sequence([
 ])
 
 result = engine.solve(protocol=protocol)
-result.plot_dashboard(["V_cell", "i_app"]) # Launch interactive visualization UI
+result.print_summary() # Display detailed solver and telemetry diagnostics
 ```
 
 #### Use Case B: Micro-Stepping Co-Simulation (BMS HIL)
