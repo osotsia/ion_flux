@@ -20,6 +20,10 @@ pub fn assemble_triplets_with_scratch(
 ) {
     triplets.clear();
     let is_alg_init = c_j == 0.0;
+    let cpr_nnz = cpr.color_rows.len() + cpr.dense_rows.len() * n;
+    if triplets.capacity() < cpr_nnz {
+        triplets.reserve(cpr_nnz - triplets.capacity());
+    }
     
     if !cpr.color_seeds.is_empty() {
         if let Some(jvp) = jvp_fn {
@@ -43,8 +47,12 @@ pub fn assemble_triplets_with_scratch(
                 for i in start..end {
                     let r = cpr.color_rows[i];
                     let c = cpr.color_cols[i];
-                    if is_alg_init && id[r] > 0.5 && r != c { continue; }
-                    triplets.push((r, c, jvp_scratch[r]));
+                    let val = if is_alg_init && id[r] > 0.5 {
+                        if r == c { 1.0 } else { 0.0 }
+                    } else {
+                        jvp_scratch[r]
+                    };
+                    triplets.push((r, c, val));
                 }
             }
         }
@@ -52,7 +60,13 @@ pub fn assemble_triplets_with_scratch(
         if !cpr.dense_rows.is_empty() {
             if let Some(vjp) = vjp_fn {
                 for &r in &cpr.dense_rows {
-                    if is_alg_init && id[r] > 0.5 { continue; }
+                    if is_alg_init && id[r] > 0.5 {
+                        for c_idx in 0..n {
+                            let val = if r == c_idx { 1.0 } else { 0.0 };
+                            triplets.push((r, c_idx, val));
+                        }
+                        continue;
+                    }
                     lambda_scratch[r] = 1.0;
                     unsafe {
                         vjp(
@@ -70,9 +84,7 @@ pub fn assemble_triplets_with_scratch(
                     lambda_scratch[r] = 0.0;
                     for c_idx in 0..n {
                         let val = dy_scratch[c_idx] + c_j * dydot_scratch[c_idx];
-                        if val.abs() > 1e-16 || val.is_nan() {
-                            triplets.push((r, c_idx, val));
-                        }
+                        triplets.push((r, c_idx, val));
                     }
                 }
             }

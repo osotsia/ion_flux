@@ -27,6 +27,11 @@ impl BdfHistory {
     }
 
     pub fn set_coeffs(&mut self) -> f64 {
+        if self.h_used > 0.0 && (self.h / self.h_used > 2.5 || self.h_used / self.h > 10.0) {
+            self.order = 1;
+            self.k_used = 0;
+            self.ns = 0;
+        }
         if self.h != self.h_used || self.order != self.k_used { self.ns = 0; }
         self.ns = std::cmp::min(self.ns + 1, self.k_used + 2);
         

@@ -23,10 +23,15 @@ pub fn step(
     if diag.accepted_steps == 0 {
         for i in 0..prob.n { scratch.weights[i] = 1.0 / (prob.config.rel_tol * state.y[i].abs() + prob.config.abs_tol); }
         let ypnorm = constraints::wrms_norm_mask(&state.ydot, &scratch.weights, &prob.id, prob.config.suppress_alg);
-        let mut h0 = 0.001 * target_dt.abs();
-        if ypnorm > 0.5 / h0 { h0 = 0.5 / ypnorm; }
+        let h0 = if prob.config.is_realtime {
+            target_dt.abs()
+        } else {
+            let mut init_h = 0.001 * target_dt.abs();
+            if ypnorm > 0.5 / init_h { init_h = 0.5 / ypnorm; }
+            init_h
+        };
 
-        history.h = h0.max(prob.config.min_dt);
+        history.h = h0.clamp(prob.config.min_dt, prob.config.max_dt);
         history.phi[0].copy_from_slice(&state.y);
         for i in 0..prob.n { history.phi[1][i] = history.h * state.ydot[i]; }
         history.psi[0] = history.h;
@@ -40,7 +45,12 @@ pub fn step(
     }
 
     while target_dt - t_local > 1e-10 * target_dt.abs() {
-        history.h = history.h.min(target_dt - t_local).clamp(prob.config.min_dt, prob.config.max_dt);
+        if prob.config.is_realtime {
+            history.h = (target_dt - t_local).clamp(prob.config.min_dt, prob.config.max_dt);
+            history.c_j = 1.0 / history.h;
+        } else {
+            history.h = history.h.min(target_dt - t_local).clamp(prob.config.min_dt, prob.config.max_dt);
+        }
         diag.total_steps += 1;
 
         let ck = history.set_coeffs();
@@ -110,11 +120,10 @@ pub fn step(
             newton::NewtonResult::Diverged(failure) => {
                 if prob.config.is_realtime {
                     for i in 0..prob.n {
-                        let c = prob.constraints[i];
-                        if c > 0.0 && state.y[i] < 0.0 { state.y[i] = 0.0; }
-                        else if c < 0.0 && state.y[i] > 0.0 { state.y[i] = 0.0; }
+                        state.y[i] = history.phi[0][i];
+                        state.ydot[i] = 0.0;
                     }
-                    diag.accepted_steps += 1;
+                    diag.rejected_steps += 1;
                     t_local += history.h;
                     break;
                 }

@@ -38,15 +38,15 @@ class Chen2020_DFN(fx.PDE):
     # =========================================================================
     c_e = fx.State(domain=cell, name="c_e")         # Electrolyte Li+ concentration [mol/m^3]
     
-    phi_e = fx.State(domain=cell, name="phi_e")     # Electrolyte potential [V]
-    phi_s_n = fx.State(domain=x_n, name="phi_s_n")  # Solid potential (Anode) [V]
-    phi_s_p = fx.State(domain=x_p, name="phi_s_p")  # Solid potential (Cathode) [V]
+    phi_e = fx.State(domain=cell, name="phi_e", max_newton_step=0.1)     # Electrolyte potential [V]
+    phi_s_n = fx.State(domain=x_n, name="phi_s_n", max_newton_step=0.1)  # Solid potential (Anode) [V]
+    phi_s_p = fx.State(domain=x_p, name="phi_s_p", max_newton_step=0.1)  # Solid potential (Cathode) [V]
     
     # Hierarchical states (Macro x Micro) representing solid particle concentrations [mol/m^3]
     c_s_n = fx.State(domain=x_n * r_n, name="c_s_n") 
     c_s_p = fx.State(domain=x_p * r_p, name="c_s_p") 
     
-    V_cell = fx.State(domain=None, name="V_cell")    # 0D Terminal Voltage [V]
+    V_cell = fx.State(domain=None, name="V_cell", max_newton_step=0.2)    # 0D Terminal Voltage [V]
     i_app = fx.State(domain=None, name="i_app")      # 0D Terminal Current [A]
     
     terminal = fx.Terminal(current=i_app, voltage=V_cell)
@@ -130,9 +130,9 @@ class Chen2020_DFN(fx.PDE):
         j0_n = self.k_n * (ce_safe * c_surf_n * (self.c_max_n - c_surf_n))**0.5
         j0_p = self.k_p * (ce_safe * c_surf_p * (self.c_max_p - c_surf_p))**0.5
         
-        # Local Overpotentials [V] (Table I)
-        eta_n = self.phi_s_n - self.phi_e - U_n
-        eta_p = self.phi_s_p - self.phi_e - U_p
+        # Local Overpotentials [V] (Table I) - clamped to prevent exponential Newton blowup
+        eta_n = fx.clamp(self.phi_s_n - self.phi_e - U_n, lower=-0.5, upper=0.5)
+        eta_p = fx.clamp(self.phi_s_p - self.phi_e - U_p, lower=-0.5, upper=0.5)
         
         # Volumetric Butler-Volmer Reaction Current Densities (J_k) [A/m^3] (Table I)
         F_RT = F / (2.0 * R_const * T)  # Using alpha = 0.5 symmetry

@@ -141,6 +141,10 @@ fn solve_lu_step(
 
     // Full Assembly Fallback
     solver.triplets.clear();
+    let cpr_nnz = params.cpr.color_rows.len() + params.cpr.dense_rows.len() * n;
+    if solver.triplets.capacity() < cpr_nnz {
+        solver.triplets.reserve(cpr_nnz - solver.triplets.capacity());
+    }
     for (c_idx, seed) in params.cpr.color_seeds.iter().enumerate() {
         unsafe { (params.jvp_fn)(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), params.m_slice.as_ptr(), c_j, seed.as_ptr(), ws.jvp_dy.as_mut_ptr(), ws.jvp_dydot.as_mut_ptr(), ws.res_dummy.as_mut_ptr(), ws.jvp_out.as_mut_ptr()); }
         for i in params.cpr.color_ptrs[c_idx]..params.cpr.color_ptrs[c_idx + 1] {
