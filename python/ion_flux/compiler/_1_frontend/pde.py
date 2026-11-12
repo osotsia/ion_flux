@@ -157,11 +157,14 @@ class PDE:
 
         # 1. Identify all nodes that need BC tags (Immutable Context Passing)
         tags = {}
-        for target, bcs in raw.get("boundaries", {}).items():
-            if isinstance(target, Boundary):
-                tags[id(target.child)] = str(id(target.child))
-            elif not isinstance(target, (State, Domain)):
-                tags[id(target)] = str(id(target))
+        tag_counter = 0
+        for target in raw.get("boundaries", {}):
+            target_key = id(target.child) if isinstance(target, Boundary) else (
+                id(target) if not isinstance(target, (State, Domain)) else None
+            )
+            if target_key is not None and target_key not in tags:
+                tags[target_key] = f"bc_{tag_counter}"
+                tag_counter += 1
 
         for target, bcs in raw.get("boundaries", {}).items():
             if isinstance(target, State):

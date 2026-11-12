@@ -60,7 +60,7 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
             "state_domain_map": state_domain_map,
             "cpp_source": cpp_source
         }
-        meta_json_str = json.dumps(meta_dict)
+        meta_json_str = json.dumps(meta_dict, sort_keys=True)
         cpp_source += f'\nextern "C" const char* get_ion_flux_metadata() {{\n    return R"ION_FLUX_META({meta_json_str})ION_FLUX_META";\n}}\n'
 
         if not mock_execution:

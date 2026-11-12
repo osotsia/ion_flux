@@ -635,3 +635,45 @@ def test_cpr_graph_coloring_banded_jacobian():
         atol=1e-10, 
         err_msg="CPR Banded Graph Coloring mismatched the exact Dense Jacobian baseline."
     )
+
+
+@REQUIRES_COMPILER
+def test_compilation_determinism_and_cache_hit():
+    """
+    Validates that models containing boundary conditions and spatial integrals
+    produce deterministic C++ sources and SHA-256 hashes, hitting the disk cache.
+    """
+    class CachedModel(fx.PDE):
+        x = fx.Domain(bounds=(0, 1.0), resolution=10, name="x")
+        c = fx.State(domain=x, name="c")
+        avg = fx.State(domain=None, name="avg")
+
+        def math(self):
+            flux = -1.0 * fx.grad(self.c)
+            return {
+                "equations": {
+                    self.c: fx.dt(self.c) == -fx.div(flux),
+                    self.avg: self.avg == fx.integral(self.c, over=self.x)
+                },
+                "boundaries": {
+                    flux: {"left": 0.0, "right": 1.0}
+                },
+                "initial_conditions": {
+                    self.c: 0.0,
+                    self.avg: 0.0
+                }
+            }
+
+    # First compile: generates binary and stores in ~/.cache/ion_flux/jit_cache
+    eng1 = fx.Engine(model=CachedModel(), target="cpu", mock_execution=False)
+    lib1 = eng1.manifest.lib_path
+
+    # Second compile: must produce exact identical binary path without invoking Clang
+    eng2 = fx.Engine(model=CachedModel(), target="cpu", mock_execution=False)
+    lib2 = eng2.manifest.lib_path
+
+    assert lib1 == lib2, (
+        f"Cache Invalidation Defect: Independent instantiations produced divergent binary paths!\n"
+        f"Run 1: {lib1}\nRun 2: {lib2}"
+    )
+    assert os.path.exists(lib1)

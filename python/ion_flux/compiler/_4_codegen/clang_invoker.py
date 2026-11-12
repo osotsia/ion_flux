@@ -36,7 +36,7 @@ class NativeCompiler:
                 "Execute `ion-flux install-toolchain` in your terminal to install it."
             )
 
-    def _enforce_lru_cache(self, max_entries: int = 50) -> None:
+    def _enforce_lru_cache(self, max_entries: int = 200) -> None:
         """Evicts the oldest compiled JIT artifacts to prevent disk exhaustion."""
         try:
             artifacts = []

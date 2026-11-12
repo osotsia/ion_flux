@@ -540,6 +540,7 @@ class IntegralQuadrature:
         self.metrics = metrics
         self.topo = topo
         self.layout = layout
+        self._reduction_counter = 0
 
     def lower_integral(
         self,
@@ -551,7 +552,8 @@ class IntegralQuadrature:
         """Constructs an unrolled discrete summation loop accumulating over control volumes: sum(c * dV)."""
         axes = self.topo.get_axes(over_domain)
         reduction_idx_mgr = idx_mgr.clone()
-        integral_id = id(child)
+        integral_id = self._reduction_counter
+        self._reduction_counter += 1
 
         loops: List[Tuple[str, Expr]] = []
         volume_exprs: List[Expr] = []
