@@ -65,6 +65,7 @@ pub fn step(
                 if !prob.config.is_realtime && ck * enorm_k > 1.0 {
                     error_fails += 1; diag.rejected_steps += 1;
                     history.restore(); linear_solver.mark_stale();
+                    history.phase = 1;
                     
                     if error_fails == 1 {
                         let mut knew = history.order;
@@ -118,6 +119,7 @@ pub fn step(
                     break;
                 }
                 diag.rejected_steps += 1; history.restore(); history.h *= 0.25; linear_solver.mark_stale();
+                history.phase = 1;
                 if history.h <= prob.config.min_dt {
                     let reason = format!("Nonlinear Divergence: {:?} (Step collapsed below min_dt). t={}", failure, abs_t + t_local);
                     return Err(diag.build_crash_report(&state.y, &state.ydot, &prob.id, reason));

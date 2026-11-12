@@ -82,11 +82,16 @@ impl BdfHistory {
         let n = ee.len();
         let kdiff = self.order as isize - self.k_used as isize;
         self.k_used = self.order; self.h_used = self.h;
-        if (self.order == self.order - 1) || self.order == self.max_order { self.phase = 1; }
+        if kdiff == -1 || self.order == self.max_order { self.phase = 1; }
 
         if self.phase == 0 {
-            if self.order < self.max_order { self.order += 1; }
-            self.h = (self.h * 2.0).clamp(min_dt, max_dt); 
+            let eta = (0.9 * (2.0 * err_k + 0.0001).powf(-1.0 / (self.order as f64 + 1.0))).clamp(0.5, 2.0);
+            if eta >= 1.5 && self.order < self.max_order {
+                self.order += 1;
+            } else if eta < 1.0 {
+                self.phase = 1;
+            }
+            self.h = (self.h * eta).clamp(min_dt, max_dt);
         } else {
             let action; let mut err_knew = err_k;
             let terr_k = (self.order as f64 + 1.0) * err_k;
