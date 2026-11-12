@@ -243,7 +243,7 @@ def test_ast_capture_and_semantic_buckets():
     assert bc_phi["type"] == "dirichlet"
     assert bc_phi["bcs"]["left"]["type"] == "Scalar"
     
-    # 5. Verify Immutable Frontend Architecture (Phase 1 Goal)
+    # 5. Verify Immutable Frontend Architecture
     # Proves the compiler did not inject mutability hacks into the user's Python AST graph
     for attr in dir(model):
         val = getattr(model, attr)

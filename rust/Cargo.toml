@@ -13,3 +13,4 @@ numpy = "0.29.0"
 libloading = "0.8.0"
 rayon = "1.10"
 faer = "0.20.2" # Enables fast Sparse LU for highly-coupled 1D/2D Battery DAEs
+libc = "0.2"

@@ -365,6 +365,7 @@ name = "ion_flux_core"
 version = "0.4.2"
 dependencies = [
  "faer",
+ "libc",
  "libloading",
  "numpy",
  "pyo3",

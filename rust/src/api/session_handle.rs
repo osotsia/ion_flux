@@ -1,8 +1,9 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use numpy::{PyArray1, PyArray2, PyReadwriteArray1, ToPyArray};
 use crate::stepper::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::stepper::state::{SolverInstance, Checkpoint};
-use crate::api::{NativeSolverCrash, crash_report_to_pydict};
+use crate::api::{NativeSolverCrash, crash_report_to_pydict, diagnostics_to_pydict};
 
 #[pyclass(unsendable)]
 pub struct SolverHandle {
@@ -89,6 +90,11 @@ impl SolverHandle {
 
     pub fn get_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> { 
         numpy::ndarray::Array1::from_vec(self.instance.state.y.clone()).to_pyarray(py) 
+    }
+
+    pub fn get_diagnostics<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        self.instance.diag.peak_rss_bytes = crate::diagnostics::get_peak_rss_bytes();
+        Ok(diagnostics_to_pydict(py, &self.instance.diag))
     }
 
     pub fn read_state_into(&self, mut target: PyReadwriteArray1<f64>) -> PyResult<()> {

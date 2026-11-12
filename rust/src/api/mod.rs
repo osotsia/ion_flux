@@ -9,8 +9,40 @@ pub use adjoint_dispatcher::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use crate::diagnostics::CrashReport;
+use crate::diagnostics::Diagnostics;
 
 pyo3::create_exception!(_core, NativeSolverCrash, pyo3::exceptions::PyRuntimeError);
+
+pub fn diagnostics_to_pydict<'py>(py: Python<'py>, diag: &Diagnostics) -> Bound<'py, PyDict> {
+    let dict = PyDict::new(py);
+    dict.set_item("total_steps", diag.total_steps).unwrap();
+    dict.set_item("accepted_steps", diag.accepted_steps).unwrap();
+    dict.set_item("rejected_steps", diag.rejected_steps).unwrap();
+    let rej_ratio = if diag.total_steps > 0 {
+        diag.rejected_steps as f64 / diag.total_steps as f64
+    } else {
+        0.0
+    };
+    dict.set_item("step_rejection_ratio", rej_ratio).unwrap();
+    dict.set_item("newton_iterations", diag.newton_iterations).unwrap();
+    let newton_per_step = if diag.total_steps > 0 {
+        diag.newton_iterations as f64 / diag.total_steps as f64
+    } else {
+        0.0
+    };
+    dict.set_item("newton_iterations_per_step", newton_per_step).unwrap();
+    dict.set_item("jacobian_evaluations", diag.jacobian_evaluations).unwrap();
+    dict.set_item("numeric_factorizations", diag.numeric_factorizations).unwrap();
+    dict.set_item("symbolic_factorizations", diag.symbolic_factorizations).unwrap();
+    dict.set_item("jacobian_assembly_time_us", diag.jacobian_assembly_time_us as u64).unwrap();
+    dict.set_item("linear_solve_time_us", diag.linear_solve_time_us as u64).unwrap();
+    dict.set_item("residual_time_us", diag.residual_time_us as u64).unwrap();
+    dict.set_item("last_rho", diag.last_rho).unwrap();
+    dict.set_item("peak_rss_bytes", diag.peak_rss_bytes).unwrap();
+    dict.set_item("cpu_cycles", diag.cpu_cycles).unwrap();
+    dict.set_item("instructions", diag.instructions).unwrap();
+    dict
+}
 
 #[derive(Debug)]
 pub enum SolverError {

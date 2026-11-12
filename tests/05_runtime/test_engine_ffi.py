@@ -84,4 +84,130 @@ def test_engine_rejects_mock_execution():
     # If the array is entirely 0.0, the native solver was bypassed
     assert np.any(i_app_data > 0.5), \
         "Engine silently degraded to mock execution! The trajectory data remained frozen at initial conditions."
-    
+
+
+@REQUIRES_RUNTIME
+def test_runtime_diagnostics_exposure():
+    """
+    Native solver diagnostics are surfaced to Python on 
+    SimulationResult (single and batch solves) and stateful Session.
+    """
+    class SimpleODE(fx.PDE):
+        y = fx.State(domain=None, name="y")
+        def math(self):
+            return {
+                "equations": {self.y: fx.dt(self.y) == -self.y},
+                "boundaries": {},
+                "initial_conditions": {self.y: 1.0}
+            }
+
+    engine = fx.Engine(model=SimpleODE(), target="cpu:serial")
+
+    # 1. Single solve diagnostics
+    res = engine.solve(t_span=(0, 1.0), show_progress=False)
+    assert hasattr(res, "diagnostics")
+    diag = res.diagnostics
+    assert isinstance(diag, dict)
+    assert diag["total_steps"] > 0
+    assert diag["accepted_steps"] > 0
+    assert diag["total_steps"] == diag["accepted_steps"] + diag["rejected_steps"]
+    assert diag["newton_iterations"] >= diag["total_steps"]
+    assert diag["jacobian_assembly_time_us"] >= 0
+    assert diag["linear_solve_time_us"] >= 0
+    assert diag["residual_time_us"] >= 0
+
+    # 2. Batch solve diagnostics
+    batch_res = engine.solve_batch(parameters=[{}, {}], t_span=(0, 1.0), max_workers=2, show_progress=False)
+    for r in batch_res:
+        assert isinstance(r.diagnostics, dict)
+        assert r.diagnostics["total_steps"] > 0
+        assert r.diagnostics["accepted_steps"] > 0
+
+    # 3. Stateful session diagnostics
+    session = engine.start_session()
+    assert hasattr(session, "diagnostics")
+    initial_diag = session.diagnostics
+    assert isinstance(initial_diag, dict)
+
+    session.step(0.1)
+    stepped_diag = session.diagnostics
+    assert stepped_diag["total_steps"] > 0
+    assert stepped_diag["accepted_steps"] > 0
+
+
+def test_static_telemetry_profiling():
+    """
+    TelemetryReport produces verified topological properties, exact 
+    non-zero counts, CPR schedule counts, and memory footprint estimates.
+    """
+    class MultiStateDAE(fx.PDE):
+        x = fx.Domain(bounds=(0, 1.0), resolution=5, name="x")
+        c = fx.State(domain=x, name="c")
+        v = fx.State(domain=None, name="v")
+        i_app = fx.State(domain=None, name="i_app")
+        terminal = fx.Terminal(current=i_app, voltage=v)
+
+        def math(self):
+            flux = -fx.grad(self.c)
+            return {
+                "equations": {
+                    self.c: fx.dt(self.c) == -fx.div(flux),
+                    self.v: self.v == self.c.right - self.i_app * 0.1
+                },
+                "boundaries": {
+                    flux: {"left": 0.0, "right": self.i_app}
+                },
+                "initial_conditions": {
+                    self.c: 1.0, self.v: 1.0, self.i_app: 0.0
+                }
+            }
+
+    engine = fx.Engine(model=MultiStateDAE(), target="cpu:serial")
+    report = engine.telemetry
+
+    assert report is not None
+    assert report.n_states == 7  # 5 spatial + 1 voltage + 1 current
+    assert report.model_len == 7
+    assert report.n_params >= 3  # _term_mode, _term_i_target, _term_v_target
+    assert report.nnz > 0
+    assert 0.0 <= report.sparsity < 1.0
+    assert report.cpr_colors > 0
+    assert report.memory_footprint_bytes > 0
+    assert "Sparse LU" in report.solver_type
+
+    summary = report.summary()
+    assert summary["n_states"] == 7
+    assert summary["nnz"] == report.nnz
+    assert summary["memory_footprint_bytes"] == report.memory_footprint_bytes
+
+
+@REQUIRES_RUNTIME
+def test_hardware_and_memory_telemetry(capsys):
+    """
+    Validates Phase 3: Physical memory accounting (peak_rss_bytes) and
+    optional hardware PMU metrics are reported and print_summary() renders cleanly.
+    """
+    class SimpleODE(fx.PDE):
+        y = fx.State(domain=None, name="y")
+        def math(self):
+            return {
+                "equations": {self.y: fx.dt(self.y) == -self.y},
+                "boundaries": {},
+                "initial_conditions": {self.y: 1.0}
+            }
+
+    engine = fx.Engine(model=SimpleODE(), target="cpu:serial")
+    res = engine.solve(t_span=(0, 1.0), show_progress=False)
+
+    diag = res.diagnostics
+    assert "peak_rss_bytes" in diag
+    assert diag["peak_rss_bytes"] > 0  # Process must consume memory on any host OS
+    assert "cpu_cycles" in diag
+    assert "instructions" in diag
+
+    # Verify dashboard rendering
+    res.print_summary()
+    captured = capsys.readouterr().out
+    assert "ION_FLUX EXECUTION & DIAGNOSTIC SUMMARY" in captured
+    assert "Solver Dynamics:" in captured
+    assert "Peak Resident Memory:" in captured

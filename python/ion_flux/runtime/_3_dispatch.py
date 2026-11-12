@@ -82,7 +82,7 @@ class SundialsBackend:
                     p_list, self.ctx["m_list"], self.ctx["t_eval"].tolist(), self.manifest.layout.n_obs,
                     *self.manifest.cpr_cache, self.ctx["show_progress"], self.ctx["v_idx"]
                 )
-                res = (self.ctx["t_eval"], y_res, obs_res, np.empty(0), np.empty((0, self.manifest.layout.n_states)), np.empty((0, self.manifest.layout.n_states)))
+                res = (self.ctx["t_eval"], y_res, obs_res, np.empty(0), np.empty((0, self.manifest.layout.n_states)), np.empty((0, self.manifest.layout.n_states)), {})
             raw_results.append(res)
         return raw_results
 
@@ -144,7 +144,7 @@ class SundialsBackend:
                 sys.stdout.flush()
 
         obs_mat = np.array(obs_out) if self.manifest.layout.n_obs > 0 else np.empty((len(t_out), 0))
-        return (np.array(t_out), np.array(y_out), obs_mat, np.empty(0), np.empty((0, self.manifest.layout.n_states)), np.empty((0, self.manifest.layout.n_states)))
+        return (np.array(t_out), np.array(y_out), obs_mat, np.empty(0), np.empty((0, self.manifest.layout.n_states)), np.empty((0, self.manifest.layout.n_states)), {})
 
     def _find_offset(self, candidates):
         for c in candidates:
@@ -228,7 +228,7 @@ def dispatch_native(
         raise format_native_crash(e, manifest) from None
 
     dispatched = []
-    for p_dict, p_list, (t_res, y_res, obs_res, micro_t, micro_y, micro_ydot) in zip(parameters, ctx["p_batch"], raw_results):
+    for p_dict, p_list, (t_res, y_res, obs_res, micro_t, micro_y, micro_ydot, diag_dict) in zip(parameters, ctx["p_batch"], raw_results):
         trajectory = None
         if record_tape and len(micro_t) > 0:
             trajectory = {
@@ -236,7 +236,7 @@ def dispatch_native(
                 "_micro_t": micro_t, "_micro_y": micro_y, "_micro_ydot": micro_ydot,
                 "_p_traj": np.tile(p_list, (len(micro_t), 1)), "requires_grad": requires_grad,
             }
-        dispatched.append((t_res, y_res, obs_res, trajectory))
+        dispatched.append((t_res, y_res, obs_res, trajectory, diag_dict))
 
     return dispatched
 
@@ -252,7 +252,7 @@ def run_batch(manifest: ExecutableManifest, y0: List[float], ydot0: List[float],
               t_eval: np.ndarray, protocols: Any, max_workers: int, debug: bool, show_progress: bool, v_idx: int) -> Any:
     protocol_list = [protocols] * len(parameters) if protocols and not isinstance(protocols, list) else protocols
     dispatched = dispatch_native(manifest, y0, ydot0, parameters, t_eval, protocol_list, "native", None, max_workers, 1, show_progress, debug, v_idx)
-    return [(t, y, o) for (t, y, o, _) in dispatched]
+    return [(t, y, o) for (t, y, o, _, _) in dispatched]
 
 
 def evaluate_jacobian(manifest: ExecutableManifest, y: List[float], ydot: List[float], c_j: float, parameters: Dict[str, float]) -> List[List[float]]:
@@ -291,4 +291,4 @@ def execute_mock(manifest: ExecutableManifest, parameters: Dict[str, float], pro
             
     data["Voltage [V]"] = np.array([4.2] * (time_len - 1) + [2.5])
     from ion_flux.runtime.results import SimulationResult
-    return SimulationResult(data, parameters or {}, status="completed", trajectory={"Time [s]": data["Time [s]"], "_y_raw": np.zeros((time_len, getattr(manifest.layout, 'n_states', 1)))})
+    return SimulationResult(data, parameters or {}, status="completed", trajectory={"Time [s]": data["Time [s]"], "_y_raw": np.zeros((time_len, getattr(manifest.layout, 'n_states', 1)))}, diagnostics={})

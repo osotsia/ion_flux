@@ -91,8 +91,8 @@ class Engine:
         self.manifest.save(export_path)
 
     @property
-    def telemetry(self) -> TelemetryReport: 
-        return TelemetryReport(self.manifest.layout.n_states, self.manifest.jacobian_bandwidth)
+    def telemetry(self) -> Optional[TelemetryReport]: 
+        return TelemetryReport(self.manifest) if self.manifest else None
 
     def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None, mode: str = "scientific") -> Session:
         """
@@ -194,7 +194,7 @@ class Engine:
         )
 
         results = []
-        for p, (t_res, y_res, obs_res, trajectory) in zip(parameters, dispatched):
+        for p, (t_res, y_res, obs_res, trajectory, diag_dict) in zip(parameters, dispatched):
             data = {"Time [s]": t_res}
             for state_name, (offset, size) in self.manifest.layout.state_offsets.items():
                 if size == 1: data[state_name] = y_res[:, offset]
@@ -202,7 +202,7 @@ class Engine:
             for obs_name, (offset, size) in self.manifest.layout.obs_offsets.items():
                 if size == 1: data[obs_name] = obs_res[:, offset]
                 else: data[obs_name] = obs_res[:, offset:offset+size]
-            results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=trajectory))
+            results.append(SimulationResult(data, p, status="completed", engine=self, trajectory=trajectory, diagnostics=diag_dict))
 
         return results
 

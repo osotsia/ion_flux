@@ -1,41 +1,83 @@
+from typing import Any, Dict
+
+
 class TelemetryReport:
-    """Diagnostic metrics guiding memory and performance optimizations."""
-    __slots__ = ["model_len", "l1_cache_hit_estimate", "avg_jump_distance", "sparsity"]
-    def __init__(self, n_states: int, bandwidth: int):
-        self.model_len = n_states
-        
-        # Correct L1 hit-rate mapping reflecting actual hardware footprints
-        if n_states <= 1:
-            self.avg_jump_distance = 0.0
-            self.l1_cache_hit_estimate = 1.0
-            self.sparsity = 0.0
+    """Static compile-time model topology, sparsity, and memory footprint profile."""
+    __slots__ = [
+        "model_len", "n_states", "n_params", "n_observables",
+        "jacobian_bandwidth", "solver_type", "nnz", "sparsity",
+        "cpr_colors", "dense_rows", "memory_footprint_bytes"
+    ]
+
+    def __init__(self, manifest: Any):
+        layout = manifest.layout
+        self.n_states = layout.n_states
+        self.model_len = self.n_states
+        self.n_params = layout.n_params
+        self.n_observables = layout.n_obs
+        self.jacobian_bandwidth = manifest.jacobian_bandwidth
+
+        # Solver classification
+        if self.jacobian_bandwidth == -1:
+            self.solver_type = "Matrix-Free GMRES"
+        elif self.jacobian_bandwidth == 0:
+            self.solver_type = "Sparse LU (Dense / Arrowhead Coupling)"
         else:
-            total_elements = n_states ** 2
-            if bandwidth == 0:
-                self.avg_jump_distance = float(n_states)
-                active_elements = total_elements
-            elif bandwidth == -1:
-                self.avg_jump_distance = 5.0  # Common average for 3D unstructured nodes
-                active_elements = n_states * 5
-            else:
-                self.avg_jump_distance = float(bandwidth)
-                active_elements = min(total_elements, n_states * (2 * bandwidth + 1))
-                
-            self.sparsity = 1.0 - (active_elements / total_elements)
-            working_set_bytes = active_elements * 8
-            
-            if working_set_bytes <= 32768: # Standard 32KB L1 Data Cache
-                self.l1_cache_hit_estimate = 0.99
-            else:
-                cache_lines = working_set_bytes / 64.0
-                penalty = min((self.avg_jump_distance * n_states) / cache_lines, 1.0)
-                self.l1_cache_hit_estimate = max(0.01, 1.0 - penalty)
+            self.solver_type = f"Banded LU (width={self.jacobian_bandwidth})"
+
+        # Structural non-zero (NNZ) and sparsity analysis from CPR cache
+        c_seeds, _, c_rows, c_cols, c_dense = manifest.cpr_cache if manifest.cpr_cache else ([], [], [], [], [])
+        self.cpr_colors = len(c_seeds)
+        self.dense_rows = len(c_dense)
+
+        entries = set(zip(c_rows, c_cols))
+        for r in c_dense:
+            for c in range(self.n_states):
+                entries.add((r, c))
+
+        total_elements = self.n_states ** 2
+        if entries:
+            self.nnz = len(entries)
+        elif self.n_states <= 1:
+            self.nnz = self.n_states
+        elif self.jacobian_bandwidth == -1:
+            self.nnz = min(total_elements, self.n_states * 7)
+        elif self.jacobian_bandwidth > 0:
+            self.nnz = min(total_elements, self.n_states * (2 * self.jacobian_bandwidth + 1))
+        else:
+            self.nnz = total_elements
+
+        self.sparsity = 1.0 - (self.nnz / total_elements) if total_elements > 0 else 0.0
+
+        # Memory footprint calculation (BDF history [6] + Scratchpads [7] + Mesh + Parameters)
+        state_bytes = self.n_states * 13 * 8
+        mesh_bytes = layout.m_length * 8
+        param_bytes = layout.p_length * 8
+        self.memory_footprint_bytes = state_bytes + mesh_bytes + param_bytes
+
+    def summary(self) -> Dict[str, Any]:
+        """Returns structured dictionary of static model properties."""
+        return {
+            "n_states": self.n_states,
+            "n_params": self.n_params,
+            "n_observables": self.n_observables,
+            "jacobian_bandwidth": self.jacobian_bandwidth,
+            "solver_type": self.solver_type,
+            "nnz": self.nnz,
+            "sparsity": self.sparsity,
+            "cpr_jvp_sweeps": self.cpr_colors,
+            "cpr_vjp_sweeps": self.dense_rows,
+            "memory_footprint_bytes": self.memory_footprint_bytes,
+        }
 
     def __repr__(self) -> str:
-        return (f"TelemetryReport(states={self.model_len}, "
-                f"L1_hit_rate={self.l1_cache_hit_estimate:.1%}, "
-                f"avg_jump={self.avg_jump_distance:.1f}, "
-                f"sparsity={self.sparsity:.1%})")
+        mem_kb = self.memory_footprint_bytes / 1024.0
+        return (
+            f"TelemetryReport(states={self.n_states}, params={self.n_params}, "
+            f"nnz={self.nnz}, sparsity={self.sparsity:.1%}, "
+            f"jvp_sweeps={self.cpr_colors}, vjp_sweeps={self.dense_rows}, "
+            f"solver='{self.solver_type}', mem_est={mem_kb:.1f}KB)"
+        )
 
 
 

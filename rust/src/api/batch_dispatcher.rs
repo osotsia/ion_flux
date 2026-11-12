@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use rayon::prelude::*;
 use std::io::Write;
@@ -8,7 +9,7 @@ use crate::stepper::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::stepper::state::SolverInstance;
 use crate::control::sequence::{ProtocolStep, run_sequence};
 use crate::control::bisection::TrigInfo;
-use crate::api::{NativeSolverCrash, SolverError, crash_report_to_pydict};
+use crate::api::{NativeSolverCrash, SolverError, crash_report_to_pydict, diagnostics_to_pydict};
 
 pub type RawProtocolStep = (i32, f64, f64, (bool, usize, usize, bool, i32, f64), usize, usize, usize);
 
@@ -19,6 +20,7 @@ pub struct ModelTrajectory {
     pub micro_t: Vec<f64>,
     pub micro_y: Vec<f64>,
     pub micro_ydot: Vec<f64>,
+    pub diag: crate::diagnostics::Diagnostics,
 }
 
 pub struct SolvePayload<'a> {
@@ -56,16 +58,18 @@ impl TrajectoryBuilder {
 
     fn marshal_to_py<'py>(
         py: Python<'py>, traj: ModelTrajectory, n_states: usize, n_obs: usize
-    ) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>) {
+    ) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyDict>) {
         let steps = traj.t.len();
         let h_len = traj.micro_t.len();
+        let diag_dict = diagnostics_to_pydict(py, &traj.diag);
         (
             numpy::ndarray::Array1::from_vec(traj.t).to_pyarray(py),
             numpy::ndarray::Array2::from_shape_vec((steps, n_states), traj.y).unwrap().to_pyarray(py),
             numpy::ndarray::Array2::from_shape_vec((steps, n_obs), traj.obs).unwrap().to_pyarray(py),
             numpy::ndarray::Array1::from_vec(traj.micro_t).to_pyarray(py),
             numpy::ndarray::Array2::from_shape_vec((h_len, n_states), traj.micro_y).unwrap().to_pyarray(py),
-            numpy::ndarray::Array2::from_shape_vec((h_len, n_states), traj.micro_ydot).unwrap().to_pyarray(py)
+            numpy::ndarray::Array2::from_shape_vec((h_len, n_states), traj.micro_ydot).unwrap().to_pyarray(py),
+            diag_dict,
         )
     }
 }
@@ -112,6 +116,7 @@ struct BatchExecutor<'a> {
 
 impl<'a> BatchExecutor<'a> {
     fn execute_model(&self, p: &[f64], steps: Option<&[RawProtocolStep]>) -> Result<ModelTrajectory, SolverError> {
+        let pmu = crate::diagnostics::PmuGuard::new();
         let mut instance = SolverInstance::new(self.prob.n, self.prob.bw, self.payload.y0.to_vec(), self.payload.ydot0.to_vec(), p.to_vec());
         let mut out_t = Vec::new();
         let mut out_traj = Vec::new();
@@ -121,8 +126,10 @@ impl<'a> BatchExecutor<'a> {
         if let Some(raw_steps) = steps {
             if !raw_steps.is_empty() {
                 run_sequence(self.prob, &mut instance, &parse_protocol_steps(raw_steps), &mut out_t, &mut out_traj, &mut out_obs, history.as_mut(), self.payload.show_progress, self.payload.v_idx)?;
+                let (cycles, instr) = pmu.finish();
+                instance.diag.record_pmu(cycles, instr);
                 let (micro_t, micro_y, micro_ydot) = TrajectoryBuilder::flatten_tape(history, self.prob.n);
-                return Ok(ModelTrajectory { t: out_t, y: out_traj, obs: out_obs, micro_t, micro_y, micro_ydot });
+                return Ok(ModelTrajectory { t: out_t, y: out_traj, obs: out_obs, micro_t, micro_y, micro_ydot, diag: instance.diag });
             }
         }
 
@@ -156,8 +163,10 @@ impl<'a> BatchExecutor<'a> {
             }
         }
 
+        let (cycles, instr) = pmu.finish();
+        instance.diag.record_pmu(cycles, instr);
         let (micro_t, micro_y, micro_ydot) = TrajectoryBuilder::flatten_tape(history, n);
-        Ok(ModelTrajectory { t: t_eval.to_vec(), y: out_traj, obs: out_obs, micro_t, micro_y, micro_ydot })
+        Ok(ModelTrajectory { t: t_eval.to_vec(), y: out_traj, obs: out_obs, micro_t, micro_y, micro_ydot, diag: instance.diag })
     }
 
     fn run(&self, p_batch: &[Vec<f64>]) -> Result<Vec<ModelTrajectory>, SolverError> {
@@ -196,7 +205,7 @@ pub fn solve_native<'py>(
     n_obs: usize, cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
     protocol_steps: Option<Vec<Vec<RawProtocolStep>>>, record_tape: bool, max_workers: usize, spatial_threads: usize, 
     show_progress: bool, v_idx: i32,
-) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)>> {
+) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyDict>)>> {
     
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
     let fns = load_callbacks(&lib).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;

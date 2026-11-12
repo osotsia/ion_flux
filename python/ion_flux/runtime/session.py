@@ -258,5 +258,12 @@ class Session:
         else:
             self.time += 1000.0
 
+    @property
+    def diagnostics(self) -> Dict[str, Any]:
+        """Queries solver diagnostics from hot native memory."""
+        if self.handle and hasattr(self.handle, "get_diagnostics"):
+            return self.handle.get_diagnostics()
+        return {}
+
     def solve_eis(self, frequencies: np.ndarray, input_var: str, output_var: str) -> Any:
         return solve_eis(self, frequencies, input_var, output_var)
