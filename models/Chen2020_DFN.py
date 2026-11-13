@@ -130,9 +130,9 @@ class Chen2020_DFN(fx.PDE):
         j0_n = self.k_n * (ce_safe * c_surf_n * (self.c_max_n - c_surf_n))**0.5
         j0_p = self.k_p * (ce_safe * c_surf_p * (self.c_max_p - c_surf_p))**0.5
         
-        # Local Overpotentials [V] (Table I)
-        eta_n = self.phi_s_n - self.phi_e - U_n
-        eta_p = self.phi_s_p - self.phi_e - U_p
+        # Local Overpotentials [V] (Table I) - clamped to prevent exponential Newton blowup
+        eta_n = fx.clamp(self.phi_s_n - self.phi_e - U_n, lower=-0.5, upper=0.5)
+        eta_p = fx.clamp(self.phi_s_p - self.phi_e - U_p, lower=-0.5, upper=0.5)
         
         # Volumetric Butler-Volmer Reaction Current Densities (J_k) [A/m^3] (Table I)
         F_RT = F / (2.0 * R_const * T)  # Using alpha = 0.5 symmetry
