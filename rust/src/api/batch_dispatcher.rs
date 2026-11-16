@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::ffi::callbacks::NativeIcFn;
 use crate::stepper::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::stepper::state::SolverInstance;
 use crate::control::sequence::{ProtocolStep, run_sequence};
@@ -74,19 +75,41 @@ impl TrajectoryBuilder {
     }
 }
 
-fn load_callbacks(lib: &libloading::Library) -> Result<Callbacks, String> {
+fn load_callbacks(lib: &libloading::Library) -> Result<(Callbacks, Option<NativeIcFn>), String> {
     unsafe {
-        Ok(Callbacks {
+        let fns = Callbacks {
             res_fn: *lib.get(b"evaluate_residual\0").map_err(|e| format!("Missing evaluate_residual: {e}"))?,
             obs_fn: lib.get(b"evaluate_observables\0").map(|s| *s).ok(),
             jvp_fn: lib.get(b"evaluate_jvp\0").map(|s| *s).ok(),
             vjp_fn: lib.get(b"evaluate_vjp\0").map(|s| *s).ok(),
             set_threads_fn: lib.get(b"set_spatial_threads\0").map(|s| *s).ok(),
-        })
+        };
+        let ic_fn: Option<NativeIcFn> = lib.get(b"evaluate_ic\0").map(|s| *s).ok();
+        Ok((fns, ic_fn))
     }
 }
 
-fn parse_protocol_steps(raw_steps: &[RawProtocolStep]) -> Vec<ProtocolStep> {
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn get_rayon_pool(num_threads: usize) -> Result<Arc<rayon::ThreadPool>, String> {
+    static POOLS: OnceLock<Mutex<HashMap<usize, Arc<rayon::ThreadPool>>>> = OnceLock::new();
+    let map = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().map_err(|e| e.to_string())?;
+    if let Some(pool) = guard.get(&num_threads) {
+        return Ok(Arc::clone(pool));
+    }
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .map_err(|e| e.to_string())?,
+    );
+    guard.insert(num_threads, Arc::clone(&pool));
+    Ok(pool)
+}
+
+pub fn parse_protocol_steps(raw_steps: &[RawProtocolStep]) -> Vec<ProtocolStep> {
     raw_steps.iter().map(|s| ProtocolStep {
         s_type: s.0, target_val: s.1, t_limit: s.2,
         trig: TrigInfo { has_trig: s.3.0, idx: s.3.1, size: s.3.2, is_obs: s.3.3, op: s.3.4, val: s.3.5 },
@@ -112,12 +135,21 @@ fn print_progress(tag: &str, t: f64, pct: f64, v_idx: i32, y: &[f64], is_final: 
 struct BatchExecutor<'a> {
     prob: &'a Problem,
     payload: &'a SolvePayload<'a>,
+    ic_fn: Option<NativeIcFn>,
 }
 
 impl<'a> BatchExecutor<'a> {
     fn execute_model(&self, p: &[f64], steps: Option<&[RawProtocolStep]>) -> Result<ModelTrajectory, SolverError> {
         let pmu = crate::diagnostics::PmuGuard::new();
-        let mut instance = SolverInstance::new(self.prob.n, self.prob.bw, self.payload.y0.to_vec(), self.payload.ydot0.to_vec(), p.to_vec());
+        let (y0, ydot0) = if let Some(ic_fn) = self.ic_fn {
+            let mut y = vec![0.0; self.prob.n];
+            let mut ydot = vec![0.0; self.prob.n];
+            unsafe { ic_fn(p.as_ptr(), self.prob.m.as_ptr(), y.as_mut_ptr(), ydot.as_mut_ptr()); }
+            (y, ydot)
+        } else {
+            (self.payload.y0.to_vec(), self.payload.ydot0.to_vec())
+        };
+        let mut instance = SolverInstance::new(self.prob.n, self.prob.bw, y0, ydot0, p.to_vec());
         let mut out_t = Vec::new();
         let mut out_traj = Vec::new();
         let mut out_obs = Vec::new();
@@ -178,7 +210,7 @@ impl<'a> BatchExecutor<'a> {
         } else {
             if let Some(set_threads) = self.prob.fns.set_threads_fn { unsafe { set_threads(1) }; }
             let completed = AtomicUsize::new(0);
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(self.payload.max_workers).build().map_err(|e| SolverError::Message(e.to_string()))?;
+            let pool = get_rayon_pool(self.payload.max_workers).map_err(SolverError::Message)?;
             
             pool.install(|| {
                 p_batch.par_iter().enumerate().map(|(idx, p)| {
@@ -208,7 +240,7 @@ pub fn solve_native<'py>(
 ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyDict>)>> {
     
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-    let fns = load_callbacks(&lib).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let (fns, ic_fn) = load_callbacks(&lib).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
     
     let prob_base = Problem {
@@ -220,7 +252,7 @@ pub fn solve_native<'py>(
         record_tape, max_workers, spatial_threads, show_progress, v_idx,
     };
 
-    let results = py.detach(|| BatchExecutor { prob: &prob_base, payload: &payload }.run(&p_batch));
+    let results = py.detach(|| BatchExecutor { prob: &prob_base, payload: &payload, ic_fn }.run(&p_batch));
 
     let trajectories = results.map_err(|e| match e {
         SolverError::Crash(report) => NativeSolverCrash::new_err(crash_report_to_pydict(py, &report).unbind()),

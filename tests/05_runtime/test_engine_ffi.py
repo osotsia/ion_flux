@@ -32,7 +32,8 @@ REQUIRES_RUNTIME = pytest.mark.skipif(
 import pytest
 import numpy as np
 import ion_flux as fx
-from ion_flux.runtime import session, _3_dispatch
+from ion_flux.runtime import session
+from ion_flux.runtime.backends import native
 from ion_flux import metrics
 from ion_flux.protocols import Sequence, CC
 
@@ -45,8 +46,8 @@ def test_native_ffi_loaded():
     """
     assert session.RUST_FFI_AVAILABLE is True, \
         "Rust FFI failed to load in session.py! Check for silent ImportErrors (e.g., missing dynamic libraries)."
-    assert _3_dispatch.RUST_FFI_AVAILABLE is True, \
-        "Rust FFI failed to load in _3_dispatch.py!"
+    assert native.RUST_FFI_AVAILABLE is True, \
+        "Rust FFI failed to load in backends/native.py!"
     assert metrics.RUST_FFI_AVAILABLE is True, \
         "Rust FFI failed to load in metrics.py!"
 

@@ -244,8 +244,7 @@ def test_dae_masking_and_cj_scaling():
     engine = fx.Engine(model=MacroMicroDFN(), target="cpu", mock_execution=False, jacobian_bandwidth=0)
     
     # 1. Validate Mask Extraction Array
-    _, _, id_arr, _, _ = engine._extract_metadata()
-    id_arr = np.array(id_arr)
+    id_arr = np.array(engine.manifest.id_arr)
     
     off_phi, size_phi = engine.layout.state_offsets["phi_e"]
     off_v, _ = engine.layout.state_offsets["V_cell"]
@@ -513,8 +512,8 @@ def test_clang_so_emission_and_ffi_loading():
     
     # Prove the Engine didn't silently fall back to mock execution
     assert getattr(engine, "mock_execution", False) is False
-    assert engine.runtime is not None
-    assert engine.runtime.lib_path.endswith(".so") or engine.runtime.lib_path.endswith(".dylib")
+    assert engine.manifest.native_lib is not None
+    assert engine.manifest.lib_path.endswith(".so") or engine.manifest.lib_path.endswith(".dylib")
     
     # Retrieve dynamic offsets
     off_s, _ = engine.layout.state_offsets["y_smooth"]
@@ -677,3 +676,41 @@ def test_compilation_determinism_and_cache_hit():
         f"Run 1: {lib1}\nRun 2: {lib2}"
     )
     assert os.path.exists(lib1)
+
+
+def test_jit_lru_cache_updates_mtime_and_evicts_oldest(tmp_path):
+    """Validates mtime-based LRU eviction and timestamp refresh on cache hit."""
+    import hashlib
+
+    compiler = NativeCompiler.__new__(NativeCompiler)
+    compiler.cache_dir = str(tmp_path)
+    compiler.compiler_cmd = "mock_clang++"
+
+    ext = ".dylib" if sys.platform == "darwin" else ".so"
+    dummy_cpp = "// cached_hot_model"
+    hot_hash = hashlib.sha256(dummy_cpp.encode("utf-8")).hexdigest()[:16]
+
+    hot_lib = tmp_path / f"lib_res_{hot_hash}{ext}"
+    warm_lib = tmp_path / f"lib_res_warm000000000001{ext}"
+    cold_lib = tmp_path / f"lib_res_cold000000000002{ext}"
+    cold_cpp = tmp_path / "res_cold000000000002.cpp"
+
+    for p in (hot_lib, warm_lib, cold_lib, cold_cpp):
+        p.write_text("")
+
+    # Set initial mtimes: hot_lib is oldest, cold_lib is middle, warm_lib is newest
+    os.utime(hot_lib, (100.0, 100.0))
+    os.utime(cold_lib, (200.0, 200.0))
+    os.utime(warm_lib, (300.0, 300.0))
+
+    # Cache hit on hot_lib must bump its mtime above warm_lib and cold_lib
+    returned_path = compiler.compile(dummy_cpp)
+    assert returned_path == str(hot_lib)
+    assert os.path.getmtime(hot_lib) > 300.0
+
+    # Evicting down to 2 entries must drop cold_lib (and its companion .cpp), keeping hot_lib & warm_lib
+    compiler._enforce_lru_cache(max_entries=2)
+    assert hot_lib.exists()
+    assert warm_lib.exists()
+    assert not cold_lib.exists()
+    assert not cold_cpp.exists()

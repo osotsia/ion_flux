@@ -40,17 +40,20 @@ def generate_cpp(
     """
     discretizer = FVMDiscretizer(layout, topo, semantic_ctx, state_map, target)
     l_phys_stmts, eq_stmts, obs_stmts = discretizer.discretize_system(math_sys)
+    l_phys_ic_stmts, ic_stmts = discretizer.discretize_initial_conditions(math_sys)
 
     emitter = CppEmitter()
     body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + eq_stmts))
     obs_body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + obs_stmts))
+    ic_body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_ic_stmts + ic_stmts))
 
     cpp_str = generate_cpp_skeleton(
         n_states=layout.n_states,
         n_params=layout.n_params,
         n_obs=layout.n_obs,
         body=body_str,
-        obs_body=obs_body_str
+        obs_body=obs_body_str,
+        ic_body=ic_body_str,
     )
 
     return cpp_str, eq_stmts

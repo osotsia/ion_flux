@@ -223,7 +223,7 @@ Because the Python compiler uses Enzyme AD natively at the LLVM level, the entir
 #### Native Frequency-Domain Solvers (EIS)
 Simulating Electrochemical Impedance Spectroscopy (EIS) no longer requires slow, noise-prone finite-difference time-domain perturbation loops. 
 
-The engine drives the cell to steady-state, extracts the Enzyme analytical Jacobian ($J$), and solves the transfer function $Z(\omega) = C (j\omega M - J)^{-1} B$ directly and algebraically using `scipy.linalg`.
+The engine drives the cell to steady-state, extracts the analytical mass matrix ($M$), Jacobian ($J$), and input sensitivity ($B = -\partial F / \partial p$) directly in Rust via `NativeLibrary`, and solves $(j\omega M + J) X = B$ ($Z(\omega) = C X$) algebraically using `scipy.linalg`.
 
 ```python
 import numpy as np
@@ -291,7 +291,7 @@ res = engine.solve(t_span=(0, 3600), threads=32)
 ```
 
 #### 3. JIT Caching & Zero-Start Deployments
-To deploy models into serverless environments (e.g., AWS Lambda, FastAPI endpoints), you can export the compiled model into a standalone shared object (`.so`) library. Python AST parsing, translation, and LLVM/Clang compilation are entirely bypassed at runtime, enabling 0ms cold-starts.
+To deploy models into serverless environments (e.g., AWS Lambda, FastAPI endpoints), you can export the compiled model into a standalone shared object (`.so`) library with embedded layout metadata and compiled initial conditions (`evaluate_ic`). Python AST parsing, runtime IC interpretation, and LLVM/Clang compilation are entirely bypassed at runtime, enabling single-file, 0ms cold-starts.
 
 ```python
 # --- 1. Compile on your CI/CD Pipeline ---

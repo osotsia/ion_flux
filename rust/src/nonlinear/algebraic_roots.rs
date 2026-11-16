@@ -1,9 +1,9 @@
-use crate::solver::shared::problem::Problem;
+use crate::stepper::problem::Problem;
 use crate::stepper::state::{SystemState, StepScratchpad};
 use crate::stepper::history::BdfHistory;
 use crate::linear::solver::LinearSolver;
 use crate::linear::jacobian;
-use crate::solver::shared::diagnostics::Diagnostics;
+use crate::diagnostics::Diagnostics;
 
 pub fn calc_algebraic_roots(
     prob: &Problem,

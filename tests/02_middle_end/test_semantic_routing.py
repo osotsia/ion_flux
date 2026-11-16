@@ -219,7 +219,7 @@ def test_piecewise_micro_domain_routing():
     engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
-    y0, ydot0, _, _, _ = engine._extract_metadata()
+    y0, ydot0 = engine.manifest.evaluate_ic({})
     y0 = np.array(y0)
     
     # Create a distinct value for EVERY micro node so we know exactly which one is read

@@ -12,39 +12,17 @@ def solve_eis(session, frequencies: np.ndarray, input_var: str, output_var: str)
     w_arr = np.asarray(frequencies) * 2 * np.pi
     
     if not session.handle:
-        # Mock execution fallback for Test/CI environments
-        Z = 0.05 + (0.1 / (1 + 1j * w_arr * 0.1)) + (0.01 / np.sqrt(1j * w_arr))
+        from ion_flux.runtime.backends.mock import mock_eis_impedance
+        Z = mock_eis_impedance(w_arr)
     else:
-        N = session.engine.layout.n_states
+        N = session.manifest.layout.n_states
         
         y = session.handle.get_state()
         ydot = np.zeros_like(y)
         
-        # EXACT MASS MATRIX EXTRACTION:
-        # Because the Native CPR evaluate_jacobian computes J(c_j) = dF/dy + c_j * dF/dydot, 
-        # evaluating J at c_j=1.0 and subtracting the steady-state J(0.0) algebraically isolates 
-        # exactly dF/dydot (The Dynamic Mass Matrix).
-        J_steady = np.array(session.engine.evaluate_jacobian(y.tolist(), ydot.tolist(), 0.0, session.parameters))
-        J_1 = np.array(session.engine.evaluate_jacobian(y.tolist(), ydot.tolist(), 1.0, session.parameters))
-        M = J_1 - J_steady
-        
-        # Pack both standard mathematical parameters and structural mesh constants
-        p_list = session.manifest.pack_parameters(session.parameters)
-        m_list = session.manifest.layout.get_mesh_data()
-        
-        offset = session.manifest.layout.get_param_offset(input_var)
-        
-        dF_dp_input = np.zeros(N)
-        lam = [0.0] * N
-        for i in range(N):
-            lam[i] = 1.0
-            # Evaluate Exact Vector-Jacobian Product (VJP) mapping perturbations through native Enzyme
-            dp_out, _, _ = session.manifest.runtime.evaluate_vjp(
-                y.tolist(), ydot.tolist(), p_list, m_list, lam
-            )
-            dF_dp_input[i] = dp_out[offset]
-            lam[i] = 0.0
-        
+        M, J_steady, dF_dp_input = session.manifest.extract_eis_system(
+            y.tolist(), ydot.tolist(), session.parameters, input_var
+        )
         B = -dF_dp_input
         out_offset = session.manifest.layout.get_state_offset(output_var)
         C = np.zeros(N)

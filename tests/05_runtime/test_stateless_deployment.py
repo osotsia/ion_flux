@@ -84,6 +84,8 @@ def test_stateless_binary_deployment(tmp_path):
     assert stateless_engine.mock_execution is False
     assert stateless_engine.layout.n_states == engine.layout.n_states
     assert stateless_engine.layout.get_param_offset("R") == engine.layout.get_param_offset("R")
+    assert stateless_engine.manifest.ast_payload == {}
+    assert stateless_engine.cpp_source == ""
     
     # 4. Solve directly via FFI
     res = stateless_engine.solve(t_span=(0, 1.0), parameters={"R": 5.0})

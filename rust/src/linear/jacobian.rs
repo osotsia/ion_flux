@@ -1,4 +1,4 @@
-use crate::solver::shared::problem::{Problem, CprData};
+use crate::stepper::problem::{Problem, CprData};
 use crate::ffi::callbacks::{NativeJvpFn, NativeVjpFn};
 use crate::stepper::state::SystemState;
 use crate::linear::solver::LinearSolver;
@@ -18,8 +18,52 @@ pub fn assemble_triplets_with_scratch(
     dydot_scratch: &mut [f64],
     lambda_scratch: &mut [f64],
 ) {
+    assemble_triplets_inner(
+        n, y, ydot, p, m, c_j, true, jvp_fn, vjp_fn, triplets, cpr, id,
+        jvp_scratch, jvp_dy_scratch, jvp_dydot_scratch, res_scratch,
+        dp_scratch, dy_scratch, dydot_scratch, lambda_scratch,
+    );
+}
+
+pub fn assemble_triplets_analytical(
+    n: usize, y: &[f64], ydot: &[f64], p: &[f64], m: &[f64], c_j: f64,
+    jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
+    triplets: &mut Vec<(usize, usize, f64)>,
+    cpr: &CprData,
+) {
+    let mut jvp_scratch = vec![0.0; n];
+    let mut jvp_dy_scratch = vec![0.0; n];
+    let mut jvp_dydot_scratch = vec![0.0; n];
+    let mut res_scratch = vec![0.0; n];
+    let mut dp_scratch = vec![0.0; p.len()];
+    let mut dy_scratch = vec![0.0; n];
+    let mut dydot_scratch = vec![0.0; n];
+    let mut lambda_scratch = vec![0.0; n];
+    assemble_triplets_inner(
+        n, y, ydot, p, m, c_j, false, jvp_fn, vjp_fn, triplets, cpr, &[],
+        &mut jvp_scratch, &mut jvp_dy_scratch, &mut jvp_dydot_scratch, &mut res_scratch,
+        &mut dp_scratch, &mut dy_scratch, &mut dydot_scratch, &mut lambda_scratch,
+    );
+}
+
+fn assemble_triplets_inner(
+    n: usize, y: &[f64], ydot: &[f64], p: &[f64], m: &[f64], c_j: f64,
+    mask_alg_init: bool,
+    jvp_fn: Option<NativeJvpFn>, vjp_fn: Option<NativeVjpFn>,
+    triplets: &mut Vec<(usize, usize, f64)>,
+    cpr: &CprData,
+    id: &[f64],
+    jvp_scratch: &mut [f64],
+    jvp_dy_scratch: &mut [f64],
+    jvp_dydot_scratch: &mut [f64],
+    res_scratch: &mut [f64],
+    dp_scratch: &mut [f64],
+    dy_scratch: &mut [f64],
+    dydot_scratch: &mut [f64],
+    lambda_scratch: &mut [f64],
+) {
     triplets.clear();
-    let is_alg_init = c_j == 0.0;
+    let is_alg_init = mask_alg_init && c_j == 0.0;
     let cpr_nnz = cpr.color_rows.len() + cpr.dense_rows.len() * n;
     if triplets.capacity() < cpr_nnz {
         triplets.reserve(cpr_nnz - triplets.capacity());

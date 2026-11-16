@@ -57,7 +57,7 @@ def get_control_volumes(engine: fx.Engine, domain_name: str) -> np.ndarray:
     layout = engine.layout
     vol_off = layout.mesh_offsets[domain_name]["w_V_nodes"]
     m_list = layout.get_mesh_data()
-    domain_info = engine.manifest.ast_payload["domains"][domain_name]
+    domain_info = layout.domain_info[domain_name]
     resolution = domain_info["resolution"]
     bounds = domain_info.get("bounds", (0.0, 1.0))
     l_phys = float(bounds[1] - bounds[0])
@@ -456,7 +456,7 @@ class TestCurvilinearAndUnstructuredGeometry:
     def test_spherical_fvm_divergence_and_boundary_extraction(self):
         """Validates spherical divergence exactness and right-boundary node extraction."""
         engine = fx.Engine(model=SphericalFVMOracle(), target="cpu", mock_execution=False)
-        y0, ydot0, _, _, _ = engine._extract_metadata()
+        y0, ydot0 = engine.manifest.evaluate_ic({})
         y0 = np.array(y0)
         ydot0 = np.zeros_like(y0)
 
@@ -476,7 +476,7 @@ class TestCurvilinearAndUnstructuredGeometry:
     def test_composite_domain_integration_exactness(self):
         """Validates multidimensional integration over composite domains: V_macro * V_micro."""
         engine = fx.Engine(model=CompositeIntegrationOracle(), target="cpu", mock_execution=False)
-        y0, ydot0, _, _, _ = engine._extract_metadata()
+        y0, ydot0 = engine.manifest.evaluate_ic({})
         res = engine.evaluate_residual(y0, ydot0, parameters={})
 
         off_mass, _ = engine.layout.state_offsets["total_mass"]
@@ -547,7 +547,7 @@ class SubregionQuadratureOracle(fx.PDE):
     def test_nested_gradient_inside_integral_context(self):
         """EDGE CASE: Verifies spatial operators inside integral reductions do not lose axis context."""
         engine = fx.Engine(model=NestedGradientIntegralOracle(), target="cpu", mock_execution=False)
-        y0, ydot0, _, _, _ = engine._extract_metadata()
+        y0, ydot0 = engine.manifest.evaluate_ic({})
         J = np.array(engine.evaluate_jacobian(y0, ydot0, c_j=1.0, parameters={}))
         assert np.linalg.matrix_rank(J) >= engine.layout.n_states - 2
 
@@ -653,7 +653,7 @@ class TestHierarchicalCoupling:
         """Validates that a 1D macro state evaluated at a 2D micro boundary accesses index 0, not flat index 99."""
         engine = fx.Engine(model=HierarchicalMemoryCorruptionOracle(), target="cpu", mock_execution=False)
         N = engine.layout.n_states
-        y0, ydot0, _, _, _ = engine._extract_metadata()
+        y0, ydot0 = engine.manifest.evaluate_ic({})
         y0 = np.array(y0)
 
         off_phi, size_phi = engine.layout.state_offsets["phi_e"]
@@ -704,7 +704,7 @@ class TestHierarchicalCoupling:
     def test_chen2020_topological_overlap_off_by_one(self):
         """Verifies that floating-point region boundaries do not create overlapping or orphaned nodes."""
         engine = fx.Engine(model=Chen2020TopologicalOverlapOracle(), target="cpu", mock_execution=False)
-        y0, ydot0, _, _, _ = engine._extract_metadata()
+        y0, ydot0 = engine.manifest.evaluate_ic({})
         res = engine.evaluate_residual(y0, ydot0, parameters={})
 
         off_c, _ = engine.layout.state_offsets["c"]

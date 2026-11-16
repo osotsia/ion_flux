@@ -1,8 +1,8 @@
-use crate::solver::shared::problem::Problem;
+use crate::stepper::problem::Problem;
 use crate::stepper::state::{SystemState, StepScratchpad};
 use crate::stepper::history::BdfHistory;
 use crate::linear::solver::LinearSolver;
-use crate::solver::shared::diagnostics::{Diagnostics, CrashReport};
+use crate::diagnostics::{Diagnostics, CrashReport};
 use crate::nonlinear::newton;
 use crate::nonlinear::constraints;
 

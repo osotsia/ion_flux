@@ -12,6 +12,7 @@ pub type NativeVjpFn = unsafe extern "C" fn(
     *const c_double, *mut c_double,
     *mut c_double, *mut c_double, *mut c_double
 );
+pub type NativeIcFn = unsafe extern "C" fn(*const c_double, *const c_double, *mut c_double, *mut c_double);
 pub type NativeSetThreadsFn = unsafe extern "C" fn(c_int);
 
 #[derive(Clone, Copy)]

@@ -35,6 +35,15 @@ void set_spatial_threads(int num_threads) {
 #endif
 }
 
+void evaluate_ic(const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ y0, double* __restrict__ ydot0) {
+    int N = {{ n_states }};
+    for (int i = 0; i < N; ++i) {
+        y0[i] = 0.0;
+        ydot0[i] = 0.0;
+    }
+{{ ic_body | indent(4) }}
+}
+
 void evaluate_residual(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ res) {
 {{ body | indent(4) }}
 }
@@ -107,7 +116,7 @@ void evaluate_vjp(
 } // extern "C"
 """
 
-def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str) -> str:
+def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, ic_body: str = "") -> str:
     env = jinja2.Environment()
     template = env.from_string(TEMPLATE)
     return template.render(
@@ -115,5 +124,6 @@ def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, o
         n_params=n_params,
         n_obs=n_obs,
         body=body,
-        obs_body=obs_body
+        obs_body=obs_body,
+        ic_body=ic_body,
     )

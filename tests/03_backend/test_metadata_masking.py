@@ -247,8 +247,7 @@ def test_piecewise_composite_dae_masking_bug():
     """
     engine = fx.Engine(model=CompositeMaskingBugOracle(), target="cpu", mock_execution=True)
     
-    _, _, id_arr, _, _ = engine._extract_metadata()
-    id_arr = np.array(id_arr)
+    id_arr = np.array(engine.manifest.id_arr)
     
     off_p, size_p = engine.layout.state_offsets["c_piece"]
     c_piece_mask = id_arr[off_p : off_p + size_p]
@@ -274,8 +273,7 @@ def test_dirichlet_composite_dae_masking_bug():
     """
     engine = fx.Engine(model=CompositeMaskingBugOracle(), target="cpu", mock_execution=True)
     
-    _, _, id_arr, _, _ = engine._extract_metadata()
-    id_arr = np.array(id_arr)
+    id_arr = np.array(engine.manifest.id_arr)
     
     off_d, size_d = engine.layout.state_offsets["c_dir"]
     c_dir_mask = id_arr[off_d : off_d + size_d]

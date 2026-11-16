@@ -5,10 +5,9 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 
 from ion_flux.compiler._1_frontend.core import PDE
-from ion_flux.runtime.manifest import ExecutableManifest
+from ion_flux.runtime.manifest import ExecutableManifest, build_manifest
 from ion_flux.runtime.session import Session
-from ion_flux.runtime.results import SimulationResult
-from ion_flux.runtime.telemetry import TelemetryReport
+from ion_flux.runtime.results import SimulationResult, TelemetryReport
 
 class _ParamHandle:
     __slots__ = ["name", "value"]
@@ -33,7 +32,6 @@ class Engine:
         self.debug = debug
         
         if model:
-            from ion_flux.runtime._1_builder import build_manifest
             self.manifest = build_manifest(model, target, cache, jacobian_bandwidth, mock_execution)
         else:
             self.manifest = None
@@ -42,14 +40,9 @@ class Engine:
         for k, v in kwargs.items(): 
             setattr(self, k, v)
 
-    # --- Properties ensuring backwards compatibility for Analytical Solvers (e.g., Metrics/EIS) ---
     @property
     def layout(self): 
         return self.manifest.layout if self.manifest else None
-        
-    @property
-    def runtime(self): 
-        return self.manifest.runtime if self.manifest else None
 
     @property
     def jacobian_bandwidth(self): 
@@ -59,18 +52,8 @@ class Engine:
     def cpp_source(self):                           
         return self.manifest.cpp_source if self.manifest else ""
 
-    @property
-    def _cpr_cache(self): 
-        return self.manifest.cpr_cache if self.manifest else ([],[],[],[],[])
-
     def _pack_parameters(self, overrides): 
         return self.manifest.pack_parameters(overrides)
-
-    def _extract_metadata(self):
-        from ion_flux.runtime._2_initializers import evaluate_ic
-        current_params = {k: v.value for k, v in self.parameters.items()}
-        y0, ydot0 = evaluate_ic(self.manifest, current_params)
-        return y0, ydot0, self.manifest.id_arr, self.manifest.spatial_diag, self.manifest.max_steps
 
     # --- Architectural Serialization Boundaries ---
     @classmethod
@@ -114,15 +97,14 @@ class Engine:
 
     # --- Primary Dispatch Hooks ---
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
-        if self.mock_execution or not self.manifest.runtime: 
+        if self.mock_execution or not self.manifest:
             raise RuntimeError("Requires native execution.")
-        p_list = self.manifest.pack_parameters(parameters or {})
-        m_list = self.manifest.layout.get_mesh_data()
-        return self.manifest.runtime.evaluate_residual(y, ydot, p_list, m_list)
+        return self.manifest.evaluate_residual(y, ydot, parameters)
 
     def evaluate_jacobian(self, y: List[float], ydot: List[float], c_j: float, parameters: Optional[Dict[str, float]] = None) -> List[List[float]]:
-        from ion_flux.runtime._3_dispatch import evaluate_jacobian
-        return evaluate_jacobian(self.manifest, y, ydot, c_j, parameters or {})
+        if self.mock_execution or not self.manifest:
+            raise RuntimeError("Requires native execution.")
+        return self.manifest.evaluate_jacobian(y, ydot, c_j, parameters).tolist()
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
               t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
@@ -164,19 +146,21 @@ class Engine:
         elif total > 1 and "omp" in self.target:
             os.environ["OMP_NUM_THREADS"] = "1"
 
-        if getattr(self.manifest, "runtime", None):
-            self.manifest.runtime.set_spatial_threads(spatial_threads)
+        if getattr(self.manifest, "native_lib", None):
+            self.manifest.native_lib.set_spatial_threads(spatial_threads)
+
+        base_params = {k: v.value for k, v in self.parameters.items()}
+        merged_parameters = [{**base_params, **p} for p in parameters]
 
         if self.mock_execution or not self.manifest:
-            from ion_flux.runtime._3_dispatch import execute_mock
-            mock_protos = protocols or [None] * len(parameters)
-            return [execute_mock(self.manifest, p, prot) for p, prot in zip(parameters, mock_protos)]
+            from ion_flux.runtime.backends.mock import execute_mock
+            mock_protos = protocols or [None] * len(merged_parameters)
+            return [execute_mock(self.manifest, p, prot) for p, prot in zip(merged_parameters, mock_protos)]
 
-        from ion_flux.runtime._2_initializers import evaluate_ic
-        from ion_flux.runtime._3_dispatch import dispatch_native
+        from ion_flux.runtime.backends import dispatch_native
 
-        init_params = {**{k: v.value for k, v in self.parameters.items()}, **(parameters[0] if parameters else {})}
-        y0, ydot0 = evaluate_ic(self.manifest, init_params)
+        n_states = self.manifest.layout.n_states
+        y0, ydot0 = [0.0] * n_states, [0.0] * n_states
 
         t_eval_arr = t_eval if t_eval is not None else np.linspace(t_span[0], t_span[1], 100)
 
@@ -189,12 +173,12 @@ class Engine:
         v_idx = _get_v_idx()
 
         dispatched = dispatch_native(
-            self.manifest, y0, ydot0, parameters, t_eval_arr, protocols,
+            self.manifest, y0, ydot0, merged_parameters, t_eval_arr, protocols,
             self.solver_backend, requires_grad, max_workers, spatial_threads, show_progress, self.debug, v_idx
         )
 
         results = []
-        for p, (t_res, y_res, obs_res, trajectory, diag_dict) in zip(parameters, dispatched):
+        for p, (t_res, y_res, obs_res, trajectory, diag_dict) in zip(merged_parameters, dispatched):
             data = {"Time [s]": t_res}
             for state_name, (offset, size) in self.manifest.layout.state_offsets.items():
                 if size == 1: data[state_name] = y_res[:, offset]

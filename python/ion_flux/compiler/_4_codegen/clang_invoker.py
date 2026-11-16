@@ -7,7 +7,6 @@ import shutil
 import tempfile
 import uuid
 import logging
-from ion_flux.runtime.ffi_runtime import NativeRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +35,8 @@ class NativeCompiler:
                 "Execute `ion-flux install-toolchain` in your terminal to install it."
             )
 
-    def _enforce_lru_cache(self, max_entries: int = 200) -> None:
-        """Evicts the oldest compiled JIT artifacts to prevent disk exhaustion."""
+    def _enforce_lru_cache(self, max_entries: int = 500) -> None:
+        """Evicts the least-recently-used compiled JIT artifacts to prevent disk exhaustion."""
         try:
             artifacts = []
             for ext in [".so", ".dylib"]:
@@ -46,7 +45,7 @@ class NativeCompiler:
             if len(artifacts) <= max_entries:
                 return
                 
-            artifacts.sort(key=lambda p: os.path.getatime(p))
+            artifacts.sort(key=lambda p: os.path.getmtime(p))
             
             for old_lib in artifacts[:-max_entries]:
                 try:
@@ -98,7 +97,7 @@ class NativeCompiler:
                 if matches: return matches[0]
         return ""
 
-    def compile(self, cpp_source: str, n_states: int) -> NativeRuntime:
+    def compile(self, cpp_source: str, n_states: int = 0) -> str:
         if not self.compiler_cmd:
             raise RuntimeError("C++ toolchain is unavailable on this host.")
 
@@ -113,8 +112,12 @@ class NativeCompiler:
         cmake_path = os.path.join(self.cache_dir, cmake_name)
         
         if os.path.exists(lib_path):
+            try:
+                os.utime(lib_path, None)
+            except OSError:
+                pass
             self._enforce_lru_cache()
-            return NativeRuntime(lib_path, n_states)
+            return lib_path
             
         tmp_uuid = uuid.uuid4().hex
         tmp_cpp_path = os.path.join(self.cache_dir, f"tmp_{tmp_uuid}.cpp")
@@ -170,4 +173,4 @@ class NativeCompiler:
             f.write(cmake_content)
             
         self._enforce_lru_cache()
-        return NativeRuntime(lib_path, n_states)
+        return lib_path

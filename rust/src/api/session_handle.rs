@@ -123,10 +123,10 @@ impl SolverHandle {
         let slice = target.as_slice_mut().map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Target buffer must be contiguous: {}", e))
         })?;
-        if slice.len() != self.prob.n {
+        if slice.len() != self.prob.n_obs {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Target buffer length ({}) must match observables size ({})",
-                slice.len(), self.prob.n
+                slice.len(), self.prob.n_obs
             )));
         }
         if let Some(obs_fn) = self.prob.fns.obs_fn {

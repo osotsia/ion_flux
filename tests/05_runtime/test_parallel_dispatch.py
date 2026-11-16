@@ -129,4 +129,32 @@ async def test_async_multitenant_scheduler_isolation():
     assert not isinstance(res_good, Exception)
     assert res_good.status == "completed"
 
+
+class ParameterizedICModel(fx.PDE):
+    """Validates per-worker initial condition evaluation during Rayon batch sweeps."""
+    x = fx.Domain(bounds=(0, 1.0), resolution=5, name="x")
+    c = fx.State(domain=x, name="c")
+    c0 = fx.Parameter(default=1.0, name="c0")
+    k = fx.Parameter(default=0.5, name="k")
+
+    def math(self):
+        return {
+            "equations": {self.c: fx.dt(self.c) == -self.k * self.c},
+            "boundaries": {},
+            "initial_conditions": {self.c: self.c0 * (1.0 + self.x.coords)},
+        }
+
+
+@REQUIRES_RUNTIME
+def test_batch_initial_condition_parameter_sweep():
+    """Guards against broadcasting parameters[0] ICs across the entire batch."""
+    engine = fx.Engine(model=ParameterizedICModel(), target="cpu", mock_execution=False)
+    batch_params = [{"c0": 1.0}, {"c0": 5.0}, {"c0": 10.0}]
+    results = engine.solve_batch(parameters=batch_params, t_span=(0, 1.0), max_workers=3)
+
+    x_grid = np.linspace(0.0, 1.0, 5)
+    for res, p in zip(results, batch_params):
+        np.testing.assert_allclose(res["c"].data[0], p["c0"] * (1.0 + x_grid), rtol=1e-6)
+        np.testing.assert_allclose(res["c"].data[-1], p["c0"] * (1.0 + x_grid) * np.exp(-0.5), rtol=1e-4)
+
     

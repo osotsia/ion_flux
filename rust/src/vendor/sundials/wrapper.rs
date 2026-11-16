@@ -5,8 +5,11 @@ use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use std::os::raw::{c_double, c_int, c_void};
 use std::io::Write;
-use crate::ffi::callbacks::{NativeResFn, NativeJvpFn, NativeVjpFn, NativeObsFn};
-use crate::stepper::problem::CprData;
+use crate::ffi::callbacks::{Callbacks, NativeIcFn, NativeResFn, NativeJvpFn, NativeVjpFn, NativeObsFn};
+use crate::stepper::problem::{CprData, Problem, SolverConfig};
+use crate::stepper::state::{Checkpoint, TimeStepper};
+use crate::control::sequence::{run_sequence, SolverError};
+use crate::api::batch_dispatcher::{RawProtocolStep, parse_protocol_steps};
 use crate::linear::jacobian::assemble_triplets;
 use crate::vendor::sundials::sys::*;
 
@@ -241,6 +244,50 @@ impl SundialsHandle {
     }
 }
 
+impl TimeStepper for SundialsHandle {
+    fn t(&self) -> f64 { self.t }
+    fn y(&self) -> &[f64] { &self._y_data }
+    fn ydot(&self) -> &[f64] { &self._yp_data }
+    fn p(&self) -> &[f64] { &self.user_data.p }
+    fn p_mut(&mut self) -> &mut [f64] { &mut self.user_data.p }
+
+    fn calc_algebraic_roots(&mut self, _prob: &Problem) -> Result<(), SolverError> {
+        SundialsHandle::calc_algebraic_roots(self).map_err(|e| SolverError::Message(e.to_string()))
+    }
+
+    fn step(
+        &mut self,
+        _prob: &Problem,
+        dt: f64,
+        _history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+    ) -> Result<(), SolverError> {
+        SundialsHandle::step(self, dt).map_err(|e| SolverError::Message(e.to_string()))
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            t: self.t,
+            y: self._y_data.clone(),
+            ydot: self._yp_data.clone(),
+        }
+    }
+
+    fn rollback(&mut self, ckpt: &Checkpoint) {
+        self.t = ckpt.t;
+        self._y_data.copy_from_slice(&ckpt.y);
+        self._yp_data.copy_from_slice(&ckpt.ydot);
+        unsafe {
+            let y_ptr = N_VGetArrayPointer(self.y_vec);
+            let yp_ptr = N_VGetArrayPointer(self.yp_vec);
+            for i in 0..self.n {
+                *y_ptr.add(i) = self._y_data[i];
+                *yp_ptr.add(i) = self._yp_data[i];
+            }
+            IDAReInit(self.ida_mem, self.t, self.y_vec, self.yp_vec);
+        }
+    }
+}
+
 impl Drop for SundialsHandle {
     fn drop(&mut self) {
         unsafe {
@@ -248,6 +295,19 @@ impl Drop for SundialsHandle {
             N_VDestroy(self.y_vec); N_VDestroy(self.yp_vec); N_VDestroy(self.id_vec); SUNContext_Free(&mut self.sunctx);
         }
     }
+}
+
+fn evaluate_sundials_ic(lib_path: &str, n: usize, p_list: &[f64], m_list: &[f64], fallback_y0: Vec<f64>, fallback_ydot0: Vec<f64>) -> (Vec<f64>, Vec<f64>) {
+    if let Ok(lib) = unsafe { libloading::Library::new(lib_path) } {
+        if let Ok(ic_sym) = unsafe { lib.get::<NativeIcFn>(b"evaluate_ic\0") } {
+            let ic_fn = *ic_sym;
+            let mut y0 = vec![0.0; n];
+            let mut ydot0 = vec![0.0; n];
+            unsafe { ic_fn(p_list.as_ptr(), m_list.as_ptr(), y0.as_mut_ptr(), ydot0.as_mut_ptr()); }
+            return (y0, ydot0);
+        }
+    }
+    (fallback_y0, fallback_ydot0)
 }
 
 #[pyfunction]
@@ -258,8 +318,10 @@ pub fn solve_ida_sundials<'py>(
     show_progress: bool, v_idx: i32
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
 
+    let n = y0_py.len();
+    let (y0_init, ydot0_init) = evaluate_sundials_ic(&lib_path, n, &p_list, &m_list, y0_py, ydot0_py);
     let mut handle = SundialsHandle::new(
-        lib_path, y0_py.len(), y0_py, ydot0_py, id_py, p_list, m_list, n_obs, 
+        lib_path, n, y0_init, ydot0_init, id_py, p_list, m_list, n_obs, 
         cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense
     )?;
     
@@ -301,4 +363,85 @@ pub fn solve_ida_sundials<'py>(
     let empty_t = numpy::ndarray::Array1::<f64>::zeros(0).to_pyarray(py);
     let empty_y = numpy::ndarray::Array2::<f64>::zeros((0, handle.n)).to_pyarray(py);
     Ok((res_y, res_obs, empty_t, empty_y.clone(), empty_y))
+}
+
+#[pyfunction]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, protocol_steps, show_progress=true, v_idx=-1))]
+pub fn solve_ida_sequence<'py>(
+    py: Python<'py>,
+    lib_path: String,
+    y0_py: Vec<f64>,
+    ydot0_py: Vec<f64>,
+    id_py: Vec<f64>,
+    p_list: Vec<f64>,
+    m_list: Vec<f64>,
+    n_obs: usize,
+    cpr_seeds: Vec<Vec<f64>>,
+    cpr_ptrs: Vec<usize>,
+    cpr_rows: Vec<usize>,
+    cpr_cols: Vec<usize>,
+    cpr_dense: Vec<usize>,
+    protocol_steps: Vec<RawProtocolStep>,
+    show_progress: bool,
+    v_idx: i32,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let n = y0_py.len();
+    let (y0_init, ydot0_init) = evaluate_sundials_ic(&lib_path, n, &p_list, &m_list, y0_py, ydot0_py);
+    let mut handle = SundialsHandle::new(
+        lib_path,
+        n,
+        y0_init,
+        ydot0_init,
+        id_py.clone(),
+        p_list,
+        m_list.clone(),
+        n_obs,
+        cpr_seeds,
+        cpr_ptrs,
+        cpr_rows,
+        cpr_cols,
+        cpr_dense,
+    )?;
+
+    let prob = Problem {
+        n,
+        bw: 0,
+        n_obs,
+        id: id_py,
+        constraints: vec![0.0; n],
+        m: m_list,
+        spatial_diag: vec![0.0; n],
+        max_steps: vec![0.0; n],
+        cpr: handle.user_data.cpr.clone(),
+        config: SolverConfig::default(),
+        fns: Callbacks {
+            res_fn: handle.user_data.res_fn,
+            obs_fn: handle.user_data.obs_fn,
+            jvp_fn: handle.user_data.jvp_fn,
+            vjp_fn: handle.user_data.vjp_fn,
+            set_threads_fn: None,
+        },
+    };
+
+    let steps = parse_protocol_steps(&protocol_steps);
+    let mut out_t = Vec::new();
+    let mut out_traj = Vec::new();
+    let mut out_obs = Vec::new();
+
+    run_sequence(&prob, &mut handle, &steps, &mut out_t, &mut out_traj, &mut out_obs, None, show_progress, v_idx)
+        .map_err(|e| match e {
+            SolverError::Crash(r) => pyo3::exceptions::PyRuntimeError::new_err(r.reason),
+            SolverError::Message(m) => pyo3::exceptions::PyRuntimeError::new_err(m),
+        })?;
+
+    let len_t = out_t.len();
+    let res_t = numpy::ndarray::Array1::from_vec(out_t).to_pyarray(py);
+    let res_y = numpy::ndarray::Array2::from_shape_vec((len_t, n), out_traj)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        .to_pyarray(py);
+    let res_obs = numpy::ndarray::Array2::from_shape_vec((len_t, n_obs), out_obs)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        .to_pyarray(py);
+
+    Ok((res_t, res_y, res_obs))
 }

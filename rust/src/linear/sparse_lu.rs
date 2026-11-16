@@ -1,6 +1,6 @@
 use std::time::Instant;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use crate::solver::shared::diagnostics::Diagnostics;
+use crate::diagnostics::Diagnostics;
 use faer::sparse::linalg::solvers::{SymbolicLu, Lu};
 use faer::sparse::SparseColMat;
 use faer::col::from_slice_mut;

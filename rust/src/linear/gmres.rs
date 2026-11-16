@@ -1,6 +1,6 @@
 use std::time::Instant;
 use crate::ffi::callbacks::NativeJvpFn;
-use crate::solver::shared::diagnostics::Diagnostics;
+use crate::diagnostics::Diagnostics;
 
 pub struct GmresSolver {
     pub n: usize,

@@ -146,8 +146,8 @@ def get_missing_dependencies(model):
     engine = fx.Engine(model=model, target="cpu", mock_execution=False)
     N = engine.layout.n_states
     
-    # 1. Reconstruct the MIR-derived sparsity pattern directly from the Engine's cache
-    _, _, c_rows, c_cols, c_dense = engine._cpr_cache
+    # 1. Reconstruct the MIR-derived sparsity pattern directly from the Engine's manifest
+    _, _, c_rows, c_cols, c_dense = engine.manifest.cpr_cache
     
     python_set = set(zip(c_rows, c_cols))
     

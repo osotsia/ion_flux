@@ -142,7 +142,7 @@ def test_ast_boundary_node_extraction():
     
     # Evaluate instantaneous residual at t=0
     N = engine.layout.n_states
-    y0, ydot0, _, _, _ = engine._extract_metadata()
+    y0, ydot0 = engine.manifest.evaluate_ic({})
     
     res = engine.evaluate_residual(y0, ydot0)
     
@@ -239,7 +239,7 @@ def test_initial_thermodynamic_signs():
     engine = fx.Engine(model=ThermodynamicSignProbe(), target="cpu", mock_execution=False)
     
     N = engine.layout.n_states
-    y0, ydot0, _, _, _ = engine._extract_metadata()
+    y0, ydot0 = engine.manifest.evaluate_ic({})
     res = engine.evaluate_residual(y0, ydot0)
     
     U_n = -res[engine.layout.state_offsets["U_n_out"][0]]
@@ -371,7 +371,7 @@ def test_ast_1d_to_0d_broadcasting_behavior():
     """
     engine = fx.Engine(model=DimensionalBroadcastingProbe(), target="cpu", mock_execution=False)
     
-    y0, ydot0, _, _, _ = engine._extract_metadata()
+    y0, ydot0 = engine.manifest.evaluate_ic({})
     res = engine.evaluate_residual(y0, ydot0)
     
     off_v, _ = engine.layout.state_offsets["v_target"]
@@ -583,7 +583,7 @@ def test_thermal_source_magnitudes():
     """
     engine = fx.Engine(model=ThermalSourceProbe(), target="cpu", mock_execution=False)
     
-    y0, ydot0, _, _, _ = engine._extract_metadata()
+    y0, ydot0 = engine.manifest.evaluate_ic({})
     # Evaluate instantaneous residual (Res = ydot - rhs = 0.0 - rhs -> rhs = -Res)
     res = engine.evaluate_residual(y0, ydot0, parameters={})
     

@@ -5,7 +5,7 @@ Represents N-Dimensional continuum mathematics, tensor differential operators,
 and domain boundary constraints prior to spatial discretization and memory layout flattening.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
 
@@ -135,12 +135,20 @@ class MathObservable:
     bounds_override: Optional[Dict[str, tuple]] = None
 
 
+@dataclass(frozen=True)
+class MathInitialCondition:
+    state_name: str
+    target_domain: Optional[str]
+    expr: MathExpr
+
+
 @dataclass
 class MathSystem:
     equations: List[MathEquation]
     observables: List[MathObservable]
     dirichlet_overrides: List[MathDirichletOverride]
     dynamic_domain_bindings: Dict[str, Dict[str, Any]]
+    initial_conditions: List[MathInitialCondition] = field(default_factory=list)
 
 
 def extract_math_state_names(expr: MathExpr) -> List[str]:

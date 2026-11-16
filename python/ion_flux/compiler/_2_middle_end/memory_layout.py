@@ -22,9 +22,33 @@ class MemoryLayout:
 
         # 2. Extract Topologies
         structured_roots, unstructured_domains = self._extract_unique_domains(states, observables, all_domains)
+        self.domain_info = self._extract_domain_info(structured_roots, unstructured_domains)
 
         # 3. Build Mesh Geometry Cache
         self.mesh_offsets, self.mesh_cache, self.m_length = self._build_mesh_data(structured_roots, unstructured_domains)
+
+    @staticmethod
+    def _extract_domain_info(structured_roots: Set[Any], unstructured_domains: List[Any]) -> Dict[str, Dict[str, Any]]:
+        info: Dict[str, Dict[str, Any]] = {}
+        for root_d in structured_roots:
+            info[root_d.name] = {
+                "bounds": [float(root_d.bounds[0]), float(root_d.bounds[1])],
+                "resolution": int(root_d.resolution),
+                "coord_sys": root_d.coord_sys,
+            }
+            for reg in getattr(root_d, "_sub_regions", []):
+                info[reg.name] = {
+                    "bounds": [float(reg.bounds[0]), float(reg.bounds[1])],
+                    "resolution": int(reg.resolution),
+                    "coord_sys": reg.coord_sys,
+                }
+        for d in unstructured_domains:
+            info[d.name] = {
+                "bounds": [0.0, 1.0],
+                "resolution": int(d.resolution),
+                "coord_sys": "unstructured",
+            }
+        return info
 
 
     # =========================================================================
@@ -243,6 +267,7 @@ class MemoryLayout:
         obj.p_length = data.get("p_length", obj.n_params)
         obj.m_length = data.get("m_length", 0)
         
+        obj.domain_info = data.get("domain_info", {})
         obj.mesh_offsets = data.get("mesh_offsets", {})
         obj.mesh_cache = {int(k): float(v) for k, v in data.get("mesh_cache", {}).items()}
         return obj

@@ -1,11 +1,8 @@
 import numpy as np
-import scipy.linalg
 from typing import Dict, Any, Optional
-from contextlib import contextmanager
 
-from ion_flux.runtime.eis import solve_eis
-from ion_flux.runtime._2_initializers import evaluate_ic
-from ion_flux.runtime._4_diagnostics import format_native_crash
+from ion_flux.runtime.analysis.eis import solve_eis
+from ion_flux.runtime.diagnostics import format_native_crash
 
 try:
     from ion_flux._core import SolverHandle, SundialsHandle
@@ -75,10 +72,9 @@ class Session:
         
         self.parameters = {**{k: v.value for k, v in engine.parameters.items()}, **parameters}
         self.time = 0.0
-        self._history = {"Time [s]": [0.0]}
         self.debug = debug
         
-        y0, ydot0 = evaluate_ic(self.manifest, self.parameters)
+        y0, ydot0 = self.manifest.evaluate_ic(self.parameters)
         p_list = self.manifest.pack_parameters(self.parameters)
         m_list = self.manifest.layout.get_mesh_data()
         
@@ -111,16 +107,6 @@ class Session:
         else:
             self.handle = None
             self._mock_y = np.array(y0)
-
-    @contextmanager
-    def suspend_history(self):
-        """Safely suspends trajectory recording, guaranteeing restoration via try/finally block."""
-        was_recording = getattr(self, "record_history", False)
-        self.record_history = False
-        try:
-            yield
-        finally:
-            self.record_history = was_recording
 
     def set_parameter_by_offset(self, offset: int, value: float) -> None:
         param_name = self._offset_to_param.get(offset)
@@ -193,39 +179,17 @@ class Session:
 
     def step(self, dt: float) -> None:
         if self.handle:
-            if getattr(self, "record_history", False):
-                if hasattr(self.handle, "step_history"):
-                    try:
-                        mt, my, mydot = self.handle.step_history(dt)
-                    except RuntimeError as e:
-                        raise format_native_crash(e, self.manifest) from None
-                        
-                    if len(mt) > 0:
-                        self.micro_t.append(mt)
-                        self.micro_y.append(my)
-                        self.micro_ydot.append(mydot)
-                        
-                        p_arr = np.tile(self.manifest.pack_parameters(self.parameters), (len(mt), 1))
-                        self.micro_p.append(p_arr)
-                else:
-                    try:
-                        self.handle.step(dt) 
-                    except RuntimeError as e:
-                        raise format_native_crash(e, self.manifest) from None
-            else:
-                try:
-                    self.handle.step(dt)
-                except RuntimeError as e:
-                    raise format_native_crash(e, self.manifest) from None
-            
+            try:
+                self.handle.step(dt)
+            except RuntimeError as e:
+                raise format_native_crash(e, self.manifest) from None
+
             if hasattr(self.handle, "get_time"):
                 self.time = self.handle.get_time()
             else:
                 self.time += dt
         else:
             self.time += dt
-            
-        self._history["Time [s]"].append(self.time)
 
     def checkpoint(self) -> None:
         if self.handle and hasattr(self.handle, "clone_state"):

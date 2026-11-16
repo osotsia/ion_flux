@@ -1,10 +1,12 @@
 pub mod session_handle;
 pub mod batch_dispatcher;
 pub mod adjoint_dispatcher;
+pub mod native_lib;
 
 pub use session_handle::*;
 pub use batch_dispatcher::*;
 pub use adjoint_dispatcher::*;
+pub use native_lib::*;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};

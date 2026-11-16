@@ -30,7 +30,7 @@ from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
     MathUnaryOp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
     MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride,
-    MathSystem, extract_math_state_names
+    MathInitialCondition, MathSystem, extract_math_state_names
 )
 
 
@@ -668,6 +668,26 @@ class FVMDiscretizer:
 
         return l_phys_stmts, eq_stmts, obs_stmts
 
+    def discretize_initial_conditions(self, math_sys: MathSystem) -> Tuple[List[Stmt], List[Stmt]]:
+        """Lowers initial conditions into 1D Compute IR assignments to y0[]."""
+        l_phys_ic_stmts = self._generate_physical_length_constants(math_sys, include_dynamic=False)
+        ic_stmts: List[Stmt] = []
+        for ic in math_sys.initial_conditions:
+            ic_stmts.extend(self._discretize_single_ic(ic))
+        return l_phys_ic_stmts, ic_stmts
+
+    def _discretize_single_ic(self, ic: MathInitialCondition) -> List[Stmt]:
+        axes = self.topo.get_axes(ic.target_domain)
+        base_axis = self._resolve_axis(axes[-1]) if axes else None
+        idx_mgr = self._build_index_manager(axes, {})
+
+        offset = self.layout.state_offsets[ic.state_name][0]
+        flat_idx = idx_mgr.get_flat_index(ic.target_domain)
+        y0_access = ArrayAccess("y0", BinaryOp("+", Literal(offset), flat_idx))
+        rhs_expr = self.lower_expr(ic.expr, idx_mgr, current_axis=base_axis)
+
+        return self._wrap_in_loop_nest([Assign(y0_access, rhs_expr)], axes, {})
+
     def discretize_equation(self, eq: MathEquation) -> List[Stmt]:
         """Lowers an implicit MathEquation into a nested coordinate loop assigning to res[]."""
         axes = self.topo.get_axes(eq.target_domain)
@@ -898,7 +918,7 @@ class FVMDiscretizer:
             return self.topo.get_base_axis(axes[-1])
         return self.topo.get_base_axis(axis_name)
 
-    def _generate_physical_length_constants(self, math_sys: MathSystem) -> List[Stmt]:
+    def _generate_physical_length_constants(self, math_sys: MathSystem, include_dynamic: bool = True) -> List[Stmt]:
         """Declares local C++ physical domain lengths (L_phys_*), handling dynamic ALE moving boundaries."""
         l_phys_stmts: List[Stmt] = [RawCpp("double L_phys_default = 1.0;")]
 
@@ -906,7 +926,7 @@ class FVMDiscretizer:
             if domain_info.get("type") == "composite":
                 continue
 
-            if domain_name in math_sys.dynamic_domain_bindings:
+            if include_dynamic and domain_name in math_sys.dynamic_domain_bindings:
                 binding = math_sys.dynamic_domain_bindings[domain_name]
                 idx_mgr = IndexManager(self.topo)
                 idx_mgr.register(self.topo.get_base_axis(domain_name), Literal(0))

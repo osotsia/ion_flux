@@ -305,3 +305,86 @@ def test_oracle_eis_mass_matrix_extraction():
         np.real(Z_sim), np.real(Z_exact), rtol=1e-4,
         err_msg="EIS Mass Matrix Error: Engine hardcoded M=1.0 instead of extracting M=C_cap."
     )
+
+
+class MultiObservablePDE(fx.PDE):
+    """Validates read_observables_into when n_obs != n_states."""
+    y = fx.State(domain=None, name="y")
+    obs_a = fx.Observable(domain=None, name="obs_a")
+    obs_b = fx.Observable(domain=None, name="obs_b")
+    k = fx.Parameter(default=2.0, name="k")
+
+    def math(self):
+        return {
+            "equations": {self.y: fx.dt(self.y) == -self.y},
+            "boundaries": {},
+            "initial_conditions": {self.y: 3.0},
+            "observables": {
+                self.obs_a: self.y * self.k,
+                self.obs_b: self.y + 1.0,
+            }
+        }
+
+
+@REQUIRES_RUNTIME
+def test_read_observables_into_non_matching_state_count():
+    """Guards against checking n_states instead of n_obs in SolverHandle::read_observables_into."""
+    engine = fx.Engine(model=MultiObservablePDE(), target="cpu", mock_execution=False)
+    assert engine.layout.n_states == 1
+    assert engine.layout.n_obs == 2
+
+    session = engine.start_session()
+    obs_buf = np.zeros(engine.layout.n_obs, dtype=np.float64)
+    session.read_observables_into(obs_buf)
+
+    off_a = engine.layout.obs_offsets["obs_a"][0]
+    off_b = engine.layout.obs_offsets["obs_b"][0]
+    assert obs_buf[off_a] == pytest.approx(6.0, rel=1e-5)
+    assert obs_buf[off_b] == pytest.approx(4.0, rel=1e-5)
+
+
+@REQUIRES_RUNTIME
+def test_session_step_no_unbounded_history():
+    """Ensures real-time Session stepping retains no unbounded _history trace."""
+    engine = fx.Engine(model=BatteryProtocolPDE(), target="cpu", mock_execution=False)
+    session = engine.start_session(mode="realtime")
+    assert not hasattr(session, "_history")
+
+    for _ in range(25):
+        session.step(dt=0.01)
+
+    assert not hasattr(session, "_history")
+    assert session.time == pytest.approx(0.25, abs=1e-6)
+
+
+@REQUIRES_RUNTIME
+def test_solve_batch_respects_engine_parameter_overrides():
+    """Ensures solve_batch merges engine.parameters defaults identically to solve()."""
+    engine = fx.Engine(model=BatteryProtocolPDE(), target="cpu", mock_execution=False)
+    engine.parameters["R"].value = 0.2
+
+    res_single = engine.solve(t_span=(0, 1.0), show_progress=False)
+    res_batch = engine.solve_batch(parameters=[{}], t_span=(0, 1.0), show_progress=False)[0]
+
+    np.testing.assert_allclose(res_batch["V"].data, res_single["V"].data, rtol=1e-6, atol=1e-6)
+
+
+@REQUIRES_RUNTIME
+def test_sundials_protocol_bisection_parity():
+    """Validates SUNDIALS sequences run in Rust with identical bisection trigger accuracy."""
+    model = BatteryProtocolPDE()
+    eng_native = fx.Engine(model=model, target="cpu", solver_backend="native")
+    eng_sundials = fx.Engine(model=model, target="cpu", solver_backend="sundials")
+
+    # V = 4.0 + soc - 10 * 0.05 = 4.5 - t * 10 / 3600. Hits 4.49V at t = 3.6s (non-integer!).
+    protocol = Sequence([
+        CC(rate=10.0, until=model.V <= 4.49, time=20.0),
+        Rest(time=1.0),
+    ])
+
+    res_n = eng_native.solve(protocol=protocol, show_progress=False)
+    res_s = eng_sundials.solve(protocol=protocol, show_progress=False)
+
+    assert res_n["Time [s]"].data[-1] == pytest.approx(4.6, abs=1e-3)
+    assert res_s["Time [s]"].data[-1] == pytest.approx(4.6, abs=1e-3)
+    np.testing.assert_allclose(res_n["V"].data[-1], res_s["V"].data[-1], rtol=1e-4, atol=1e-5)

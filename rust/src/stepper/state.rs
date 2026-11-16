@@ -1,3 +1,4 @@
+use crate::api::SolverError;
 use crate::stepper::history::BdfHistory;
 use crate::stepper::problem::Problem;
 use crate::linear::solver::LinearSolver;
@@ -63,6 +64,35 @@ pub struct Checkpoint {
     pub t: f64,
     pub y: Vec<f64>,
     pub ydot: Vec<f64>,
+}
+
+pub trait TimeStepper {
+    fn t(&self) -> f64;
+    fn y(&self) -> &[f64];
+    fn ydot(&self) -> &[f64];
+    fn p(&self) -> &[f64];
+    fn p_mut(&mut self) -> &mut [f64];
+    fn calc_algebraic_roots(&mut self, prob: &Problem) -> Result<(), SolverError>;
+    fn step(
+        &mut self,
+        prob: &Problem,
+        dt: f64,
+        history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+    ) -> Result<(), SolverError>;
+    fn advance_to(
+        &mut self,
+        prob: &Problem,
+        target_t: f64,
+        history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+    ) -> Result<(), SolverError> {
+        let dt = target_t - self.t();
+        if dt <= 1e-14 {
+            return Ok(());
+        }
+        self.step(prob, dt, history_cache)
+    }
+    fn checkpoint(&self) -> Checkpoint;
+    fn rollback(&mut self, ckpt: &Checkpoint);
 }
 
 pub struct SolverInstance {
@@ -139,5 +169,34 @@ impl SolverInstance {
             &mut self.linear_solver,
             &mut self.diag,
         )
+    }
+}
+
+impl TimeStepper for SolverInstance {
+    fn t(&self) -> f64 { self.state.t }
+    fn y(&self) -> &[f64] { &self.state.y }
+    fn ydot(&self) -> &[f64] { &self.state.ydot }
+    fn p(&self) -> &[f64] { &self.state.p }
+    fn p_mut(&mut self) -> &mut [f64] { &mut self.state.p }
+
+    fn calc_algebraic_roots(&mut self, prob: &Problem) -> Result<(), SolverError> {
+        SolverInstance::calc_algebraic_roots(self, prob).map_err(SolverError::Message)
+    }
+
+    fn step(
+        &mut self,
+        prob: &Problem,
+        dt: f64,
+        history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+    ) -> Result<(), SolverError> {
+        SolverInstance::step(self, prob, dt, history_cache).map_err(SolverError::Crash)
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        SolverInstance::checkpoint(self)
+    }
+
+    fn rollback(&mut self, ckpt: &Checkpoint) {
+        SolverInstance::rollback(self, ckpt)
     }
 }

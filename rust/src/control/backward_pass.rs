@@ -1,9 +1,9 @@
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use crate::ffi::callbacks::{NativeJvpFn, NativeVjpFn};
-use crate::solver::shared::problem::CprData;
+use crate::stepper::problem::CprData;
 use crate::linear::sparse_lu::NativeSparseLuSolver;
 use crate::linear::gmres::solve_gmres;
-use crate::solver::shared::diagnostics::Diagnostics;
+use crate::diagnostics::Diagnostics;
 
 pub struct AdjointParams<'a> {
     pub bandwidth: isize,

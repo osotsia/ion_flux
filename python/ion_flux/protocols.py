@@ -1,9 +1,9 @@
-from .runtime.protocols.profiles import (
-    Sequence, 
-    CC, 
-    CV, 
-    Rest, 
-    ConstantCurrent, 
+from .runtime.protocols import (
+    Sequence,
+    CC,
+    CV,
+    Rest,
+    ConstantCurrent,
     CurrentProfile
 )
 

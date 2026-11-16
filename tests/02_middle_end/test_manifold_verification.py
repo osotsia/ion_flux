@@ -165,7 +165,7 @@ def test_disproportionate_resolution_distorts_physics():
     engine = fx.Engine(model=SpatialScaleGapOracle(), target="cpu", mock_execution=False)
     
     # Evaluate instantaneous algebraic integration at t=0
-    y0, ydot0, _, _, _ = engine._extract_metadata()
+    y0, ydot0 = engine.manifest.evaluate_ic({})
     res = engine.evaluate_residual(y0, ydot0, parameters={})
     
     off_len, _ = engine.layout.state_offsets["reg_length"]

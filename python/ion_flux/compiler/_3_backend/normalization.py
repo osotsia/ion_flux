@@ -13,7 +13,7 @@ from ion_flux.compiler._2_middle_end.ast_utils import extract_div_child
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp, MathUnaryOp,
     MathGrad, MathDiv, MathDt, MathCoords, MathIntegral, MathBoundaryRef,
-    MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathSystem
+    MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathInitialCondition, MathSystem
 )
 
 
@@ -40,13 +40,29 @@ class NormalizationPass:
         dirichlet_overrides = self._lower_dirichlet_overrides()
         observables = self._lower_observables()
         dynamic_bindings = self._lower_dynamic_domains()
+        initial_conditions = self._lower_initial_conditions()
 
         return MathSystem(
             equations=equations,
             observables=observables,
             dirichlet_overrides=dirichlet_overrides,
-            dynamic_domain_bindings=dynamic_bindings
+            dynamic_domain_bindings=dynamic_bindings,
+            initial_conditions=initial_conditions,
         )
+
+    def _lower_initial_conditions(self) -> List[MathInitialCondition]:
+        ics: List[MathInitialCondition] = []
+        for ic_data in self.ast_payload.get("initial_conditions", []):
+            state_name = ic_data["state"]
+            state_obj = self.state_map.get(state_name)
+            target_domain = getattr(state_obj, "domain", None)
+            d_name = target_domain.name if target_domain else None
+            ics.append(MathInitialCondition(
+                state_name=state_name,
+                target_domain=d_name,
+                expr=self._lower_expr(ic_data["value"], state_name, d_name),
+            ))
+        return ics
 
     def _lower_equations(self) -> List[MathEquation]:
         equations: List[MathEquation] = []

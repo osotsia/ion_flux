@@ -173,7 +173,7 @@ def test_oracle_integro_differential_dense_coupling():
     # 1. Assert the Graph Colorer correctly identified the Dense Spatial Coupling
     # By forcing resolution > dense_threshold (30 > 20), the integral's dependency 
     # cross-section will flag the entire state block as dense.
-    _, _, _, _, c_dense = engine._cpr_cache
+    _, _, _, _, c_dense = engine.manifest.cpr_cache
     
     off_c, size_c = engine.layout.state_offsets["c"]
     assert len(c_dense) >= size_c, \

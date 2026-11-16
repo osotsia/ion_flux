@@ -1,6 +1,6 @@
 use crate::linear::sparse_lu::NativeSparseLuSolver;
 use crate::linear::gmres::GmresSolver;
-use crate::solver::shared::diagnostics::Diagnostics;
+use crate::diagnostics::Diagnostics;
 use crate::ffi::callbacks::NativeJvpFn;
 
 pub enum LinearSolver {
