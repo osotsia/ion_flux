@@ -7,7 +7,7 @@ Uses structural pattern matching over Compute IR nodes.
 """
 
 from typing import Dict, Any, List, Set, Tuple, Optional
-from ion_flux.compiler._4_codegen.compute_ir import (
+from ion_flux.compiler._3_backend.compute_ir import (
     Loop, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall,
     Literal, Var, UnaryMinus, UnstructuredRead, Reduction
 )

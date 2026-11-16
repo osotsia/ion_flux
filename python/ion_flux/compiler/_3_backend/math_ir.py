@@ -142,6 +142,12 @@ class MathInitialCondition:
     expr: MathExpr
 
 
+@dataclass(frozen=True)
+class MathNeumannBC:
+    expr: MathExpr
+    domain: Optional[str] = None
+
+
 @dataclass
 class MathSystem:
     equations: List[MathEquation]
@@ -149,6 +155,8 @@ class MathSystem:
     dirichlet_overrides: List[MathDirichletOverride]
     dynamic_domain_bindings: Dict[str, Dict[str, Any]]
     initial_conditions: List[MathInitialCondition] = field(default_factory=list)
+    neumann_bcs: Dict[str, Dict[str, MathNeumannBC]] = field(default_factory=dict)
+    dirichlet_bcs: Dict[str, Dict[str, MathExpr]] = field(default_factory=dict)
 
 
 def extract_math_state_names(expr: MathExpr) -> List[str]:
@@ -181,3 +189,25 @@ def extract_math_state_names(expr: MathExpr) -> List[str]:
 
     seen = set()
     return [x for x in names if not (x in seen or seen.add(x))]
+
+
+def has_time_derivative(expr: MathExpr) -> bool:
+    """Returns True if a MathExpr contains any time derivative (MathDt or is_ydot MathState)."""
+    match expr:
+        case MathState(is_ydot=True) | MathDt():
+            return True
+
+        case (
+            MathUnaryOp(child=child)
+            | MathGrad(child=child)
+            | MathDiv(child=child)
+            | MathIntegral(child=child)
+            | MathBoundaryRef(child=child)
+        ):
+            return has_time_derivative(child)
+
+        case MathBinaryOp(left=left, right=right):
+            return has_time_derivative(left) or has_time_derivative(right)
+
+        case _:
+            return False

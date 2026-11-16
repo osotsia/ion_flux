@@ -29,26 +29,8 @@ class Condition:
         self._compiled_logic = (var_name, op_map.get(expression.op), target)
 
     def evaluate(self, session: Any) -> bool:
-        if not self._compiled_logic: return False
-        import numpy as np
-        var, op, val_target = self._compiled_logic
-        try: current_val = session.get_array(var)
-        except KeyError: return False
-        
-        val = val_target
-        if isinstance(val_target, str):
-            val = session.parameters.get(val_target)
-            if val is None:
-                try: val = session.get_array(val_target)
-                except KeyError: return False
-
-        if op == ">=": return bool(np.any(current_val >= val))
-        if op == "<=": return bool(np.any(current_val <= val))
-        if op == ">": return bool(np.any(current_val > val))
-        if op == "<": return bool(np.any(current_val < val))
-        if op == "==": return bool(np.any(current_val == val))
-        if op == "!=": return bool(np.any(current_val != val))
-        return False
+        from ion_flux.runtime.protocols import evaluate_condition
+        return evaluate_condition(self, session)
 
 class Terminal:
     __slots__ = ["current", "voltage", "name", "_original_name"]

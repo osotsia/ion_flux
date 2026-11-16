@@ -52,3 +52,31 @@ class Sequence:
     __slots__ = ["steps"]
     def __init__(self, steps: List[ProtocolStep]):
         self.steps = steps
+
+
+def evaluate_condition(condition: Any, session: Any) -> bool:
+    """Evaluates an AST Condition against the active session state buffers."""
+    if not getattr(condition, "_compiled_logic", None):
+        return False
+    var, op, val_target = condition._compiled_logic
+    try:
+        current_val = session.get_array(var)
+    except KeyError:
+        return False
+
+    val = val_target
+    if isinstance(val_target, str):
+        val = session.parameters.get(val_target)
+        if val is None:
+            try:
+                val = session.get_array(val_target)
+            except KeyError:
+                return False
+
+    if op == ">=": return bool(np.any(current_val >= val))
+    if op == "<=": return bool(np.any(current_val <= val))
+    if op == ">": return bool(np.any(current_val > val))
+    if op == "<": return bool(np.any(current_val < val))
+    if op == "==": return bool(np.any(current_val == val))
+    if op == "!=": return bool(np.any(current_val != val))
+    return False

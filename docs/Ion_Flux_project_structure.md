@@ -68,16 +68,18 @@ ion_flux/
 │       │   │   ├── nodes.py            # Operator-overloaded AST nodes (BinaryOp, UnaryOp, Boundary, Scalar).
 │       │   │   ├── operators.py        # Topology-agnostic math operators (grad, div, dt, integral, clamp).
 │       │   │   ├── pde.py              # Submodel merging, AST namespace prefixing, and Terminal constraints.
-│       │   │   └── spatial.py          # Domain topologies, sub-mesh slicing, and unstructured mesh loaders.
+│       │   │   └── spatial.py          # Domain topologies, sub-mesh slicing, and coordinate system markers.
 │       │   │
 │       │   ├── _2_middle_end/          # --- TOPOLOGICAL ANALYSIS & MATH IR ---
 │       │   │   ├── ast_utils.py        # AST node inspection and state extraction helpers.
 │       │   │   ├── memory_layout.py    # Computes contiguous 1D memory offsets and FVM metric caches.
 │       │   │   ├── semantics.py        # Pre-processes boundary buckets into O(1) lookup tables.
 │       │   │   ├── topology.py         # Analyzes composite domains, base axes, and memory strides.
+│       │   │   ├── unstructured.py     # Assembles tetrahedral FEM stiffness matrices and CSR weights.
 │       │   │   └── verification.py     # Proves manifold closure and catches topological gaps/overlaps.
 │       │   │
 │       │   ├── _3_backend/             # --- FVM DISCRETIZATION & SPARSITY ---
+│       │   │   ├── compute_ir.py       # Strongly typed loop-level IR (VarDecl, Loop, Assign, ArrayAccess).
 │       │   │   ├── math_ir.py          # Typed representation of continuum mathematics and boundary conditions.
 │       │   │   ├── normalization.py    # Lowers untyped AST dictionaries into typed MathSystem IR.
 │       │   │   ├── discretizer.py      # FVMDiscretizer: lowers Math IR to 1D Compute IR loops and stencils.
@@ -87,7 +89,6 @@ ion_flux/
 │       │   │
 │       │   └── _4_codegen/             # --- MECHANICAL EMISSION & AOT TOOLCHAIN ---
 │       │       ├── builder.py          # Coordinates Math IR discretization and C++ string assembly.
-│       │       ├── compute_ir.py       # Strongly typed loop-level IR (Loop, Assign, ArrayAccess, BinaryOp).
 │       │       ├── cpp_emitter.py      # Mechanically stringifies Compute IR nodes into valid C++ code.
 │       │       ├── templates.py        # Jinja2 C++ skeleton wrapping ICs, residuals, observables, JVPs, and VJPs.
 │       │       └── clang_invoker.py    # Subprocesses Clang + Enzyme to compile C++ into a native .so binary.

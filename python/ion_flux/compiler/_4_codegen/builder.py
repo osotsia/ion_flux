@@ -5,12 +5,12 @@ Coordinates FVM spatial discretization and mechanical C++ emission from Math IR.
 Does not perform semantic normalization or AST manipulation.
 """
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._3_backend.math_ir import MathSystem
 from ion_flux.compiler._3_backend.discretizer import FVMDiscretizer
-from ion_flux.compiler._4_codegen.compute_ir import Stmt
+from ion_flux.compiler._3_backend.compute_ir import Stmt
 from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
 from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
 
@@ -19,7 +19,7 @@ def generate_cpp(
     math_sys: MathSystem,
     layout: Any,
     topo: TopologyAnalyzer,
-    semantic_ctx: SemanticContext,
+    semantic_ctx: Optional[SemanticContext],
     state_map: Dict[str, Any],
     target: str = "cpu"
 ) -> Tuple[str, List[Stmt]]:
@@ -38,7 +38,7 @@ def generate_cpp(
     Returns:
         Tuple of (cpp_source_code, compute_ir_equation_statements).
     """
-    discretizer = FVMDiscretizer(layout, topo, semantic_ctx, state_map, target)
+    discretizer = FVMDiscretizer(layout, topo, semantic_ctx, state_map, target, math_sys=math_sys)
     l_phys_stmts, eq_stmts, obs_stmts = discretizer.discretize_system(math_sys)
     l_phys_ic_stmts, ic_stmts = discretizer.discretize_initial_conditions(math_sys)
 

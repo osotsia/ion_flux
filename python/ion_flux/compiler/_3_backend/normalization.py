@@ -13,7 +13,7 @@ from ion_flux.compiler._2_middle_end.ast_utils import extract_div_child
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp, MathUnaryOp,
     MathGrad, MathDiv, MathDt, MathCoords, MathIntegral, MathBoundaryRef,
-    MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathInitialCondition, MathSystem
+    MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathInitialCondition, MathNeumannBC, MathSystem
 )
 
 
@@ -41,6 +41,8 @@ class NormalizationPass:
         observables = self._lower_observables()
         dynamic_bindings = self._lower_dynamic_domains()
         initial_conditions = self._lower_initial_conditions()
+        neumann_bcs = self._lower_neumann_bcs()
+        dirichlet_bcs = self._lower_dirichlet_bcs()
 
         return MathSystem(
             equations=equations,
@@ -48,6 +50,8 @@ class NormalizationPass:
             dirichlet_overrides=dirichlet_overrides,
             dynamic_domain_bindings=dynamic_bindings,
             initial_conditions=initial_conditions,
+            neumann_bcs=neumann_bcs,
+            dirichlet_bcs=dirichlet_bcs,
         )
 
     def _lower_initial_conditions(self) -> List[MathInitialCondition]:
@@ -211,9 +215,32 @@ class NormalizationPass:
             dynamic_bindings[d_name] = {
                 "side": binding["side"],
                 "rhs_expr": self._lower_expr(binding["rhs"], "", d_name),
-                "rhs_ast": binding["rhs"]
             }
         return dynamic_bindings
+
+    def _lower_neumann_bcs(self) -> Dict[str, Dict[str, MathNeumannBC]]:
+        lowered: Dict[str, Dict[str, MathNeumannBC]] = {}
+        for bc_id, sides in self.semantic_ctx.neumann_bcs.items():
+            lowered[bc_id] = {}
+            for side, info in sides.items():
+                domain = info.get("domain")
+                lowered[bc_id][side] = MathNeumannBC(
+                    expr=self._lower_expr(info["ast"], "", domain),
+                    domain=domain,
+                )
+        return lowered
+
+    def _lower_dirichlet_bcs(self) -> Dict[str, Dict[str, MathExpr]]:
+        lowered: Dict[str, Dict[str, MathExpr]] = {}
+        for state_name, sides in self.semantic_ctx.dirichlet_bcs.items():
+            s_obj = self.state_map.get(state_name)
+            s_dom = getattr(s_obj, "domain", None)
+            d_name = s_dom.name if s_dom else None
+            lowered[state_name] = {
+                side: self._lower_expr(val_ast, state_name, d_name)
+                for side, val_ast in sides.items()
+            }
+        return lowered
 
     def _lower_expr(self, node: Any, current_state: str, current_domain: Optional[str]) -> MathExpr:
         """

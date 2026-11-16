@@ -58,6 +58,12 @@ class Reduction(Expr):
         self.child_expr = child_expr
         self.vol_exprs = vol_exprs
 
+class VarDecl(Stmt):
+    def __init__(self, var_type: str, name: str, init: Expr):
+        self.var_type = var_type
+        self.name = name
+        self.init = init
+
 class Assign(Stmt):
     def __init__(self, lhs: Expr, rhs: Expr):
         self.lhs = lhs

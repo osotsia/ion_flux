@@ -51,10 +51,13 @@ class HybridGraphColorer:
             
         adj = defaultdict(set)
         for r, cols in col_in_sparse_row.items():
-            # Create cliques for all columns sharing this row
-            for i in range(len(cols)):
-                for j in range(i + 1, len(cols)):
-                    u, v = cols[i], cols[j]
+            # Deduplicate columns sharing this row before forming cliques
+            unique_cols = list(set(cols))
+            n_cols = len(unique_cols)
+            for i in range(n_cols):
+                u = unique_cols[i]
+                for j in range(i + 1, n_cols):
+                    v = unique_cols[j]
                     adj[u].add(v)
                     adj[v].add(u)
                     

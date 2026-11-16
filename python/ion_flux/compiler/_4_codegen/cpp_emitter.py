@@ -6,9 +6,9 @@ Uses Python 3.10+ pattern matching to decode Compute IR nodes.
 Performs no mathematical or topological transformations.
 """
 
-from ion_flux.compiler._4_codegen.compute_ir import (
+from ion_flux.compiler._3_backend.compute_ir import (
     IRNode, Literal, Var, ArrayAccess, BinaryOp, UnaryMinus,
-    FuncCall, Ternary, Assign, Loop, RawCpp, UnstructuredRead, Reduction
+    FuncCall, Ternary, VarDecl, Assign, Loop, RawCpp, UnstructuredRead, Reduction
 )
 
 
@@ -37,6 +37,9 @@ class CppEmitter:
 
             case Ternary(cond=cond, true_val=t, false_val=f):
                 return f"({self.emit(cond)} ? {self.emit(t)} : {self.emit(f)})"
+
+            case VarDecl(var_type=var_type, name=name, init=init):
+                return f"{var_type} {name} = {self.emit(init)};"
 
             case Assign(lhs=lhs, rhs=rhs):
                 return f"{self.emit(lhs)} = {self.emit(rhs)};"

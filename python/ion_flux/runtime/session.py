@@ -211,6 +211,7 @@ class Session:
             return False
         from ion_flux.compiler._1_frontend.core import Condition
         from ion_flux.compiler._1_frontend.nodes import BinaryOp
+        from ion_flux.runtime.protocols import evaluate_condition
         if isinstance(condition, BinaryOp):
             condition = Condition(condition)
         elif isinstance(condition, Condition):
@@ -219,7 +220,7 @@ class Session:
             condition = Condition(condition.expression)
         else:
             raise TypeError(f"Invalid condition type '{type(condition).__name__}'. Expected BinaryOp or Condition.")
-        return condition.evaluate(self)
+        return evaluate_condition(condition, self)
 
     def reach_steady_state(self) -> None:
         if self.handle: 

@@ -3,8 +3,6 @@ import sys
 import glob
 import hashlib
 import subprocess
-import shutil
-import tempfile
 import uuid
 import logging
 
@@ -68,33 +66,11 @@ class NativeCompiler:
             return bundled_clang
         return ""
 
-    def _find_system_compiler(self) -> str:
-        if sys.platform == "darwin":
-            for path in ["/opt/homebrew/opt/llvm/bin/clang++", "/usr/local/opt/llvm/bin/clang++"]:
-                if os.path.exists(path): return path
-        return shutil.which("clang++") or shutil.which("g++") or ""
-
     def _find_bundled_plugin(self) -> str:
         ext = ".dylib" if sys.platform == "darwin" else ".so"
         bundled_matches = glob.glob(os.path.join(self.bundled_toolchain_dir, "lib", f"ClangEnzyme*{ext}"))
         if bundled_matches:
             return bundled_matches[0]
-        return ""
-
-    def _find_system_plugin(self) -> str:
-        ext = ".dylib" if sys.platform == "darwin" else ".so"
-        if sys.platform == "darwin":
-            for base in ["/opt/homebrew/lib", "/usr/local/lib"]:
-                matches = glob.glob(os.path.join(base, f"ClangEnzyme*{ext}"))
-                if matches: return matches[0]
-        elif sys.platform == "linux":
-            conda_prefix = os.environ.get("CONDA_PREFIX", "")
-            if conda_prefix:
-                matches = glob.glob(os.path.join(conda_prefix, "lib", f"ClangEnzyme*{ext}"))
-                if matches: return matches[0]
-            for base in ["/usr/lib", "/usr/local/lib"]:
-                matches = glob.glob(os.path.join(base, f"ClangEnzyme*{ext}"))
-                if matches: return matches[0]
         return ""
 
     def compile(self, cpp_source: str, n_states: int = 0) -> str:

@@ -52,65 +52,8 @@ class Domain:
     @classmethod
     def from_mesh(cls, mesh_data: Union[str, dict], name: str = "unstructured_mesh", surfaces: Optional[Dict[str, List[int]]] = None) -> "Domain":
         name = validate_identifier(name)
-        import numpy as np
-        if isinstance(mesh_data, str):
-            import json
-            with open(mesh_data, "r") as f: mesh_data = json.load(f)
-                
-        nodes = np.array(mesh_data["nodes"], dtype=float)
-        elements = np.array(mesh_data["elements"], dtype=int)
-        resolution = len(nodes)
-        
-        from collections import defaultdict
-        K_global = defaultdict(float)
-        V_nodes = np.zeros(resolution, dtype=float)
-        
-        for el in elements:
-            if len(el) != 4: continue
-            p = nodes[el]
-            J_mat = np.array([p[1]-p[0], p[2]-p[0], p[3]-p[0]]).T
-            detJ = np.linalg.det(J_mat)
-            vol = abs(detJ) / 6.0
-            if vol < 1e-30: continue
-            
-            invJ = np.linalg.inv(J_mat)
-            gradN = np.zeros((4, 3))
-            gradN[1:4, :] = invJ.T
-            gradN[0, :] = -np.sum(invJ.T, axis=0)
-            
-            K_local = vol * (gradN @ gradN.T)
-            
-            for i in range(4):
-                V_nodes[el[i]] += vol / 4.0
-                for j in range(4):
-                    if i != j: K_global[(el[i], el[j])] -= K_local[i, j]
-                        
-        row_ptr = [0] * (resolution + 1)
-        col_ind, weights = [], []
-        
-        for i in range(resolution):
-            row_ptr[i] = len(col_ind)
-            vol_i = max(V_nodes[i], 1e-30)
-            for j in range(resolution):
-                if (i, j) in K_global:
-                    col_ind.append(j)
-                    weights.append(K_global[(i, j)] / vol_i)
-        row_ptr[resolution] = len(col_ind)
-        
-        surface_masks = {}
-        if surfaces:
-            for tag, indices in surfaces.items():
-                mask = [0.0] * resolution
-                for idx in indices: mask[idx] = 1.0
-                surface_masks[tag] = mask
-                
-        csr_data = {
-            "row_ptr": [float(x) for x in row_ptr],
-            "col_ind": [float(x) for x in col_ind],
-            "weights": weights,
-            "volumes": [float(x) for x in V_nodes], 
-            "surface_masks": surface_masks
-        }
+        from ion_flux.compiler._2_middle_end.unstructured import assemble_mesh_csr
+        resolution, csr_data = assemble_mesh_csr(mesh_data, surfaces)
         return cls(bounds=(0, 1), resolution=resolution, coord_sys="unstructured", name=name, csr_data=csr_data)
         
     @property

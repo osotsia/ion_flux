@@ -16,7 +16,7 @@ import pytest
 import numpy as np
 
 import ion_flux as fx
-from ion_flux.compiler._4_codegen.compute_ir import Literal, BinaryOp, ArrayAccess, FuncCall, Ternary
+from ion_flux.compiler._3_backend.compute_ir import Literal, BinaryOp, ArrayAccess, FuncCall, Ternary
 from ion_flux.compiler._3_backend.discretizer import (
     MeshMetrics, StateSampler, PiecewiseFluxStitcher, SpatialStencils, IndexManager
 )

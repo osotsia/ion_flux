@@ -21,22 +21,31 @@ Architecture Overview:
 from typing import Dict, Any, Optional, List, Tuple
 from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
-from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
-from ion_flux.compiler._4_codegen.compute_ir import (
+from ion_flux.compiler._3_backend.compute_ir import (
     Expr, Stmt, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary,
-    UnaryMinus, Loop, Assign, RawCpp, UnstructuredRead, Reduction
+    UnaryMinus, VarDecl, Loop, Assign, UnstructuredRead, Reduction
 )
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
     MathUnaryOp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
     MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride,
-    MathInitialCondition, MathSystem, extract_math_state_names
+    MathInitialCondition, MathNeumannBC, MathSystem, extract_math_state_names
 )
 
 
 # =============================================================================
 # Helper Utilities & Index Linearization
 # =============================================================================
+
+def resolve_axis(topo: TopologyAnalyzer, axis_name: Optional[str]) -> Optional[str]:
+    """Resolves an axis name (including composite cross-products) to its fundamental 1D base axis."""
+    if not axis_name:
+        return None
+    axes = topo.get_axes(axis_name)
+    if axes:
+        return topo.get_base_axis(axes[-1])
+    return topo.get_base_axis(axis_name)
+
 
 def extract_domain_name(expr: MathExpr) -> Optional[str]:
     """Recursively resolves the governing spatial domain identifier of an expression."""
@@ -187,10 +196,10 @@ class StateSampler:
     and Dirichlet boundary condition replacements.
     """
 
-    def __init__(self, layout: Any, topo: TopologyAnalyzer, semantic_ctx: SemanticContext):
+    def __init__(self, layout: Any, topo: TopologyAnalyzer, dirichlet_bcs: Optional[Dict[str, Dict[str, MathExpr]]] = None):
         self.layout = layout
         self.topo = topo
-        self.semantic_ctx = semantic_ctx
+        self.dirichlet_bcs = dirichlet_bcs or {}
 
     def sample_cell(self, node: MathState, idx_mgr: IndexManager, force_ydot: bool = False) -> Expr:
         """Directly samples a cell-centered state from y[] or ydot[]."""
@@ -213,7 +222,7 @@ class StateSampler:
         """
         base_access = self.sample_cell(node, idx_mgr, force_ydot)
 
-        base_axis = self._resolve_axis(current_axis)
+        base_axis = resolve_axis(self.topo, current_axis)
         res = self.topo.domains.get(current_axis, {}).get("resolution", 1)
         start = self.topo.domains.get(current_axis, {}).get("start_idx", 0)
 
@@ -227,7 +236,7 @@ class StateSampler:
         interpolated = BinaryOp("*", Literal(0.5), BinaryOp("+", base_access, neighbor_access))
 
         # Check for explicit Dirichlet boundary overrides applied at this face
-        dirichlet_bcs = self.semantic_ctx.get_dirichlet_bc(node.name)
+        dirichlet_bcs = self.dirichlet_bcs.get(node.name)
         if dirichlet_bcs:
             local_idx = BinaryOp("-", idx_mgr.get_local(base_axis), Literal(start))
             if face == "left" and "left" in dirichlet_bcs:
@@ -241,14 +250,6 @@ class StateSampler:
                 return Ternary(is_edge, boundary_ir, interpolated)
 
         return interpolated
-
-    def _resolve_axis(self, axis_name: Optional[str]) -> Optional[str]:
-        if not axis_name:
-            return None
-        axes = self.topo.get_axes(axis_name)
-        if axes:
-            return self.topo.get_base_axis(axes[-1])
-        return self.topo.get_base_axis(axis_name)
 
 
 # =============================================================================
@@ -323,13 +324,13 @@ class SpatialStencils:
         stitcher: PiecewiseFluxStitcher,
         topo: TopologyAnalyzer,
         layout: Any,
-        semantic_ctx: SemanticContext
+        neumann_bcs: Optional[Dict[str, Dict[str, MathNeumannBC]]] = None
     ):
         self.metrics = metrics
         self.stitcher = stitcher
         self.topo = topo
         self.layout = layout
-        self.semantic_ctx = semantic_ctx
+        self.neumann_bcs = neumann_bcs or {}
 
     def gradient(
         self,
@@ -345,7 +346,7 @@ class SpatialStencils:
           Face Gradient:   (c[i+1] - c[i]) / dx
           Center Gradient: (c[i+1] - c[i-1]) / (dx_left + dx_right)
         """
-        base_axis = self._resolve_axis(axis_name)
+        base_axis = resolve_axis(self.topo, axis_name)
         coord_sys = self.topo.domains.get(base_axis, {}).get("coord_sys", "cartesian") if base_axis else "cartesian"
 
         if coord_sys == "unstructured":
@@ -394,7 +395,7 @@ class SpatialStencils:
         Computes finite volume flux divergence:
           div(N) = (A_right * N_right - A_left * N_left) / V_node
         """
-        base_axis = self._resolve_axis(axis_name)
+        base_axis = resolve_axis(self.topo, axis_name)
         coord_sys = self.topo.domains.get(base_axis, {}).get("coord_sys", "cartesian") if base_axis else "cartesian"
 
         if coord_sys == "unstructured":
@@ -442,10 +443,10 @@ class SpatialStencils:
 
         bc_id = getattr(child, "bc_id", None)
         if bc_id:
+            bc_map = self.neumann_bcs.get(bc_id, {})
             for surface_tag in ("left", "right", "top", "bottom"):
-                if surface_tag in offsets.get("surfaces", {}) and self.semantic_ctx.get_neumann_bc(bc_id, surface_tag):
-                    bc_ast = self.semantic_ctx.get_neumann_bc(bc_id, surface_tag)["ast"]
-                    bc_val = lower_expr_fn(bc_ast, idx_mgr, axis_name)
+                if surface_tag in offsets.get("surfaces", {}) and surface_tag in bc_map:
+                    bc_val = lower_expr_fn(bc_map[surface_tag].expr, idx_mgr, axis_name)
                     mask = ArrayAccess("m", BinaryOp("+", Literal(offsets["surfaces"][surface_tag]), idx_expr))
 
                     if "volumes" in offsets:
@@ -473,14 +474,6 @@ class SpatialStencils:
             case _:
                 return expr
 
-    def _resolve_axis(self, axis_name: Optional[str]) -> Optional[str]:
-        if not axis_name:
-            return None
-        axes = self.topo.get_axes(axis_name)
-        if axes:
-            return self.topo.get_base_axis(axes[-1])
-        return self.topo.get_base_axis(axis_name)
-
 
 # =============================================================================
 # Grid Kinematics (ALE) & Integral Reductions
@@ -493,8 +486,8 @@ class AleKinematics:
       dilution = -y * (dim_mult * L_dot / L)
     """
 
-    def __init__(self, semantic_ctx: SemanticContext, state_map: Dict[str, Any], layout: Any):
-        self.semantic_ctx = semantic_ctx
+    def __init__(self, dynamic_domain_bindings: Dict[str, Dict[str, Any]], state_map: Dict[str, Any], layout: Any):
+        self.dynamic_domain_bindings = dynamic_domain_bindings
         self.state_map = state_map
         self.layout = layout
 
@@ -504,7 +497,6 @@ class AleKinematics:
         idx_mgr: IndexManager,
         current_axis: Optional[str],
         lower_expr_fn: Any,
-        lower_ast_dict_fn: Any
     ) -> List[Expr]:
         """Calculates ALE dilution terms if the state's domain is dynamically bound to a moving boundary."""
         dilution_terms: List[Expr] = []
@@ -515,9 +507,9 @@ class AleKinematics:
         coord_sys = getattr(domain, "coord_sys", "cartesian")
         dim_multiplier = 3.0 if coord_sys == "spherical" else (2.0 if coord_sys == "cylindrical" else 1.0)
 
-        for domain_name, binding in self.semantic_ctx.dynamic_domains.items():
+        for domain_name, binding in self.dynamic_domain_bindings.items():
             if domain.name == domain_name:
-                rhs_math_ir = lower_ast_dict_fn(binding["rhs"])
+                rhs_math_ir = binding["rhs_expr"]
                 length_expr = lower_expr_fn(rhs_math_ir, idx_mgr, current_axis)
                 length_velocity_expr = lower_expr_fn(MathDt(rhs_math_ir), idx_mgr, current_axis)
 
@@ -572,7 +564,7 @@ class IntegralQuadrature:
         return Reduction(loops, child_ir, volume_exprs)
 
     def _get_volume_weight(self, axis: str, base_axis: str, iter_var: str, start_idx: int) -> Expr:
-        resolved_axis = self._resolve_axis(base_axis or axis)
+        resolved_axis = resolve_axis(self.topo, base_axis or axis)
         coord_sys = self.topo.domains.get(resolved_axis, {}).get("coord_sys", "cartesian")
 
         if coord_sys == "unstructured":
@@ -588,14 +580,6 @@ class IntegralQuadrature:
         l_phys = self.metrics.domain_length(resolved_axis)
         scale_factor = l_phys if dim_exponent == 1.0 else FuncCall("std::pow", [l_phys, Literal(dim_exponent)])
         return BinaryOp("*", volume_weight, scale_factor)
-
-    def _resolve_axis(self, axis_name: Optional[str]) -> Optional[str]:
-        if not axis_name:
-            return None
-        axes = self.topo.get_axes(axis_name)
-        if axes:
-            return self.topo.get_base_axis(axes[-1])
-        return self.topo.get_base_axis(axis_name)
 
 
 # =============================================================================
@@ -623,24 +607,36 @@ class FVMDiscretizer:
         self,
         layout: Any,
         topo: TopologyAnalyzer,
-        semantic_ctx: SemanticContext,
-        state_map: Dict[str, Any],
-        target: str = "cpu"
+        semantic_ctx: Optional[SemanticContext] = None,
+        state_map: Optional[Dict[str, Any]] = None,
+        target: str = "cpu",
+        math_sys: Optional[MathSystem] = None
     ):
         self.layout = layout
         self.topo = topo
         self.semantic_ctx = semantic_ctx
-        self.state_map = state_map
+        self.state_map = state_map or {}
         self.target = target
+
+        self.neumann_bcs = math_sys.neumann_bcs if math_sys else {}
+        self.dirichlet_bcs = math_sys.dirichlet_bcs if math_sys else {}
+        self.dynamic_domain_bindings = math_sys.dynamic_domain_bindings if math_sys else {}
 
         # Initialize modular subsystems
         self.metrics = MeshMetrics(layout, topo)
-        self.sampler = StateSampler(layout, topo, semantic_ctx)
+        self.sampler = StateSampler(layout, topo, self.dirichlet_bcs)
         self.stitcher = PiecewiseFluxStitcher(topo)
-        self.stencils = SpatialStencils(self.metrics, self.stitcher, topo, layout, semantic_ctx)
-        self.ale = AleKinematics(semantic_ctx, state_map, layout)
+        self.stencils = SpatialStencils(self.metrics, self.stitcher, topo, layout, self.neumann_bcs)
+        self.ale = AleKinematics(self.dynamic_domain_bindings, self.state_map, layout)
         self.quadrature = IntegralQuadrature(self.metrics, topo, layout)
-        self.emitter = CppEmitter()
+
+    def _bind_math_system(self, math_sys: MathSystem) -> None:
+        self.neumann_bcs = math_sys.neumann_bcs
+        self.dirichlet_bcs = math_sys.dirichlet_bcs
+        self.dynamic_domain_bindings = math_sys.dynamic_domain_bindings
+        self.sampler.dirichlet_bcs = self.dirichlet_bcs
+        self.stencils.neumann_bcs = self.neumann_bcs
+        self.ale.dynamic_domain_bindings = self.dynamic_domain_bindings
 
     # -------------------------------------------------------------------------
     # Top-Level Entry Points
@@ -653,6 +649,7 @@ class FVMDiscretizer:
         Returns:
             Tuple of (l_phys_stmts, equation_stmts, observable_stmts).
         """
+        self._bind_math_system(math_sys)
         l_phys_stmts = self._generate_physical_length_constants(math_sys)
 
         eq_stmts: List[Stmt] = []
@@ -670,6 +667,7 @@ class FVMDiscretizer:
 
     def discretize_initial_conditions(self, math_sys: MathSystem) -> Tuple[List[Stmt], List[Stmt]]:
         """Lowers initial conditions into 1D Compute IR assignments to y0[]."""
+        self._bind_math_system(math_sys)
         l_phys_ic_stmts = self._generate_physical_length_constants(math_sys, include_dynamic=False)
         ic_stmts: List[Stmt] = []
         for ic in math_sys.initial_conditions:
@@ -678,7 +676,7 @@ class FVMDiscretizer:
 
     def _discretize_single_ic(self, ic: MathInitialCondition) -> List[Stmt]:
         axes = self.topo.get_axes(ic.target_domain)
-        base_axis = self._resolve_axis(axes[-1]) if axes else None
+        base_axis = resolve_axis(self.topo, axes[-1]) if axes else None
         idx_mgr = self._build_index_manager(axes, {})
 
         offset = self.layout.state_offsets[ic.state_name][0]
@@ -692,7 +690,7 @@ class FVMDiscretizer:
         """Lowers an implicit MathEquation into a nested coordinate loop assigning to res[]."""
         axes = self.topo.get_axes(eq.target_domain)
         bounds_override = eq.bounds_override or {}
-        base_axis = self._resolve_axis(axes[-1]) if axes else None
+        base_axis = resolve_axis(self.topo, axes[-1]) if axes else None
 
         idx_mgr = self._build_index_manager(axes, bounds_override)
 
@@ -705,7 +703,7 @@ class FVMDiscretizer:
 
         # Inject ALE grid velocity dilution terms if domain boundary is dynamic
         for ale_term in self.ale.generate_dilution_terms(
-            eq.state_name, idx_mgr, base_axis, self.lower_expr, self._lower_ast_dict
+            eq.state_name, idx_mgr, base_axis, self.lower_expr
         ):
             rhs_expr = BinaryOp("+", rhs_expr, ale_term)
 
@@ -719,7 +717,7 @@ class FVMDiscretizer:
         domain = getattr(state_obj, "domain", None)
         target_domain_name = domain.name if domain else None
         last_axis = self.topo.get_axes(target_domain_name)[-1] if target_domain_name else None
-        base_axis = self._resolve_axis(last_axis) if last_axis else None
+        base_axis = resolve_axis(self.topo, last_axis) if last_axis else None
 
         if last_axis:
             res = self.topo.domains.get(last_axis, {}).get("resolution", 1)
@@ -747,7 +745,7 @@ class FVMDiscretizer:
         """Lowers an observable diagnostic metric into an assignment to obs[]."""
         axes = self.topo.get_axes(obs.target_domain)
         bounds_override = obs.bounds_override or {}
-        base_axis = self._resolve_axis(axes[-1]) if axes else None
+        base_axis = resolve_axis(self.topo, axes[-1]) if axes else None
 
         idx_mgr = self._build_index_manager(axes, bounds_override)
 
@@ -766,27 +764,19 @@ class FVMDiscretizer:
 
     def lower_expr(
         self,
-        node: Any,
+        node: MathExpr,
         idx_mgr: IndexManager,
         current_axis: Optional[str] = None,
         face: Optional[str] = None,
         current_eq: Optional[MathEquation] = None
     ) -> Expr:
-        """Translates a MathExpr or raw AST dict into Compute IR, intercepting Neumann boundary tags."""
-        # Unpack raw dictionary payloads if passing legacy AST fragments
-        if isinstance(node, dict):
-            node = self._lower_ast_dict(node)
-        elif isinstance(node, MathDt) and isinstance(node.child, dict):
-            node = MathDt(self._lower_ast_dict(node.child), bc_id=node.bc_id)
-
-        # Intercept Neumann boundary faces via ternary operators: (is_edge ? bc_value : bulk_value)
+        """Translates a typed MathExpr into Compute IR, intercepting Neumann boundary tags."""
         if face and getattr(node, "bc_id", None):
-            bc_info = self.semantic_ctx.get_neumann_bc(node.bc_id, face)
-            if bc_info:
-                bc_expr = self._lower_ast_dict(bc_info["ast"])
-                bc_ir = self.lower_expr(bc_expr, idx_mgr, current_axis, face=None, current_eq=current_eq)
+            bc_info = self.neumann_bcs.get(node.bc_id, {}).get(face)
+            if bc_info is not None:
+                bc_ir = self.lower_expr(bc_info.expr, idx_mgr, current_axis, face=None, current_eq=current_eq)
 
-                axis = self._resolve_axis(bc_info.get("domain")) or current_axis
+                axis = resolve_axis(self.topo, bc_info.domain) or current_axis
                 res = self.topo.domains.get(axis, {}).get("resolution", 1)
                 start = self.topo.domains.get(axis, {}).get("start_idx", 0)
                 base_axis = self.topo.get_base_axis(axis)
@@ -846,7 +836,7 @@ class FVMDiscretizer:
                 return UnaryMinus(child_ir)
 
             case MathUnaryOp(op="coords"):
-                base_axis = self._resolve_axis(current_axis)
+                base_axis = resolve_axis(self.topo, current_axis)
                 if not base_axis or self.topo.domains.get(base_axis, {}).get("coord_sys") == "unstructured":
                     return Literal(0.0)
                 return self.metrics.cell_coordinate(base_axis, idx_mgr.get_local(base_axis))
@@ -863,7 +853,7 @@ class FVMDiscretizer:
                 return self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
 
             case MathCoords(axis=axis):
-                base_axis = self._resolve_axis(axis or current_axis)
+                base_axis = resolve_axis(self.topo, axis or current_axis)
                 if not base_axis or self.topo.domains.get(base_axis, {}).get("coord_sys") == "unstructured":
                     return Literal(0.0)
                 return self.metrics.cell_coordinate(base_axis, idx_mgr.get_local(base_axis))
@@ -901,7 +891,7 @@ class FVMDiscretizer:
         domain_name = node.domain or extract_domain_name(node.child)
 
         if domain_name:
-            base_axis = self._resolve_axis(domain_name)
+            base_axis = resolve_axis(self.topo, domain_name)
             start = self.topo.domains.get(base_axis, {}).get("start_idx", 0)
             res = self.topo.domains.get(base_axis, {}).get("resolution", 1)
             pinned_idx = start if node.side == "left" else start + res - 1
@@ -909,18 +899,9 @@ class FVMDiscretizer:
 
         return self.lower_expr(node.child, cloned_idx_mgr, current_axis=domain_name or current_axis)
 
-    def _resolve_axis(self, axis_name: Optional[str]) -> Optional[str]:
-        """Resolves an axis name (including composite cross-products) to its fundamental 1D base axis."""
-        if not axis_name:
-            return None
-        axes = self.topo.get_axes(axis_name)
-        if axes:
-            return self.topo.get_base_axis(axes[-1])
-        return self.topo.get_base_axis(axis_name)
-
     def _generate_physical_length_constants(self, math_sys: MathSystem, include_dynamic: bool = True) -> List[Stmt]:
         """Declares local C++ physical domain lengths (L_phys_*), handling dynamic ALE moving boundaries."""
-        l_phys_stmts: List[Stmt] = [RawCpp("double L_phys_default = 1.0;")]
+        l_phys_stmts: List[Stmt] = [VarDecl("double", "L_phys_default", Literal(1.0))]
 
         for domain_name, domain_info in self.topo.domains.items():
             if domain_info.get("type") == "composite":
@@ -931,14 +912,13 @@ class FVMDiscretizer:
                 idx_mgr = IndexManager(self.topo)
                 idx_mgr.register(self.topo.get_base_axis(domain_name), Literal(0))
                 rhs_ir = self.lower_expr(binding["rhs_expr"], idx_mgr, current_axis=domain_name)
-                rhs_str = self.emitter.emit(rhs_ir)
                 l_phys_stmts.append(
-                    RawCpp(f"double L_phys_{domain_name} = std::max(1e-12, (double)({rhs_str}));")
+                    VarDecl("double", f"L_phys_{domain_name}", FuncCall("std::max", [Literal("1e-12"), rhs_ir]))
                 )
             else:
                 bounds = domain_info.get("bounds", (0.0, 1.0))
                 l_phys_stmts.append(
-                    RawCpp(f"double L_phys_{domain_name} = {float(bounds[1] - bounds[0])};")
+                    VarDecl("double", f"L_phys_{domain_name}", Literal(float(bounds[1] - bounds[0])))
                 )
 
         return l_phys_stmts
@@ -971,72 +951,3 @@ class FVMDiscretizer:
             pragma = "#pragma omp parallel for" if i == 0 and loop_res > 50 and "omp" in self.target else ""
             current_body = [Loop(loop_var, Literal(0), Literal(loop_res), current_body, pragma)]
         return current_body
-
-    def _lower_ast_dict(self, node: Any) -> MathExpr:
-        """Fallback lowering to translate raw embedded frontend AST dictionaries into typed MathExpr nodes."""
-        bc_id = node.get("_bc_id") if isinstance(node, dict) else None
-
-        match node:
-            case int() | float():
-                return MathScalar(float(node))
-
-            case {"type": "Scalar", "value": val}:
-                return MathScalar(float(val), bc_id=bc_id)
-
-            case {"type": "Parameter", "name": param_name}:
-                offset = self.layout.get_param_offset(param_name) if self.layout else 0
-                return MathParameter(name=param_name, offset=offset, bc_id=bc_id)
-
-            case {"type": "State", "name": state_name}:
-                state_obj = self.state_map.get(state_name)
-                domain = getattr(state_obj, "domain", None)
-                domain_name = domain.name if domain else None
-                offset, size = (
-                    self.layout.state_offsets[state_name]
-                    if self.layout and state_name in self.layout.state_offsets
-                    else (0, 1)
-                )
-                return MathState(
-                    name=state_name, domain_name=domain_name,
-                    offset=offset, size=size, is_ydot=False, bc_id=bc_id
-                )
-
-            case {"type": "Boundary", "child": child, "side": side}:
-                return MathBoundaryRef(
-                    child=self._lower_ast_dict(child),
-                    side=side,
-                    domain=node.get("domain"),
-                    bc_id=bc_id
-                )
-
-            case {"type": "BinaryOp", "op": op, "left": left, "right": right}:
-                return MathBinaryOp(
-                    op=op,
-                    left=self._lower_ast_dict(left),
-                    right=self._lower_ast_dict(right),
-                    bc_id=bc_id
-                )
-
-            case {"type": "UnaryOp", "op": "coords"}:
-                axis = self._resolve_axis(node.get("axis"))
-                return MathCoords(axis=axis, bc_id=bc_id)
-
-            case {"type": "UnaryOp", "op": "grad", "child": child}:
-                axis = self._resolve_axis(node.get("axis"))
-                return MathGrad(child=self._lower_ast_dict(child), axis=axis, bc_id=bc_id)
-
-            case {"type": "UnaryOp", "op": "div", "child": child}:
-                axis = self._resolve_axis(node.get("axis"))
-                return MathDiv(child=self._lower_ast_dict(child), axis=axis, bc_id=bc_id)
-
-            case {"type": "UnaryOp", "op": "dt", "child": child}:
-                return MathDt(child=self._lower_ast_dict(child), bc_id=bc_id)
-
-            case {"type": "UnaryOp", "op": "integral", "child": child}:
-                return MathIntegral(child=self._lower_ast_dict(child), over_domain=node.get("over"), bc_id=bc_id)
-
-            case {"type": "UnaryOp", "op": op, "child": child}:
-                return MathUnaryOp(op=op, child=self._lower_ast_dict(child), bc_id=bc_id)
-
-            case _:
-                return MathScalar(0.0)
