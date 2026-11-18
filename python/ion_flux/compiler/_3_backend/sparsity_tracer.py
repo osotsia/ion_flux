@@ -8,8 +8,8 @@ Uses structural pattern matching over Compute IR nodes.
 
 from typing import Dict, Any, List, Set, Tuple, Optional
 from ion_flux.compiler._3_backend.compute_ir import (
-    Loop, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall,
-    Literal, Var, UnaryMinus, UnstructuredRead, Reduction
+    Loop, Assign, IfElse, ArrayAccess, BinaryOp, Ternary, FuncCall,
+    Literal, Var, VarDecl, UnaryMinus, UnstructuredRead, Reduction
 )
 
 
@@ -22,6 +22,7 @@ class IndexEvaluator:
         self.layout = layout
         self.mesh_cache = layout.mesh_cache
         self.sparse_triplets: Set[Tuple[int, int]] = set()
+        self.var_deps: Dict[str, List[int]] = {}
 
     def evaluate(self, stmts: List[Any], env: Optional[Dict[str, int]] = None):
         if env is None:
@@ -36,6 +37,30 @@ class IndexEvaluator:
                         env[var] = val
                         self.evaluate(body, env)
                     env.pop(var, None)
+
+                case VarDecl(name=name, init=init):
+                    self.var_deps[name] = self.extract_cols(init, env)
+
+                case Assign(lhs=Var(name=name), rhs=rhs):
+                    self.var_deps[name] = self.extract_cols(rhs, env)
+
+                case IfElse(cond=cond, then_body=tb, else_body=eb):
+                    match self.eval_cond(cond, env):
+                        case True:
+                            self.evaluate(tb, env)
+                        case False:
+                            self.evaluate(eb, env)
+                        case None:
+                            before = {k: list(v) for k, v in self.var_deps.items()}
+                            self.evaluate(tb, env)
+                            after_tb = {k: list(v) for k, v in self.var_deps.items()}
+                            self.var_deps = before
+                            self.evaluate(eb, env)
+                            for k, v in after_tb.items():
+                                if k in self.var_deps:
+                                    self.var_deps[k] = list(set(v) | set(self.var_deps[k]))
+                                else:
+                                    self.var_deps[k] = v
 
                 case Assign(lhs=ArrayAccess(array_name="res", index=idx), rhs=rhs):
                     row = self.eval_idx(idx, env)
@@ -100,6 +125,10 @@ class IndexEvaluator:
         cols: List[int] = []
 
         match expr:
+            case Var(name=name):
+                if name in self.var_deps:
+                    cols.extend(self.var_deps[name])
+
             case ArrayAccess(array_name="y" | "ydot", index=idx):
                 cols.append(self.eval_idx(idx, env))
 
@@ -141,9 +170,12 @@ class IndexEvaluator:
                     neighbor = int(self.mesh_cache.get(ci_off + k, 0))
                     cols.append(s_off + neighbor)
 
-            case Reduction(loops=loops, child_expr=child_expr):
+            case Reduction(loops=loops, child_expr=child_expr, pre_stmts=pre_stmts):
                 def eval_loops(depth, current_env):
                     if depth == len(loops):
+                        for p_stmt in pre_stmts:
+                            if isinstance(p_stmt, VarDecl):
+                                self.var_deps[p_stmt.name] = self.extract_cols(p_stmt.init, current_env)
                         cols.extend(self.extract_cols(child_expr, current_env))
                         return
                     var, end_expr = loops[depth]

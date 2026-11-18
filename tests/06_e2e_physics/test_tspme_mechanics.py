@@ -362,26 +362,13 @@ class DimensionalBroadcastingProbe(fx.PDE):
 
 
 
-@REQUIRES_COMPILER
 def test_ast_1d_to_0d_broadcasting_behavior():
     """
-    PROBE: Determines if the compiler silently extracts the first index (0.0) 
-    when broadcasting 1D to 0D. This proves why the overpotential in the previous 
-    script produced wild jumps, as it only tracked the boundary node of the electrolyte.
+    Verifies the compiler rejects unreduced 1D-to-0D spatial broadcasts statically
+    instead of silently indexing node 0.
     """
-    engine = fx.Engine(model=DimensionalBroadcastingProbe(), target="cpu", mock_execution=False)
-    
-    y0, ydot0 = engine.manifest.evaluate_ic({})
-    res = engine.evaluate_residual(y0, ydot0)
-    
-    off_v, _ = engine.layout.state_offsets["v_target"]
-    
-    # Residual = ydot - rhs = 0.0 - rhs. Therefore rhs = -residual.
-    rhs_eval = -res[off_v]
-    
-    # If rhs_eval is exactly 0.0, the compiler silently grabbed index 0 of the spatial field.
-    assert rhs_eval == pytest.approx(0.0), \
-        f"Compiler Broadcast Logic: Expected silent index-0 extraction, got {rhs_eval}."
+    with pytest.raises(ValueError, match="Dimensional Broadcast Error"):
+        fx.Engine(model=DimensionalBroadcastingProbe(), target="cpu", mock_execution=True)
 
 
 

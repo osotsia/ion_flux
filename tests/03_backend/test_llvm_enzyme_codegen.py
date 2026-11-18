@@ -714,3 +714,83 @@ def test_jit_lru_cache_updates_mtime_and_evicts_oldest(tmp_path):
     assert warm_lib.exists()
     assert not cold_lib.exists()
     assert not cold_cpp.exists()
+
+
+@REQUIRES_RUNTIME
+def test_phase2_audit_compiler_ir_clamps_and_so_roundtrip(tmp_path):
+    """
+    Validates Phase 2:
+      - `audit_compiler=True` emits readable Math IR, Compute IR, boundary ledger,
+        randomized CPR-vs-JVP probe, and t=0 IC/Jacobian health.
+      - Explicit `fx.clamp(..., label=...)` compiles scalar watchpoints into
+        `evaluate_audit_observables` without altering user `obs_offsets`.
+      - Readable C++ omits the raw JSON metadata blob and embeds `constexpr` aliases.
+      - Exported `.so` loaded via `Engine.load()` preserves `static_audit`.
+    """
+    class AuditedBatteryToy(fx.PDE):
+        x = fx.Domain(bounds=(0, 1.0), resolution=6, name="x")
+        c = fx.State(domain=x, name="c")
+        phi = fx.State(domain=x, name="phi")
+        c_obs = fx.Observable(domain=None, name="c_obs")
+
+        def math(self):
+            c_safe = fx.clamp(self.c, lower=0.5, upper=2.0, label="c_safe")
+            flux_c = -fx.grad(self.c)
+            i_e = -fx.grad(self.phi)
+            return {
+                "equations": {
+                    self.c: fx.dt(self.c) == -fx.div(flux_c),
+                    self.phi: fx.div(i_e) == c_safe - 1.0,
+                },
+                "boundaries": {
+                    flux_c: {"left": 0.0, "right": 0.0},
+                    # Intentionally leave phi.right unbound (ImplicitZeroFlux) for ledger check
+                    self.phi: {"left": fx.Dirichlet(0.0)},
+                },
+                "initial_conditions": {self.c: 1.0, self.phi: 0.0},
+                "observables": {self.c_obs: self.c.right},
+            }
+
+    model = AuditedBatteryToy()
+    eng = fx.Engine(model=model, target="cpu:serial", audit_compiler=True)
+    report = eng.audit_compiler_report()
+
+    # 1. Clean C++ emission: constexpr aliases present, no embedded JSON blob
+    assert "constexpr int Y_c =" in eng.cpp_source
+    assert "get_ion_flux_metadata" not in eng.cpp_source
+    assert report["math_pretty"]
+    assert report["compute_pretty"]
+
+    # 2. Boundary ledger detects Dirichlet + ImplicitZeroFlux
+    phi_entry = next(e for e in report["boundary_ledger"] if e["state"] == "phi")
+    assert phi_entry["faces"]["left"] == "Dirichlet"
+    assert phi_entry["faces"]["right"] == "ImplicitZeroFlux"
+    assert "right" in phi_entry["implicit_zero_flux_faces"]
+
+    # 3. Randomized CPR-vs-JVP & IC probes passed
+    assert report["cpr_jvp_probe_passed"] is True
+    assert report["ic_health"]["ic_converged"] is True
+
+    # 4. Clamp watchpoints preserve user obs_offsets and detect saturation accurately
+    assert eng.layout.n_obs == 1
+    assert len(report["clamp_meta"]) == 1
+    assert report["clamp_meta"][0]["label"] == "c_safe"
+
+    N = eng.layout.n_states
+    off_c, _ = eng.layout.state_offsets["c"]
+    total_nodes = report["clamp_meta"][0]["total_nodes"]
+    assert total_nodes == 5  # phi.left is Dirichlet, so bulk equation evaluates nodes [1..5]
+    y_test = np.ones(N)
+    y_test[off_c + 2] = 0.1  # 1/5 below lower=0.5
+    y_test[off_c + 1] = 5.0  # 1/5 above upper=2.0
+    audit_obs = eng.manifest.evaluate_audit_observables(y_test.tolist(), np.zeros(N).tolist())
+    assert len(audit_obs) == 2
+    assert audit_obs[0] == pytest.approx(1.0 / total_nodes, rel=1e-6)
+    assert audit_obs[1] == pytest.approx(1.0 / total_nodes, rel=1e-6)
+
+    # 5. Export & load preserves static audit report
+    export_so = tmp_path / "audited_toy.so"
+    eng.export_binary(str(export_so))
+    loaded = fx.Engine.load(str(export_so), target="cpu:serial")
+    assert loaded.audit_compiler is True
+    assert loaded.audit_compiler_report()["clamp_meta"][0]["label"] == "c_safe"

@@ -28,6 +28,8 @@ def compute_cpr(eq_stmts: List[Any], layout: MemoryLayout, jacobian_bandwidth: i
                 c_ptrs.append(c_ptrs[-1] + count)
             c_dense = colorer.dense_rows
             
+        except (NameError, TypeError, AttributeError, ImportError):
+            raise
         except Exception as e:
             logging.warning(f"CPR Graph Coloring failed: {e}. Falling back to Dense Forward-Mode AD sweeps.")
             N = layout.n_states

@@ -26,6 +26,11 @@ def extract_state_names(node: Dict[str, Any]) -> List[str]:
             names.extend(extract_state_names(left))
             names.extend(extract_state_names(right))
 
+        case {"type": "Clamp", "child": dict() as child, "lower": dict() as lower, "upper": dict() as upper}:
+            names.extend(extract_state_names(child))
+            names.extend(extract_state_names(lower))
+            names.extend(extract_state_names(upper))
+
         case {"type": "DomainBoundary"}:
             pass
 

@@ -23,11 +23,11 @@ from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._3_backend.compute_ir import (
     Expr, Stmt, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary,
-    UnaryMinus, VarDecl, Loop, Assign, UnstructuredRead, Reduction
+    UnaryMinus, VarDecl, Loop, Assign, IfElse, Comment, UnstructuredRead, Reduction
 )
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
-    MathUnaryOp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
+    MathUnaryOp, MathClamp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
     MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride,
     MathInitialCondition, MathNeumannBC, MathSystem, extract_math_state_names
 )
@@ -105,8 +105,21 @@ class IndexManager:
             start_idx = self.topo.domains.get(axis, {}).get("start_idx", 0)
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
 
-            local_idx = BinaryOp("-", abs_idx, Literal(start_idx))
-            clamped_idx = FuncCall("CLAMP", [local_idx, Literal(res)])
+            if start_idx == 0:
+                local_idx = abs_idx
+            elif isinstance(abs_idx, BinaryOp) and abs_idx.op == "+" and isinstance(abs_idx.right, Literal) and abs_idx.right.val == start_idx:
+                local_idx = abs_idx.left
+            elif isinstance(abs_idx, Literal):
+                local_idx = Literal(int(abs_idx.val) - start_idx)
+            else:
+                local_idx = BinaryOp("-", abs_idx, Literal(start_idx))
+
+            if isinstance(local_idx, Literal):
+                clamped_idx = Literal(max(0, min(int(local_idx.val), res - 1)))
+            elif isinstance(local_idx, Var) and local_idx.name == f"idx_{axis}":
+                clamped_idx = local_idx
+            else:
+                clamped_idx = FuncCall("CLAMP", [local_idx, Literal(res)])
 
             stride = strides[axis]
             if stride > 1:
@@ -151,7 +164,7 @@ class MeshMetrics:
         """Returns the distance between cell centers across a given face."""
         off_w_dx = self.layout.mesh_offsets[base_axis]["w_dx_faces"]
         clamped_face = FuncCall("CLAMP", [face_idx, Literal(max(resolution - 1, 1))])
-        w_dx = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_face))
+        w_dx = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_face), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
         l_phys = self.domain_length(base_axis)
         return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", l_phys, w_dx)])
 
@@ -160,27 +173,27 @@ class MeshMetrics:
         off_w_dx = self.layout.mesh_offsets[base_axis]["w_dx_faces"]
         clamped_r = FuncCall("CLAMP", [node_idx, Literal(max(resolution - 1, 1))])
         clamped_l = FuncCall("CLAMP", [BinaryOp("-", node_idx, Literal(1)), Literal(max(resolution - 1, 1))])
-        w_dx_r = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_r))
-        w_dx_l = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_l))
+        w_dx_r = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_r), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
+        w_dx_l = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_l), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
         l_phys = self.domain_length(base_axis)
         return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", l_phys, BinaryOp("+", w_dx_r, w_dx_l))])
 
     def face_area(self, base_axis: str, face_idx: Expr) -> Expr:
         """Returns the interfacial face area A_face at face_idx."""
         off_area = self.layout.mesh_offsets[base_axis]["w_A_faces"]
-        return ArrayAccess("m", BinaryOp("+", Literal(off_area), face_idx))
+        return ArrayAccess("m", BinaryOp("+", Literal(off_area), face_idx), symbol=base_axis, field="w_A_faces", base_offset=off_area)
 
     def scaled_cell_volume(self, base_axis: str, node_idx: Expr) -> Expr:
         """Returns the control volume V_cell scaled by physical domain length."""
         off_vol = self.layout.mesh_offsets[base_axis]["w_V_nodes"]
-        vol_node = ArrayAccess("m", BinaryOp("+", Literal(off_vol), node_idx))
+        vol_node = ArrayAccess("m", BinaryOp("+", Literal(off_vol), node_idx), symbol=base_axis, field="w_V_nodes", base_offset=off_vol)
         l_phys = self.domain_length(base_axis)
         return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", vol_node, l_phys)])
 
     def cell_coordinate(self, base_axis: str, node_idx: Expr) -> Expr:
         """Returns the continuous physical coordinate at node_idx."""
         centers_offset = self.layout.mesh_offsets[base_axis]["w_centers"]
-        normalized_center = ArrayAccess("m", BinaryOp("+", Literal(centers_offset), node_idx))
+        normalized_center = ArrayAccess("m", BinaryOp("+", Literal(centers_offset), node_idx), symbol=base_axis, field="w_centers", base_offset=centers_offset)
         bounds = self.topo.domains.get(base_axis, {}).get("bounds", (0.0, 1.0))
         l_phys = self.domain_length(base_axis)
         return BinaryOp("+", Literal(bounds[0]), BinaryOp("*", l_phys, normalized_center))
@@ -205,7 +218,8 @@ class StateSampler:
         """Directly samples a cell-centered state from y[] or ydot[]."""
         flat_idx = idx_mgr.get_flat_index(node.domain_name)
         array_name = "ydot" if (node.is_ydot or force_ydot) else "y"
-        return ArrayAccess(array_name, BinaryOp("+", Literal(node.offset), flat_idx))
+        idx_expr = Literal(node.offset) if not node.domain_name else BinaryOp("+", Literal(node.offset), flat_idx)
+        return ArrayAccess(array_name, idx_expr, symbol=node.name, base_offset=node.offset)
 
     def sample_face(
         self,
@@ -226,13 +240,15 @@ class StateSampler:
         res = self.topo.domains.get(current_axis, {}).get("resolution", 1)
         start = self.topo.domains.get(current_axis, {}).get("start_idx", 0)
 
-        shift = 1 if face == "right" else -1
+        idx_local = idx_mgr.get_local(base_axis)
+        shifted_expr = BinaryOp("+", idx_local, Literal(1)) if face == "right" else BinaryOp("-", idx_local, Literal(1))
         idx_shifted = idx_mgr.clone()
-        idx_shifted.register(base_axis, BinaryOp("+", idx_mgr.get_local(base_axis), Literal(shift)))
+        idx_shifted.register(base_axis, shifted_expr)
 
         neighbor_idx = idx_shifted.get_flat_index(node.domain_name)
         array_name = "ydot" if (node.is_ydot or force_ydot) else "y"
-        neighbor_access = ArrayAccess(array_name, BinaryOp("+", Literal(node.offset), neighbor_idx))
+        n_idx_expr = Literal(node.offset) if not node.domain_name else BinaryOp("+", Literal(node.offset), neighbor_idx)
+        neighbor_access = ArrayAccess(array_name, n_idx_expr, symbol=node.name, base_offset=node.offset)
         interpolated = BinaryOp("*", Literal(0.5), BinaryOp("+", base_access, neighbor_access))
 
         # Check for explicit Dirichlet boundary overrides applied at this face
@@ -267,13 +283,8 @@ class PiecewiseFluxStitcher:
         self.topo = topo
 
     def harmonic_mean(self, flux_a: Expr, flux_b: Expr) -> Expr:
-        """Computes a smooth, stabilized harmonic mean of two interfacial fluxes."""
-        abs_a = FuncCall("std::abs", [flux_a])
-        abs_b = FuncCall("std::abs", [flux_b])
-        base_num = BinaryOp("+", BinaryOp("*", flux_a, abs_b), BinaryOp("*", flux_b, abs_a))
-        num = BinaryOp("+", base_num, BinaryOp("*", Literal("5e-31"), BinaryOp("+", flux_a, flux_b)))
-        den = BinaryOp("+", BinaryOp("+", abs_a, abs_b), Literal("1e-30"))
-        return BinaryOp("/", num, den)
+        """Emits a call to the stabilized harmonic mean helper for interfacial fluxes."""
+        return FuncCall("ion_flux_harmonic", [flux_a, flux_b])
 
     def stitch_interfaces(
         self,
@@ -357,9 +368,9 @@ class SpatialStencils:
 
         # Staggered Face Gradient
         if face in ("left", "right"):
-            shift = 1 if face == "right" else -1
+            shifted_expr = BinaryOp("+", idx_expr, Literal(1)) if face == "right" else BinaryOp("-", idx_expr, Literal(1))
             idx_shifted = idx_mgr.clone()
-            idx_shifted.register(base_axis, BinaryOp("+", idx_expr, Literal(shift)))
+            idx_shifted.register(base_axis, shifted_expr)
 
             c_shifted = lower_expr_fn(child, idx_shifted, axis_name, face=None, current_eq=current_eq)
             c_current = lower_expr_fn(child, idx_mgr, axis_name, face=None, current_eq=current_eq)
@@ -515,7 +526,7 @@ class AleKinematics:
 
                 state_offset = self.layout.state_offsets[state_name][0]
                 flat_idx = idx_mgr.get_flat_index(domain_name)
-                y_access = ArrayAccess("y", BinaryOp("+", Literal(state_offset), flat_idx))
+                y_access = ArrayAccess("y", BinaryOp("+", Literal(state_offset), flat_idx), symbol=state_name, base_offset=state_offset)
 
                 safe_length = FuncCall("std::max", [Literal(1e-12), length_expr])
                 divergence_v = BinaryOp("*", Literal(dim_multiplier), BinaryOp("/", length_velocity_expr, safe_length))
@@ -570,12 +581,13 @@ class IntegralQuadrature:
         if coord_sys == "unstructured":
             if resolved_axis in self.layout.mesh_offsets and "volumes" in self.layout.mesh_offsets[resolved_axis]:
                 vol_offset = self.layout.mesh_offsets[resolved_axis]["volumes"]
-                return ArrayAccess("m", BinaryOp("+", Literal(vol_offset), Var(iter_var)))
+                return ArrayAccess("m", BinaryOp("+", Literal(vol_offset), Var(iter_var)), symbol=resolved_axis, field="volumes", base_offset=vol_offset)
             return Literal(1.0)
 
         dim_exponent = 3.0 if coord_sys == "spherical" else (2.0 if coord_sys == "cylindrical" else 1.0)
         vol_offset = self.layout.mesh_offsets[resolved_axis]["w_V_nodes"]
-        volume_weight = ArrayAccess("m", BinaryOp("+", Literal(vol_offset + start_idx), Var(iter_var)))
+        idx_sum = Var(iter_var) if start_idx == 0 else BinaryOp("+", Literal(start_idx), Var(iter_var))
+        volume_weight = ArrayAccess("m", BinaryOp("+", Literal(vol_offset), idx_sum), symbol=resolved_axis, field="w_V_nodes", base_offset=vol_offset)
 
         l_phys = self.metrics.domain_length(resolved_axis)
         scale_factor = l_phys if dim_exponent == 1.0 else FuncCall("std::pow", [l_phys, Literal(dim_exponent)])
@@ -617,6 +629,9 @@ class FVMDiscretizer:
         self.semantic_ctx = semantic_ctx
         self.state_map = state_map or {}
         self.target = target
+        self.audit_compiler = False
+        self._clamp_watchpoints: Dict[tuple, Dict[str, Any]] = {}
+        self._cse_counter = 0
 
         self.neumann_bcs = math_sys.neumann_bcs if math_sys else {}
         self.dirichlet_bcs = math_sys.dirichlet_bcs if math_sys else {}
@@ -642,13 +657,16 @@ class FVMDiscretizer:
     # Top-Level Entry Points
     # -------------------------------------------------------------------------
 
-    def discretize_system(self, math_sys: MathSystem) -> Tuple[List[Stmt], List[Stmt], List[Stmt]]:
+    def discretize_system(self, math_sys: MathSystem, audit_compiler: bool = False) -> Tuple[List[Stmt], List[Stmt], List[Stmt]]:
         """
         Translates a complete MathSystem into C++ Compute IR statement blocks.
 
         Returns:
             Tuple of (l_phys_stmts, equation_stmts, observable_stmts).
         """
+        self.audit_compiler = audit_compiler
+        self._clamp_watchpoints = {}
+        self._cse_counter = 0
         self._bind_math_system(math_sys)
         l_phys_stmts = self._generate_physical_length_constants(math_sys)
 
@@ -659,11 +677,73 @@ class FVMDiscretizer:
         for override in math_sys.dirichlet_overrides:
             eq_stmts.extend(self.discretize_dirichlet_override(override))
 
+        eq_stmts = self._deduplicate_top_level_reductions(eq_stmts)
+
         obs_stmts: List[Stmt] = []
         for obs in math_sys.observables:
             obs_stmts.extend(self.discretize_observable(obs))
 
+        obs_stmts = self._deduplicate_top_level_reductions(obs_stmts)
+
         return l_phys_stmts, eq_stmts, obs_stmts
+
+    def discretize_audit_observables(self) -> Tuple[List[Stmt], List[Dict[str, Any]]]:
+        """Emits scalar lower/upper clamp saturation fraction observables into audit_obs[]."""
+        if not self.audit_compiler or not self._clamp_watchpoints:
+            return [], []
+
+        stmts: List[Stmt] = []
+        meta: List[Dict[str, Any]] = []
+        for k, (_, wp) in enumerate(self._clamp_watchpoints.items()):
+            target_domain = wp["target_domain"]
+            bounds_override = wp["bounds_override"]
+            axes = self.topo.get_axes(target_domain)
+            base_axis = resolve_axis(self.topo, axes[-1]) if axes else None
+            idx_mgr = self._build_index_manager(axes, bounds_override)
+
+            raw_ir = self.lower_expr(wp["child"], idx_mgr, current_axis=base_axis)
+            lo_ir = self.lower_expr(wp["lower"], idx_mgr, current_axis=base_axis)
+            hi_ir = self.lower_expr(wp["upper"], idx_mgr, current_axis=base_axis)
+
+            raw_var = f"_cl_raw_{k}"
+            lo_var = f"_cl_lo_{k}"
+            hi_var = f"_cl_hi_{k}"
+            cnt_lo = f"_cl_hits_lo_{k}"
+            cnt_hi = f"_cl_hits_hi_{k}"
+
+            total_nodes = 1
+            for ax in axes:
+                b_ax = self.topo.get_base_axis(ax)
+                res = self.topo.domains.get(ax, {}).get("resolution", 1)
+                _, loop_res = bounds_override.get(b_ax, (0, res))
+                total_nodes *= max(loop_res, 1)
+
+            stmts.append(Comment(f"Clamp Watchpoint [{k}]: {wp['label']} ({wp['state_name']})", is_section=True))
+            stmts.append(VarDecl("int", cnt_lo, Literal(0)))
+            stmts.append(VarDecl("int", cnt_hi, Literal(0)))
+
+            body: List[Stmt] = [
+                VarDecl("const double", raw_var, raw_ir),
+                VarDecl("const double", lo_var, lo_ir),
+                VarDecl("const double", hi_var, hi_ir),
+                Assign(Var(cnt_lo), BinaryOp("+", Var(cnt_lo), Ternary(BinaryOp("<", Var(raw_var), Var(lo_var)), Literal(1), Literal(0)))),
+                Assign(Var(cnt_hi), BinaryOp("+", Var(cnt_hi), Ternary(BinaryOp(">", Var(raw_var), Var(hi_var)), Literal(1), Literal(0)))),
+            ]
+            stmts.extend(self._wrap_in_loop_nest(body, axes, bounds_override))
+            stmts.append(Assign(ArrayAccess("audit_obs", Literal(2 * k)), BinaryOp("/", Var(f"(double){cnt_lo}"), Literal(float(total_nodes)))))
+            stmts.append(Assign(ArrayAccess("audit_obs", Literal(2 * k + 1)), BinaryOp("/", Var(f"(double){cnt_hi}"), Literal(float(total_nodes)))))
+
+            meta.append({
+                "index": k,
+                "lower_slot": 2 * k,
+                "upper_slot": 2 * k + 1,
+                "label": wp["label"],
+                "state": wp["state_name"],
+                "domain": wp["region_name"] or target_domain or "0D",
+                "total_nodes": total_nodes,
+            })
+
+        return stmts, meta
 
     def discretize_initial_conditions(self, math_sys: MathSystem) -> Tuple[List[Stmt], List[Stmt]]:
         """Lowers initial conditions into 1D Compute IR assignments to y0[]."""
@@ -681,10 +761,12 @@ class FVMDiscretizer:
 
         offset = self.layout.state_offsets[ic.state_name][0]
         flat_idx = idx_mgr.get_flat_index(ic.target_domain)
-        y0_access = ArrayAccess("y0", BinaryOp("+", Literal(offset), flat_idx))
+        idx_expr = Literal(offset) if not ic.target_domain else BinaryOp("+", Literal(offset), flat_idx)
+        y0_access = ArrayAccess("y0", idx_expr, symbol=ic.state_name, base_offset=offset)
         rhs_expr = self.lower_expr(ic.expr, idx_mgr, current_axis=base_axis)
 
-        return self._wrap_in_loop_nest([Assign(y0_access, rhs_expr)], axes, {})
+        body = self._hoist_cse_and_reductions(Assign(y0_access, rhs_expr))
+        return [Comment(f"IC: {ic.state_name}")] + self._wrap_in_loop_nest(body, axes, {})
 
     def discretize_equation(self, eq: MathEquation) -> List[Stmt]:
         """Lowers an implicit MathEquation into a nested coordinate loop assigning to res[]."""
@@ -696,7 +778,15 @@ class FVMDiscretizer:
 
         offset = self.layout.state_offsets[eq.state_name][0]
         flat_idx = idx_mgr.get_flat_index(eq.target_domain)
-        res_access = ArrayAccess("res", BinaryOp("+", Literal(offset), flat_idx))
+        idx_expr = Literal(offset) if not eq.target_domain else BinaryOp("+", Literal(offset), flat_idx)
+        res_access = ArrayAccess("res", idx_expr, symbol=eq.state_name, base_offset=offset)
+
+        self._active_eq_ctx = {
+            "state_name": eq.state_name,
+            "target_domain": eq.target_domain,
+            "bounds_override": bounds_override,
+            "region_name": eq.current_region.domain_name if (eq.is_piecewise and eq.current_region) else None,
+        }
 
         lhs_expr = self.lower_expr(eq.lhs, idx_mgr, current_axis=base_axis, current_eq=eq)
         rhs_expr = self.lower_expr(eq.rhs, idx_mgr, current_axis=base_axis, current_eq=eq)
@@ -707,9 +797,14 @@ class FVMDiscretizer:
         ):
             rhs_expr = BinaryOp("+", rhs_expr, ale_term)
 
+        self._active_eq_ctx = None
+
         # Implicit residual convention: res = lhs - rhs
         assignment = Assign(res_access, BinaryOp("-", lhs_expr, rhs_expr))
-        return self._wrap_in_loop_nest([assignment], axes, bounds_override)
+        body = self._hoist_cse_and_reductions(assignment)
+        reg_tag = f", region={eq.current_region.domain_name}" if (eq.is_piecewise and eq.current_region) else ""
+        header = Comment(f"Eq: {eq.state_name} (domain={eq.target_domain or '0D'}{reg_tag})", is_section=True)
+        return [header] + self._wrap_in_loop_nest(body, axes, bounds_override)
 
     def discretize_dirichlet_override(self, override: MathDirichletOverride) -> List[Stmt]:
         """Directly enforces Dirichlet state constraints: res[boundary_idx] = y - y_boundary."""
@@ -735,11 +830,15 @@ class FVMDiscretizer:
         offset = self.layout.state_offsets[override.state_name][0]
         flat_idx = idx_mgr.get_flat_index(target_domain_name)
 
-        res_access = ArrayAccess("res", BinaryOp("+", Literal(offset), flat_idx))
-        y_access = ArrayAccess("y", BinaryOp("+", Literal(offset), flat_idx))
+        idx_expr = Literal(offset) if not target_domain_name else BinaryOp("+", Literal(offset), flat_idx)
+        res_access = ArrayAccess("res", idx_expr, symbol=override.state_name, base_offset=offset)
+        y_access = ArrayAccess("y", idx_expr, symbol=override.state_name, base_offset=offset)
         rhs_expr = self.lower_expr(override.value_expr, idx_mgr, current_axis=base_axis)
 
-        return [Assign(res_access, BinaryOp("-", y_access, rhs_expr))]
+        return [
+            Comment(f"Dirichlet BC: {override.state_name}.{override.side}"),
+            Assign(res_access, BinaryOp("-", y_access, rhs_expr)),
+        ]
 
     def discretize_observable(self, obs: MathObservable) -> List[Stmt]:
         """Lowers an observable diagnostic metric into an assignment to obs[]."""
@@ -751,12 +850,14 @@ class FVMDiscretizer:
 
         offset = self.layout.obs_offsets[obs.name][0]
         flat_idx = idx_mgr.get_flat_index(obs.target_domain)
-        obs_access = ArrayAccess("obs", BinaryOp("+", Literal(offset), flat_idx))
+        idx_expr = Literal(offset) if not obs.target_domain else BinaryOp("+", Literal(offset), flat_idx)
+        obs_access = ArrayAccess("obs", idx_expr, symbol=obs.name, base_offset=offset)
 
         rhs_expr = self.lower_expr(obs.expr, idx_mgr, current_axis=base_axis)
         assignment = Assign(obs_access, rhs_expr)
+        body = self._hoist_cse_and_reductions(assignment)
 
-        return self._wrap_in_loop_nest([assignment], axes, bounds_override)
+        return [Comment(f"Obs: {obs.name}", is_section=True)] + self._wrap_in_loop_nest(body, axes, bounds_override)
 
     # -------------------------------------------------------------------------
     # Expression Translation Pipeline
@@ -801,8 +902,8 @@ class FVMDiscretizer:
             case MathScalar(value=value):
                 return Literal(value)
 
-            case MathParameter(offset=offset):
-                return ArrayAccess("p", Literal(offset))
+            case MathParameter(name=p_name, offset=offset):
+                return ArrayAccess("p", Literal(offset), symbol=p_name, base_offset=offset)
 
             case MathState():
                 if face and current_axis:
@@ -840,6 +941,27 @@ class FVMDiscretizer:
                 if not base_axis or self.topo.domains.get(base_axis, {}).get("coord_sys") == "unstructured":
                     return Literal(0.0)
                 return self.metrics.cell_coordinate(base_axis, idx_mgr.get_local(base_axis))
+
+            case MathClamp(child=child, lower=lower, upper=upper, label=lbl):
+                if self.audit_compiler and getattr(self, "_active_eq_ctx", None):
+                    ctx = self._active_eq_ctx
+                    reg_key = ctx["region_name"] or ctx["target_domain"] or "0D"
+                    wp_key = (lbl or f"clamp_{len(self._clamp_watchpoints)}", reg_key, id(child))
+                    if wp_key not in self._clamp_watchpoints:
+                        self._clamp_watchpoints[wp_key] = {
+                            "label": lbl or f"clamp_{len(self._clamp_watchpoints)}",
+                            "state_name": ctx["state_name"],
+                            "target_domain": ctx["target_domain"],
+                            "bounds_override": ctx["bounds_override"],
+                            "region_name": ctx["region_name"],
+                            "child": child,
+                            "lower": lower,
+                            "upper": upper,
+                        }
+                c_ir = self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
+                lo_ir = self.lower_expr(lower, idx_mgr, current_axis, face, current_eq)
+                hi_ir = self.lower_expr(upper, idx_mgr, current_axis, face, current_eq)
+                return FuncCall("std::min", [FuncCall("std::max", [c_ir, lo_ir]), hi_ir])
 
             case MathUnaryOp(op=op, child=child):
                 child_ir = self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
@@ -932,7 +1054,8 @@ class FVMDiscretizer:
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
             loop_start, _ = bounds_override.get(base_axis, (start_idx, res))
             loop_var = f"idx_{axis}"
-            idx_mgr.register(base_axis, BinaryOp("+", Var(loop_var), Literal(loop_start)))
+            idx_expr = Var(loop_var) if loop_start == 0 else BinaryOp("+", Var(loop_var), Literal(loop_start))
+            idx_mgr.register(base_axis, idx_expr)
         return idx_mgr
 
     def _wrap_in_loop_nest(
@@ -951,3 +1074,259 @@ class FVMDiscretizer:
             pragma = "#pragma omp parallel for" if i == 0 and loop_res > 50 and "omp" in self.target else ""
             current_body = [Loop(loop_var, Literal(0), Literal(loop_res), current_body, pragma)]
         return current_body
+
+    def _hoist_cse_and_reductions(self, assign: Assign) -> List[Stmt]:
+        """
+        Hoists Reduction/UnstructuredRead loops and repeated unconditional Compute IR
+        subexpressions within a loop body into sequential VarDecl temporaries.
+        Stops at Ternary branches to preserve conditional short-circuiting.
+        """
+        hoisted: List[Stmt] = []
+
+        def expr_weight(node: Expr) -> int:
+            match node:
+                case Literal() | Var():
+                    return 1
+                case ArrayAccess(index=idx):
+                    return 1 + expr_weight(idx)
+                case UnaryMinus(expr=e):
+                    return 1 + expr_weight(e)
+                case BinaryOp(left=l, right=r):
+                    return 1 + expr_weight(l) + expr_weight(r)
+                case FuncCall(args=args):
+                    return 1 + sum(expr_weight(a) for a in args)
+                case Ternary(cond=c, true_val=tv, false_val=fv):
+                    return 1 + expr_weight(c) + expr_weight(tv) + expr_weight(fv)
+                case _:
+                    return 10
+
+        def hoist_loops_and_branches(node: Expr) -> Expr:
+            match node:
+                case Reduction(loops=loops, child_expr=child_expr, vol_exprs=vol_exprs):
+                    pre_stmts, clean_child = self._cse_expr(child_expr)
+                    red = Reduction(loops, clean_child, vol_exprs, pre_stmts=pre_stmts)
+                    name = f"_red_{self._cse_counter}"
+                    self._cse_counter += 1
+                    hoisted.append(VarDecl("double", name, red))
+                    return Var(name)
+                case UnstructuredRead():
+                    name = f"_red_{self._cse_counter}"
+                    self._cse_counter += 1
+                    hoisted.append(VarDecl("const double", name, node))
+                    return Var(name)
+                case Ternary(cond=c, true_val=tv, false_val=fv):
+                    if max(expr_weight(tv), expr_weight(fv)) > 25:
+                        br_name = f"_br_{self._cse_counter}"
+                        self._cse_counter += 1
+                        hoisted.append(VarDecl("double", br_name, Literal(0.0)))
+                        tb_stmts = self._hoist_cse_and_reductions(Assign(Var(br_name), tv))
+                        eb_stmts = self._hoist_cse_and_reductions(Assign(Var(br_name), fv))
+                        hoisted.append(IfElse(hoist_loops_and_branches(c), tb_stmts, eb_stmts))
+                        return Var(br_name)
+                    return Ternary(hoist_loops_and_branches(c), tv, fv)
+                case BinaryOp(op=op, left=l, right=r):
+                    return BinaryOp(op, hoist_loops_and_branches(l), hoist_loops_and_branches(r))
+                case UnaryMinus(expr=e):
+                    return UnaryMinus(hoist_loops_and_branches(e))
+                case FuncCall(func=f, args=args):
+                    return FuncCall(f, [hoist_loops_and_branches(a) for a in args])
+                case _:
+                    return node
+
+        rhs_no_lambdas = hoist_loops_and_branches(assign.rhs)
+        cse_stmts, final_rhs = self._cse_expr(rhs_no_lambdas)
+        return hoisted + cse_stmts + [Assign(assign.lhs, final_rhs)]
+
+    def _cse_expr(self, root: Expr) -> Tuple[List[Stmt], Expr]:
+        """Deduplicates repeated unconditional subexpressions within an expression."""
+        def expr_key(node: Expr) -> tuple:
+            match node:
+                case Literal(val=v):
+                    return ("L", v)
+                case Var(name=n):
+                    return ("V", n)
+                case ArrayAccess(array_name=arr, index=idx):
+                    return ("A", arr, expr_key(idx))
+                case BinaryOp(op=op, left=l, right=r):
+                    return ("B", op, expr_key(l), expr_key(r))
+                case UnaryMinus(expr=e):
+                    return ("N", expr_key(e))
+                case FuncCall(func=f, args=args):
+                    return ("F", f, tuple(expr_key(a) for a in args))
+                case Ternary(cond=c, true_val=tv, false_val=fv):
+                    return ("T", expr_key(c), expr_key(tv), expr_key(fv))
+                case _:
+                    return ("O", id(node))
+
+        def node_size(node: Expr) -> int:
+            match node:
+                case Literal() | Var():
+                    return 1
+                case ArrayAccess(index=idx):
+                    return 1 + node_size(idx)
+                case UnaryMinus(expr=e):
+                    return 1 + node_size(e)
+                case BinaryOp(left=l, right=r):
+                    return 1 + node_size(l) + node_size(r)
+                case FuncCall(args=args):
+                    return 1 + sum(node_size(a) for a in args)
+                case _:
+                    return 1
+
+        counts: Dict[tuple, int] = {}
+        samples: Dict[tuple, Expr] = {}
+
+        def count_unconditional(node: Expr) -> None:
+            if isinstance(node, (BinaryOp, FuncCall)) and node_size(node) >= 5:
+                k = expr_key(node)
+                counts[k] = counts.get(k, 0) + 1
+                if k not in samples:
+                    samples[k] = node
+            match node:
+                case BinaryOp(left=l, right=r):
+                    count_unconditional(l)
+                    count_unconditional(r)
+                case UnaryMinus(expr=e):
+                    count_unconditional(e)
+                case FuncCall(args=args):
+                    for a in args:
+                        count_unconditional(a)
+                case Ternary(cond=c):
+                    count_unconditional(c)
+
+        count_unconditional(root)
+
+        ancestor_max: Dict[tuple, int] = {}
+
+        def propagate_dominance(node: Expr, max_hoisted_above: int) -> None:
+            k = expr_key(node) if isinstance(node, (BinaryOp, FuncCall)) and node_size(node) >= 5 else None
+            if k is not None:
+                ancestor_max[k] = max(ancestor_max.get(k, 0), max_hoisted_above)
+                cnt = counts.get(k, 0)
+                if cnt >= 2 and cnt > max_hoisted_above:
+                    max_hoisted_above = cnt
+            match node:
+                case BinaryOp(left=l, right=r):
+                    propagate_dominance(l, max_hoisted_above)
+                    propagate_dominance(r, max_hoisted_above)
+                case UnaryMinus(expr=e):
+                    propagate_dominance(e, max_hoisted_above)
+                case FuncCall(args=args):
+                    for a in args:
+                        propagate_dominance(a, max_hoisted_above)
+                case Ternary(cond=c):
+                    propagate_dominance(c, max_hoisted_above)
+
+        propagate_dominance(root, 0)
+
+        cse_candidates = {k for k, c in counts.items() if c >= 2 and c > ancestor_max.get(k, 0)}
+        if not cse_candidates:
+            return [], root
+
+        hoisted: List[Stmt] = []
+        cse_aliases: Dict[tuple, Var] = {}
+
+        def rewrite(node: Expr, in_ternary_branch: bool = False) -> Expr:
+            if not in_ternary_branch:
+                k = expr_key(node)
+                if k in cse_aliases:
+                    return cse_aliases[k]
+
+            new_node = node
+            match node:
+                case BinaryOp(op=op, left=l, right=r):
+                    new_node = BinaryOp(op, rewrite(l, in_ternary_branch), rewrite(r, in_ternary_branch))
+                case UnaryMinus(expr=e):
+                    new_node = UnaryMinus(rewrite(e, in_ternary_branch))
+                case FuncCall(func=f, args=args):
+                    new_node = FuncCall(f, [rewrite(a, in_ternary_branch) for a in args])
+                case Ternary(cond=c, true_val=tv, false_val=fv):
+                    new_node = Ternary(
+                        rewrite(c, in_ternary_branch),
+                        rewrite(tv, True),
+                        rewrite(fv, True),
+                    )
+
+            if not in_ternary_branch:
+                k = expr_key(node)
+                if k in cse_candidates and k not in cse_aliases:
+                    vname = f"_cse_{self._cse_counter}"
+                    self._cse_counter += 1
+                    hoisted.append(VarDecl("const double", vname, new_node))
+                    vref = Var(vname)
+                    cse_aliases[k] = vref
+                    return vref
+            return new_node
+
+        final_rhs = rewrite(root, False)
+        return hoisted, final_rhs
+
+    def _deduplicate_top_level_reductions(self, stmts: List[Stmt]) -> List[Stmt]:
+        """Reuses identical top-level (0D) Reduction loops across equations or observables."""
+        def norm_key(node: Expr, loop_map: Dict[str, str]) -> tuple:
+            match node:
+                case Literal(val=v):
+                    return ("L", v)
+                case Var(name=n):
+                    return ("V", loop_map.get(n, n))
+                case ArrayAccess(array_name=arr, index=idx):
+                    return ("A", arr, norm_key(idx, loop_map))
+                case BinaryOp(op=op, left=l, right=r):
+                    return ("B", op, norm_key(l, loop_map), norm_key(r, loop_map))
+                case UnaryMinus(expr=e):
+                    return ("N", norm_key(e, loop_map))
+                case FuncCall(func=f, args=args):
+                    return ("F", f, tuple(norm_key(a, loop_map) for a in args))
+                case Ternary(cond=c, true_val=tv, false_val=fv):
+                    return ("T", norm_key(c, loop_map), norm_key(tv, loop_map), norm_key(fv, loop_map))
+                case _:
+                    return ("O", id(node))
+
+        def reduction_key(red: Reduction) -> tuple:
+            lmap = {v: f"__lv_{i}" for i, (v, _) in enumerate(red.loops)}
+            sub_map = dict(lmap)
+            for ps in red.pre_stmts:
+                if isinstance(ps, VarDecl):
+                    sub_map[ps.name] = f"__ps_{norm_key(ps.init, sub_map)}"
+            loops_k = tuple((norm_key(end, lmap)) for _, end in red.loops)
+            vols_k = tuple(norm_key(v, lmap) for v in red.vol_exprs)
+            return (loops_k, vols_k, norm_key(red.child_expr, sub_map))
+
+        def subst_vars(expr: Expr, aliases: Dict[str, str]) -> Expr:
+            if not aliases:
+                return expr
+            match expr:
+                case Var(name=n) if n in aliases:
+                    return Var(aliases[n])
+                case ArrayAccess(array_name=a, index=idx, symbol=s, field=f, base_offset=bo):
+                    return ArrayAccess(a, subst_vars(idx, aliases), symbol=s, field=f, base_offset=bo)
+                case BinaryOp(op=op, left=l, right=r):
+                    return BinaryOp(op, subst_vars(l, aliases), subst_vars(r, aliases))
+                case UnaryMinus(expr=e):
+                    return UnaryMinus(subst_vars(e, aliases))
+                case FuncCall(func=f, args=args):
+                    return FuncCall(f, [subst_vars(a, aliases) for a in args])
+                case Ternary(cond=c, true_val=tv, false_val=fv):
+                    return Ternary(subst_vars(c, aliases), subst_vars(tv, aliases), subst_vars(fv, aliases))
+                case _:
+                    return expr
+
+        seen_reds: Dict[tuple, str] = {}
+        var_aliases: Dict[str, str] = {}
+        out: List[Stmt] = []
+        for stmt in stmts:
+            match stmt:
+                case VarDecl(var_type=vt, name=name, init=Reduction() as red):
+                    rk = reduction_key(red)
+                    if rk in seen_reds:
+                        var_aliases[name] = seen_reds[rk]
+                    else:
+                        seen_reds[rk] = name
+                        out.append(stmt)
+                case VarDecl(var_type=vt, name=name, init=init):
+                    out.append(VarDecl(vt, name, subst_vars(init, var_aliases)))
+                case Assign(lhs=lhs, rhs=rhs):
+                    out.append(Assign(lhs, subst_vars(rhs, var_aliases)))
+                case _:
+                    out.append(stmt)
+        return out

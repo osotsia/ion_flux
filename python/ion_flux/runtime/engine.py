@@ -24,14 +24,17 @@ class Engine:
     """
     def __init__(self, model: Optional[PDE] = None, target: str = "cpu:serial", solver_backend: str = "native", 
                  cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, 
-                 **kwargs):
+                 audit_compiler: bool = False, **kwargs):
         self.model = model
         self.target = target
         self.solver_backend = solver_backend.lower()
         self.mock_execution = mock_execution
+        self.audit_compiler = audit_compiler
         
         if model:
-            self.manifest = build_manifest(model, target, cache, jacobian_bandwidth, mock_execution)
+            self.manifest = build_manifest(
+                model, target, cache, jacobian_bandwidth, mock_execution, audit_compiler=audit_compiler
+            )
         else:
             self.manifest = None
             
@@ -63,6 +66,7 @@ class Engine:
         engine.mock_execution = False
         
         engine.manifest = ExecutableManifest.load(binary_path)
+        engine.audit_compiler = bool((engine.manifest.static_audit or {}).get("audit_compiler", False))
         engine.parameters = {name: _ParamHandle(name, val) for name, val in engine.manifest.default_parameters.items()}
         return engine
 
@@ -74,6 +78,12 @@ class Engine:
     @property
     def telemetry(self) -> Optional[TelemetryReport]: 
         return TelemetryReport(self.manifest) if self.manifest else None
+
+    def audit_compiler_report(self) -> Dict[str, Any]:
+        """Returns compile-time static audit diagnostics when Engine(..., audit_compiler=True)."""
+        if not self.manifest or not self.manifest.static_audit:
+            raise RuntimeError("Static compiler audit unavailable. Instantiate Engine with `audit_compiler=True`.")
+        return dict(self.manifest.static_audit)
 
     def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None, mode: str = "scientific",
                       rel_tol: Optional[float] = None, abs_tol: Optional[float] = None,

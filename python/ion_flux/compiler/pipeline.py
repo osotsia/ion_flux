@@ -14,10 +14,10 @@ from typing import Dict, Any, List, Optional
 from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._2_middle_end.verification import verify_manifold
-from ion_flux.compiler._3_backend.normalization import NormalizationPass
+from ion_flux.compiler._3_backend.normalization import NormalizationPass, verify_no_unreduced_broadcasts
 from ion_flux.compiler._3_backend.cpr_orchestrator import compute_cpr
-from ion_flux.compiler._3_backend.math_ir import MathSystem, extract_math_state_names, has_time_derivative
-from ion_flux.compiler._4_codegen.builder import generate_cpp
+from ion_flux.compiler._3_backend.math_ir import MathSystem, MathDiv, MathGrad, MathUnaryOp, MathBinaryOp, MathClamp, MathBoundaryRef, MathIntegral, extract_math_state_names, has_time_derivative
+from ion_flux.compiler._4_codegen.builder import generate_cpp_with_audit
 
 
 class Compiler:
@@ -30,7 +30,8 @@ class Compiler:
         states: List[Any],
         observables: List[Any],
         target: str,
-        jacobian_bandwidth: Optional[int] = None
+        jacobian_bandwidth: Optional[int] = None,
+        audit_compiler: bool = False,
     ) -> Dict[str, Any]:
         # --- Stage 2: Topological Validation & Semantic Resolution ---
         topo = TopologyAnalyzer(ast_payload.get("domains", {}))
@@ -45,25 +46,34 @@ class Compiler:
         math_sys: MathSystem = norm_pass.lower_to_math_ir()
 
         Compiler._verify_system_rank(math_sys, layout)
+        verify_no_unreduced_broadcasts(math_sys, topo)
 
         if jacobian_bandwidth is None:
             jacobian_bandwidth = Compiler._compute_symbolic_bandwidth(layout, states, math_sys)
 
         # --- Stage 4: Discretization & Codegen (Math IR -> Compute IR -> C++) ---
-        cpp_source, eq_stmts = generate_cpp(
+        bundle = generate_cpp_with_audit(
             math_sys=math_sys,
             layout=layout,
             topo=topo,
             semantic_ctx=semantic_ctx,
             state_map=state_map,
-            target=target
+            target=target,
+            audit_compiler=audit_compiler,
         )
+        cpp_source = bundle["cpp_source"]
+        eq_stmts = bundle["eq_stmts"]
 
         # --- Stage 5: CPR Sparsity Analysis on Compute IR ---
         cpr_cache = compute_cpr(eq_stmts, layout, jacobian_bandwidth)
 
         state_domain_map = {s.name: getattr(s.domain, "name", "") for s in states}
         id_arr = Compiler._compute_differential_mask(math_sys, layout, topo, state_domain_map)
+
+        boundary_ledger = (
+            Compiler._build_boundary_ledger(math_sys, topo, state_domain_map)
+            if audit_compiler else []
+        )
 
         return {
             "cpp_source": cpp_source,
@@ -72,8 +82,144 @@ class Compiler:
             "ast_payload": ast_payload,
             "topo": topo,
             "jacobian_bandwidth": jacobian_bandwidth,
-            "math_sys": math_sys
+            "math_sys": math_sys,
+            "math_pretty": math_sys.pretty() if audit_compiler else "",
+            "compute_pretty": bundle["compute_pretty"],
+            "clamp_meta": bundle["clamp_meta"],
+            "boundary_ledger": boundary_ledger,
         }
+
+    @staticmethod
+    def _build_boundary_ledger(
+        math_sys: MathSystem,
+        topo: TopologyAnalyzer,
+        state_domain_map: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        """Classifies left, right, and interface boundary conditions for every spatial state."""
+        def collect_bc_ids(expr: Any, out: set) -> None:
+            if getattr(expr, "bc_id", None):
+                out.add(expr.bc_id)
+            match expr:
+                case MathUnaryOp(child=c) | MathGrad(child=c) | MathDiv(child=c) | MathBoundaryRef(child=c) | MathIntegral(child=c):
+                    collect_bc_ids(c, out)
+                case MathBinaryOp(left=l, right=r):
+                    collect_bc_ids(l, out)
+                    collect_bc_ids(r, out)
+                case MathClamp(child=c, lower=lo, upper=hi):
+                    collect_bc_ids(c, out)
+                    collect_bc_ids(lo, out)
+                    collect_bc_ids(hi, out)
+
+        def has_spatial_op(expr: Any) -> bool:
+            match expr:
+                case MathGrad() | MathDiv():
+                    return True
+                case MathUnaryOp(child=c) | MathIntegral(child=c) | MathBoundaryRef(child=c):
+                    return has_spatial_op(c)
+                case MathBinaryOp(left=l, right=r):
+                    return has_spatial_op(l) or has_spatial_op(r)
+                case MathClamp(child=c, lower=lo, upper=hi):
+                    return has_spatial_op(c) or has_spatial_op(lo) or has_spatial_op(hi)
+                case _:
+                    return False
+
+        by_state: Dict[str, List[Any]] = {}
+        for eq in math_sys.equations:
+            by_state.setdefault(eq.state_name, []).append(eq)
+
+        ledger: List[Dict[str, Any]] = []
+        for s_name, eqs in by_state.items():
+            dom = state_domain_map.get(s_name, "")
+            if not dom:
+                continue
+            axes = topo.get_axes(dom)
+            last_ax = axes[-1] if axes else ""
+            coord_sys = topo.domains.get(topo.get_base_axis(last_ax), {}).get("coord_sys", "cartesian") if last_ax else "cartesian"
+            is_spatial = any(has_spatial_op(e.lhs) or has_spatial_op(e.rhs) for e in eqs)
+            is_dae = not any(has_time_derivative(e.lhs) or has_time_derivative(e.rhs) for e in eqs)
+            dirichlet = math_sys.dirichlet_bcs.get(s_name, {})
+
+            if coord_sys == "unstructured":
+                bc_ids: set = set()
+                for e in eqs:
+                    collect_bc_ids(e.lhs, bc_ids)
+                    collect_bc_ids(e.rhs, bc_ids)
+                surfaces: Dict[str, str] = {}
+                for bid in bc_ids:
+                    for side in math_sys.neumann_bcs.get(bid, {}):
+                        surfaces[side] = "Neumann"
+                ledger.append({
+                    "state": s_name,
+                    "domain": dom,
+                    "coord_sys": coord_sys,
+                    "is_dae": is_dae,
+                    "is_spatial": is_spatial,
+                    "faces": surfaces,
+                    "implicit_zero_flux_faces": [],
+                    "missing_gauge_anchor": is_spatial and is_dae and not dirichlet,
+                })
+                continue
+
+            faces: Dict[str, str] = {}
+            implicit_faces: List[str] = []
+
+            if eqs[0].is_piecewise and eqs[0].regions:
+                regs = sorted(eqs[0].regions, key=lambda r: r.start_idx)
+                for idx_r, reg in enumerate(regs):
+                    reg_bc_ids: set = set()
+                    collect_bc_ids(reg.expr, reg_bc_ids)
+                    if reg.div_flux:
+                        collect_bc_ids(reg.div_flux, reg_bc_ids)
+
+                    if idx_r == 0:
+                        if "left" in dirichlet:
+                            faces[f"{reg.domain_name}.left"] = "Dirichlet"
+                        elif any("left" in math_sys.neumann_bcs.get(b, {}) for b in reg_bc_ids):
+                            faces[f"{reg.domain_name}.left"] = "Neumann"
+                        else:
+                            faces[f"{reg.domain_name}.left"] = "ImplicitZeroFlux"
+                            if is_spatial:
+                                implicit_faces.append(f"{reg.domain_name}.left")
+                    if idx_r < len(regs) - 1:
+                        nxt = regs[idx_r + 1]
+                        iface = f"{reg.domain_name}|{nxt.domain_name}"
+                        faces[iface] = "HarmonicStitch" if (reg.div_flux and nxt.div_flux) else "PiecewiseJump"
+                    if idx_r == len(regs) - 1:
+                        if "right" in dirichlet:
+                            faces[f"{reg.domain_name}.right"] = "Dirichlet"
+                        elif any("right" in math_sys.neumann_bcs.get(b, {}) for b in reg_bc_ids):
+                            faces[f"{reg.domain_name}.right"] = "Neumann"
+                        else:
+                            faces[f"{reg.domain_name}.right"] = "ImplicitZeroFlux"
+                            if is_spatial:
+                                implicit_faces.append(f"{reg.domain_name}.right")
+            else:
+                bc_ids = set()
+                for e in eqs:
+                    collect_bc_ids(e.lhs, bc_ids)
+                    collect_bc_ids(e.rhs, bc_ids)
+                for side in ("left", "right"):
+                    if side in dirichlet:
+                        faces[side] = "Dirichlet"
+                    elif any(side in math_sys.neumann_bcs.get(b, {}) for b in bc_ids):
+                        faces[side] = "Neumann"
+                    else:
+                        faces[side] = "ImplicitZeroFlux"
+                        if is_spatial:
+                            implicit_faces.append(side)
+
+            ledger.append({
+                "state": s_name,
+                "domain": dom,
+                "coord_sys": coord_sys,
+                "is_dae": is_dae,
+                "is_spatial": is_spatial,
+                "faces": faces,
+                "implicit_zero_flux_faces": implicit_faces,
+                "missing_gauge_anchor": is_spatial and is_dae and ("left" not in dirichlet and "right" not in dirichlet),
+            })
+
+        return ledger
 
     @staticmethod
     def _compute_differential_mask(

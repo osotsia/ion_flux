@@ -19,6 +19,12 @@ TEMPLATE = """
 
 #define CLAMP(idx, bound) (std::max(0, std::min((int)(idx), (int)(bound) - 1)))
 
+static inline double ion_flux_harmonic(double a, double b) {
+    const double abs_a = std::abs(a);
+    const double abs_b = std::abs(b);
+    return (a * abs_b + b * abs_a + 5e-31 * (a + b)) / (abs_a + abs_b + 1e-30);
+}
+
 #ifdef ENZYME_ACTIVE
 int enzyme_dup = 1;
 int enzyme_const = 2;
@@ -41,15 +47,19 @@ void evaluate_ic(const double* __restrict__ p, const double* __restrict__ m, dou
         y0[i] = 0.0;
         ydot0[i] = 0.0;
     }
-{{ ic_body | indent(4) }}
+{{ ic_body | indent(4, true) }}
 }
 
 void evaluate_residual(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ res) {
-{{ body | indent(4) }}
+{{ body | indent(4, true) }}
 }
 
 void evaluate_observables(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ obs) {
-{{ obs_body | indent(4) }}
+{{ obs_body | indent(4, true) }}
+}
+
+void evaluate_audit_observables(const double* __restrict__ y, const double* __restrict__ ydot, const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ audit_obs) {
+{{ audit_obs_body | indent(4, true) }}
 }
 
 void evaluate_jvp(
@@ -116,7 +126,7 @@ void evaluate_vjp(
 } // extern "C"
 """
 
-def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, ic_body: str = "") -> str:
+def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, ic_body: str = "", audit_obs_body: str = "") -> str:
     env = jinja2.Environment()
     template = env.from_string(TEMPLATE)
     return template.render(
@@ -126,4 +136,5 @@ def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, o
         body=body,
         obs_body=obs_body,
         ic_body=ic_body,
+        audit_obs_body=audit_obs_body,
     )

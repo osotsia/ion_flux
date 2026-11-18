@@ -198,3 +198,37 @@ def test_static_sparsity_analyzer_matches_enzyme_oracl_v2():
     assert not missing_dependencies, \
         f"FATAL: Python analyzer failed to map physical dependencies! " \
         f"It missed {len(missing_dependencies)} cross-couplings. Examples: {list(missing_dependencies)[:5]}"
+
+
+@REQUIRES_COMPILER
+def test_vardecl_cse_sparsity_propagation():
+    """
+    Validates that hoisting repeated Compute IR subexpressions and Reductions
+    into VarDecl temporaries preserves exact SparsityAnalyzer Jacobian triplets.
+    """
+    class CseAndIntegralPDE(fx.PDE):
+        x = fx.Domain(bounds=(0, 1.0), resolution=25, name="x")
+        c = fx.State(domain=x, name="c")
+        avg = fx.State(domain=None, name="avg")
+
+        def math(self):
+            # Repeated nonlinear expression triggers CSE VarDecl hoisting
+            rxn = fx.exp(-0.5 * self.c) * (1.0 + self.c * self.c)
+            flux = -fx.grad(self.c)
+            return {
+                "equations": {
+                    self.c: fx.dt(self.c) == -fx.div(flux) - rxn - rxn * 0.5,
+                    self.avg: self.avg == fx.integral(self.c, over=self.x),
+                },
+                "boundaries": {flux: {"left": 0.0, "right": 0.0}},
+                "initial_conditions": {self.c: 1.0, self.avg: 1.0},
+            }
+
+    model = CseAndIntegralPDE()
+    missing = get_missing_dependencies(model=model)
+    assert not missing, f"VarDecl CSE hoisting dropped Jacobian dependencies: {missing}"
+
+    eng = fx.Engine(model=model, target="cpu", mock_execution=False)
+    c_seeds, _, _, _, c_dense = eng.manifest.cpr_cache
+    assert len(c_dense) == 1, "Expected avg row segregated as dense"
+    assert len(c_seeds) <= 4, f"Expected compressed bulk colors, got {len(c_seeds)}"

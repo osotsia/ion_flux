@@ -1,9 +1,9 @@
-from .nodes import Node, Scalar, State, Parameter, Observable, BinaryOp, UnaryOp, Boundary, InitialCondition, SystemDict, _wrap, Piecewise, Dirichlet
+from .nodes import Node, Scalar, State, Parameter, Observable, BinaryOp, UnaryOp, Boundary, InitialCondition, Clamp, SystemDict, _wrap, Piecewise, Dirichlet
 from .spatial import Domain, CompositeDomain, DomainBoundary
 from .pde import PDE, Terminal, Condition, merge
 
 __all__ = [
-    "Node", "Scalar", "State", "Parameter", "Observable", "BinaryOp", "UnaryOp", "Boundary", "InitialCondition", 
+    "Node", "Scalar", "State", "Parameter", "Observable", "BinaryOp", "UnaryOp", "Boundary", "InitialCondition", "Clamp",
     "Domain", "CompositeDomain", "DomainBoundary", 
     "PDE", "Terminal", "Condition", "merge", "SystemDict", "_wrap", "Piecewise", "Dirichlet"
 ]

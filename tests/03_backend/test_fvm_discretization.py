@@ -72,16 +72,17 @@ class TestComputeIRUnitStencils:
     """Fast, compiler-free unit verification of modular discretizer components."""
 
     def test_harmonic_mean_zero_division_guard(self):
-        """Validates that zero-flux evaluations do not divide by zero due to 1e-30 safety epsilon."""
+        """Validates that harmonic_mean emits a stabilized ion_flux_harmonic call with 1e-30 denominator guard."""
+        from ion_flux.compiler._4_codegen.templates import TEMPLATE
+
         topo = type("MockTopo", (), {"domains": {}})()
         stitcher = PiecewiseFluxStitcher(topo=topo)
 
         expr = stitcher.harmonic_mean(Literal(0.0), Literal(0.0))
-        assert isinstance(expr, BinaryOp)
-        assert expr.op == "/"
-        # Denominator must enforce + 1e-30 guard
-        assert isinstance(expr.right, BinaryOp)
-        assert expr.right.right.val == "1e-30"
+        assert isinstance(expr, FuncCall)
+        assert expr.func == "ion_flux_harmonic"
+        assert "ion_flux_harmonic" in TEMPLATE
+        assert "1e-30" in TEMPLATE
 
     def test_harmonic_mean_extreme_jump_discontinuity_limit(self):
         """
@@ -95,8 +96,9 @@ class TestComputeIRUnitStencils:
         flux_r = Literal(1.0)
         expr = stitcher.harmonic_mean(flux_l, flux_r)
 
-        assert isinstance(expr, BinaryOp)
-        assert expr.op == "/"
+        assert isinstance(expr, FuncCall)
+        assert expr.func == "ion_flux_harmonic"
+        assert len(expr.args) == 2
 
     def test_mesh_metrics_pointer_generation(self):
         """Validates that MeshMetrics correctly emits ArrayAccess expressions into the 'm' array."""

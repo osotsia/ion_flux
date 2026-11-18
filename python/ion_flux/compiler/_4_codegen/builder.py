@@ -10,9 +10,91 @@ from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._3_backend.math_ir import MathSystem
 from ion_flux.compiler._3_backend.discretizer import FVMDiscretizer
-from ion_flux.compiler._3_backend.compute_ir import Stmt
+from ion_flux.compiler._3_backend.compute_ir import Stmt, format_compute_ir
 from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
 from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
+
+
+def _build_offset_aliases(layout: Any) -> Tuple[Dict[Tuple[str, str, str], str], List[str]]:
+    alias_map: Dict[Tuple[str, str, str], str] = {}
+    decls: List[str] = []
+
+    for s_name, (off, _) in getattr(layout, "state_offsets", {}).items():
+        c_name = f"Y_{s_name}"
+        alias_map[("y", s_name, "")] = c_name
+        decls.append(f"constexpr int {c_name} = {off};")
+
+    for p_name, (off, _) in getattr(layout, "param_offsets", {}).items():
+        c_name = f"P_{p_name}"
+        alias_map[("p", p_name, "")] = c_name
+        decls.append(f"constexpr int {c_name} = {off};")
+
+    for o_name, (off, _) in getattr(layout, "obs_offsets", {}).items():
+        c_name = f"OBS_{o_name}"
+        alias_map[("obs", o_name, "")] = c_name
+        decls.append(f"constexpr int {c_name} = {off};")
+
+    for d_name, fields in getattr(layout, "mesh_offsets", {}).items():
+        for field_name, val in fields.items():
+            if isinstance(val, int):
+                c_name = f"M_{d_name}_{field_name}"
+                alias_map[("m", d_name, field_name)] = c_name
+                decls.append(f"constexpr int {c_name} = {val};")
+
+    return alias_map, decls
+
+
+def _emit_block(emitter: CppEmitter, preamble: List[str], stmts: List[Stmt]) -> str:
+    if not stmts:
+        return ""
+    lines: List[str] = list(preamble)
+    for stmt in stmts:
+        lines.extend(emitter.emit(stmt).splitlines())
+    return "\n".join(lines)
+
+
+def generate_cpp_with_audit(
+    math_sys: MathSystem,
+    layout: Any,
+    topo: TopologyAnalyzer,
+    semantic_ctx: Optional[SemanticContext],
+    state_map: Dict[str, Any],
+    target: str = "cpu",
+    audit_compiler: bool = False,
+) -> Dict[str, Any]:
+    """
+    Lowers Math IR to Compute IR, stringifies statements to readable C++, and emits
+    optional audit watchpoints into evaluate_audit_observables().
+    """
+    discretizer = FVMDiscretizer(layout, topo, semantic_ctx, state_map, target, math_sys=math_sys)
+    l_phys_stmts, eq_stmts, obs_stmts = discretizer.discretize_system(math_sys, audit_compiler=audit_compiler)
+    l_phys_ic_stmts, ic_stmts = discretizer.discretize_initial_conditions(math_sys)
+    audit_obs_stmts, clamp_meta = discretizer.discretize_audit_observables()
+
+    alias_map, preamble_decls = _build_offset_aliases(layout)
+    emitter = CppEmitter(alias_map=alias_map)
+
+    body_str = _emit_block(emitter, preamble_decls, l_phys_stmts + eq_stmts)
+    obs_body_str = _emit_block(emitter, preamble_decls, l_phys_stmts + obs_stmts) if obs_stmts else ""
+    ic_body_str = _emit_block(emitter, preamble_decls, l_phys_ic_stmts + ic_stmts)
+    audit_obs_body_str = _emit_block(emitter, preamble_decls, l_phys_stmts + audit_obs_stmts) if audit_obs_stmts else ""
+
+    cpp_str = generate_cpp_skeleton(
+        n_states=layout.n_states,
+        n_params=layout.n_params,
+        n_obs=layout.n_obs,
+        body=body_str,
+        obs_body=obs_body_str,
+        ic_body=ic_body_str,
+        audit_obs_body=audit_obs_body_str,
+    )
+
+    return {
+        "cpp_source": cpp_str,
+        "eq_stmts": eq_stmts,
+        "compute_pretty": format_compute_ir(eq_stmts) if audit_compiler else "",
+        "clamp_meta": clamp_meta,
+    }
 
 
 def generate_cpp(
@@ -26,34 +108,14 @@ def generate_cpp(
     """
     Lowers Math IR to Compute IR, stringifies statements to C++, and wraps them in
     the native execution and Enzyme AD template.
-
-    Args:
-        math_sys: Strongly typed continuum Math IR system.
-        layout: Contiguous memory offset and geometry stride tables.
-        topo: Coordinate systems, manifolds, and composite domain strides.
-        semantic_ctx: Pre-processed boundary condition lookups.
-        state_map: Mapping of state and observable names to frontend objects.
-        target: Compilation target flag (e.g., 'cpu:serial', 'cpu:omp').
-
-    Returns:
-        Tuple of (cpp_source_code, compute_ir_equation_statements).
     """
-    discretizer = FVMDiscretizer(layout, topo, semantic_ctx, state_map, target, math_sys=math_sys)
-    l_phys_stmts, eq_stmts, obs_stmts = discretizer.discretize_system(math_sys)
-    l_phys_ic_stmts, ic_stmts = discretizer.discretize_initial_conditions(math_sys)
-
-    emitter = CppEmitter()
-    body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + eq_stmts))
-    obs_body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_stmts + obs_stmts))
-    ic_body_str = "\n    ".join(emitter.emit(stmt) for stmt in (l_phys_ic_stmts + ic_stmts))
-
-    cpp_str = generate_cpp_skeleton(
-        n_states=layout.n_states,
-        n_params=layout.n_params,
-        n_obs=layout.n_obs,
-        body=body_str,
-        obs_body=obs_body_str,
-        ic_body=ic_body_str,
+    bundle = generate_cpp_with_audit(
+        math_sys=math_sys,
+        layout=layout,
+        topo=topo,
+        semantic_ctx=semantic_ctx,
+        state_map=state_map,
+        target=target,
+        audit_compiler=False,
     )
-
-    return cpp_str, eq_stmts
+    return bundle["cpp_source"], bundle["eq_stmts"]

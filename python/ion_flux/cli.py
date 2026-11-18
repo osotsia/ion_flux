@@ -141,11 +141,23 @@ class ToolchainInstaller:
         print("Finalizing toolchain...")
         self._install_plugin_binaries()
         self._create_compiler_wrapper()
+        self._write_toolchain_manifest()
         self._prune_sysroot()
         self._scrub_symlinks()
         
         print("Verifying toolchain integrity...")
         self._verify_toolchain()
+
+    def _write_toolchain_manifest(self) -> None:
+        import json
+        manifest_path = os.path.join(self.target_dir, "toolchain_meta.json")
+        payload = {
+            "llvm_version": self.llvm_version,
+            "enzyme_version": self.enzyme_version,
+            "platform": f"{platform.system().lower()}-{platform.machine().lower()}",
+        }
+        with open(manifest_path, "w") as f:
+            json.dump(payload, f, indent=2)
 
         print(f"\n✅ Successfully installed and verified hermetic C++ toolchain to {self.target_dir}")
 

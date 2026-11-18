@@ -1,5 +1,5 @@
 from typing import Optional, Union
-from .core import UnaryOp, BinaryOp, Node, _wrap, Domain
+from .core import UnaryOp, BinaryOp, Clamp, Node, _wrap, Domain
 
 # Differential / Integral Operators
 def dt(state: Node) -> UnaryOp: 
@@ -34,9 +34,9 @@ def minimum(a: Node, b: Node) -> BinaryOp:
     """Element-wise minimum of two AST nodes."""
     return BinaryOp("min", _wrap(a), _wrap(b))
 
-def clamp(expr: Node, lower: Union[float, Node], upper: Union[float, Node]) -> BinaryOp: 
+def clamp(expr: Node, lower: Union[float, Node], upper: Union[float, Node], label: str = "") -> Clamp:
     """
     Restricts a node's evaluation strictly between a lower and upper bound.
-    Emits a deterministic interval constraint: [lower, upper].
+    Preserves an explicit Clamp node for audit watchpoint tracking when enabled.
     """
-    return minimum(maximum(expr, _wrap(lower)), _wrap(upper))
+    return Clamp(_wrap(expr), _wrap(lower), _wrap(upper), label=label)

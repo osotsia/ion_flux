@@ -14,6 +14,7 @@ pub struct NativeLibrary {
     pub n_obs: usize,
     res_fn: NativeResFn,
     obs_fn: Option<NativeObsFn>,
+    audit_obs_fn: Option<NativeObsFn>,
     jvp_fn: Option<NativeJvpFn>,
     vjp_fn: Option<NativeVjpFn>,
     ic_fn: Option<NativeIcFn>,
@@ -32,6 +33,7 @@ impl NativeLibrary {
             let res_fn: NativeResFn = *lib.get(b"evaluate_residual\0")
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_residual: {e}")))?;
             let obs_fn: Option<NativeObsFn> = lib.get(b"evaluate_observables\0").map(|s| *s).ok();
+            let audit_obs_fn: Option<NativeObsFn> = lib.get(b"evaluate_audit_observables\0").map(|s| *s).ok();
             let jvp_fn: Option<NativeJvpFn> = lib.get(b"evaluate_jvp\0").map(|s| *s).ok();
             let vjp_fn: Option<NativeVjpFn> = lib.get(b"evaluate_vjp\0").map(|s| *s).ok();
             let ic_fn: Option<NativeIcFn> = lib.get(b"evaluate_ic\0").map(|s| *s).ok();
@@ -45,6 +47,7 @@ impl NativeLibrary {
                 n_obs,
                 res_fn,
                 obs_fn,
+                audit_obs_fn,
                 jvp_fn,
                 vjp_fn,
                 ic_fn,
@@ -89,6 +92,75 @@ impl NativeLibrary {
             unsafe { obs_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), obs.as_mut_ptr()); }
         }
         Ok(obs)
+    }
+
+    pub fn evaluate_audit_observables(&self, y: Vec<f64>, ydot: Vec<f64>, p: Vec<f64>, m: Vec<f64>, n_audit_obs: usize) -> PyResult<Vec<f64>> {
+        if y.len() != self.n_states || ydot.len() != self.n_states || p.len() != self.n_params {
+            return Err(pyo3::exceptions::PyValueError::new_err("State or parameter slice length mismatch"));
+        }
+        let mut audit_obs = vec![0.0; n_audit_obs];
+        if n_audit_obs > 0 {
+            if let Some(audit_fn) = self.audit_obs_fn {
+                unsafe { audit_fn(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), audit_obs.as_mut_ptr()); }
+            }
+        }
+        Ok(audit_obs)
+    }
+
+    pub fn evaluate_jvp<'py>(&self, py: Python<'py>, y: Vec<f64>, ydot: Vec<f64>, p: Vec<f64>, m: Vec<f64>, c_j: f64, v: Vec<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        if y.len() != self.n_states || ydot.len() != self.n_states || v.len() != self.n_states || p.len() != self.n_params {
+            return Err(pyo3::exceptions::PyValueError::new_err("State, vector, or parameter slice length mismatch"));
+        }
+        let jvp_fn = self.jvp_fn.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("evaluate_jvp missing"))?;
+        let mut jvp_dy = vec![0.0; self.n_states];
+        let mut jvp_dydot = vec![0.0; self.n_states];
+        let mut res_dummy = vec![0.0; self.n_states];
+        let mut jvp_out = vec![0.0; self.n_states];
+        unsafe {
+            jvp_fn(
+                y.as_ptr(), ydot.as_ptr(), p.as_ptr(), m.as_ptr(), c_j, v.as_ptr(),
+                jvp_dy.as_mut_ptr(), jvp_dydot.as_mut_ptr(), res_dummy.as_mut_ptr(), jvp_out.as_mut_ptr(),
+            );
+        }
+        Ok(numpy::ndarray::Array1::from_vec(jvp_out).to_pyarray(py))
+    }
+
+    #[pyo3(signature = (y, ydot, p, m, c_j, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense))]
+    pub fn evaluate_jacobian_triplets(
+        &self,
+        y: Vec<f64>,
+        ydot: Vec<f64>,
+        p: Vec<f64>,
+        m: Vec<f64>,
+        c_j: f64,
+        cpr_seeds: Vec<Vec<f64>>,
+        cpr_ptrs: Vec<usize>,
+        cpr_rows: Vec<usize>,
+        cpr_cols: Vec<usize>,
+        cpr_dense: Vec<usize>,
+    ) -> PyResult<(Vec<usize>, Vec<usize>, Vec<f64>)> {
+        if y.len() != self.n_states || ydot.len() != self.n_states || p.len() != self.n_params {
+            return Err(pyo3::exceptions::PyValueError::new_err("State or parameter slice length mismatch"));
+        }
+        let n = self.n_states;
+        let cpr = CprData {
+            color_seeds: cpr_seeds,
+            color_ptrs: cpr_ptrs,
+            color_rows: cpr_rows,
+            color_cols: cpr_cols,
+            dense_rows: cpr_dense,
+        };
+        let mut triplets = Vec::with_capacity(cpr.color_rows.len() + cpr.dense_rows.len() * n);
+        assemble_triplets_analytical(n, &y, &ydot, &p, &m, c_j, self.jvp_fn, self.vjp_fn, &mut triplets, &cpr);
+        let mut rows = Vec::with_capacity(triplets.len());
+        let mut cols = Vec::with_capacity(triplets.len());
+        let mut vals = Vec::with_capacity(triplets.len());
+        for (r, c, v) in triplets {
+            rows.push(r);
+            cols.push(c);
+            vals.push(v);
+        }
+        Ok((rows, cols, vals))
     }
 
     pub fn evaluate_vjp(&self, y: Vec<f64>, ydot: Vec<f64>, p: Vec<f64>, m: Vec<f64>, lambda_vec: Vec<f64>) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {

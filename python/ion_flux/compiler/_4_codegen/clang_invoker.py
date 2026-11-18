@@ -2,6 +2,7 @@ import os
 import sys
 import glob
 import hashlib
+import json
 import subprocess
 import uuid
 import logging
@@ -73,11 +74,22 @@ class NativeCompiler:
             return bundled_matches[0]
         return ""
 
-    def compile(self, cpp_source: str, n_states: int = 0) -> str:
+    def get_toolchain_info(self) -> dict:
+        meta_path = os.path.join(self.bundled_toolchain_dir, "toolchain_meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"compiler": os.path.basename(self.compiler_cmd), "enzyme_plugin": os.path.basename(self.enzyme_plugin)}
+
+    def compile(self, cpp_source: str, n_states: int = 0, meta_source: str = "") -> str:
         if not self.compiler_cmd:
             raise RuntimeError("C++ toolchain is unavailable on this host.")
 
-        source_hash = hashlib.sha256(cpp_source.encode('utf-8')).hexdigest()[:16]
+        hash_input = f"{cpp_source}\n//--META--\n{meta_source}" if meta_source else cpp_source
+        source_hash = hashlib.sha256(hash_input.encode('utf-8')).hexdigest()[:16]
         ext = ".dylib" if sys.platform == "darwin" else ".so"
         lib_name = f"lib_res_{source_hash}{ext}"
         lib_path = os.path.join(self.cache_dir, lib_name)
@@ -97,13 +109,19 @@ class NativeCompiler:
             
         tmp_uuid = uuid.uuid4().hex
         tmp_cpp_path = os.path.join(self.cache_dir, f"tmp_{tmp_uuid}.cpp")
+        tmp_meta_path = os.path.join(self.cache_dir, f"tmp_{tmp_uuid}_meta.cpp") if meta_source else ""
         tmp_lib_path = os.path.join(self.cache_dir, f"tmp_{tmp_uuid}{ext}")
 
         with open(tmp_cpp_path, "w") as f:
             f.write(cpp_source)
+        if tmp_meta_path:
+            with open(tmp_meta_path, "w") as f:
+                f.write(meta_source)
             
         def attempt_compile(compiler: str, plugin: str) -> bool:
             cmd = [compiler, "-O3", "-fPIC", "-shared", "-o", tmp_lib_path, tmp_cpp_path]
+            if tmp_meta_path:
+                cmd.append(tmp_meta_path)
             
             if "#pragma omp" in cpp_source:
                 cmd.append("-fopenmp")
@@ -136,10 +154,9 @@ class NativeCompiler:
 
         success = attempt_compile(self.compiler_cmd, self.enzyme_plugin)
 
-        if os.path.exists(tmp_cpp_path):
-            os.remove(tmp_cpp_path)
-        if os.path.exists(tmp_lib_path):
-            os.remove(tmp_lib_path)
+        for p in (tmp_cpp_path, tmp_meta_path, tmp_lib_path):
+            if p and os.path.exists(p):
+                os.remove(p)
 
         if not success:
             raise RuntimeError(f"Hermetic compilation failed.\n{getattr(self, 'last_error', 'Unknown error')}")

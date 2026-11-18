@@ -11,7 +11,7 @@ from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._2_middle_end.ast_utils import extract_div_child
 from ion_flux.compiler._3_backend.math_ir import (
-    MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp, MathUnaryOp,
+    MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp, MathUnaryOp, MathClamp,
     MathGrad, MathDiv, MathDt, MathCoords, MathIntegral, MathBoundaryRef,
     MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathInitialCondition, MathNeumannBC, MathSystem
 )
@@ -317,8 +317,94 @@ class NormalizationPass:
                 over_dom = node.get("over")
                 return MathIntegral(child=self._lower_expr(child, current_state, over_dom), over_domain=over_dom, bc_id=bc_id)
 
+            case {"type": "Clamp", "child": child, "lower": lower, "upper": upper}:
+                return MathClamp(
+                    child=self._lower_expr(child, current_state, current_domain),
+                    lower=self._lower_expr(lower, current_state, current_domain),
+                    upper=self._lower_expr(upper, current_state, current_domain),
+                    label=node.get("label", ""),
+                    bc_id=bc_id,
+                )
+
             case {"type": "UnaryOp", "op": op, "child": child}:
                 return MathUnaryOp(op=op, child=self._lower_expr(child, current_state, current_domain), bc_id=bc_id)
 
             case _:
                 return MathScalar(0.0)
+
+
+def verify_no_unreduced_broadcasts(math_sys: MathSystem, topo: TopologyAnalyzer) -> None:
+    """
+    Rejects unreduced higher-dimensional spatial states or coordinate references
+    inside lower-dimensional (e.g., 0D) equations before FVM discretization can
+    silently fall back to index 0.
+    """
+    def base_axes_of(domain_name: Optional[str]) -> set:
+        if not domain_name:
+            return set()
+        return {topo.get_base_axis(ax) for ax in topo.get_axes(domain_name)}
+
+    def infer_domain_name(expr: MathExpr) -> Optional[str]:
+        match expr:
+            case MathState(domain_name=d_name):
+                return d_name
+            case MathBoundaryRef(domain=d_name, child=c):
+                return d_name or infer_domain_name(c)
+            case MathGrad(axis=ax, child=c) | MathDiv(axis=ax, child=c):
+                return ax or infer_domain_name(c)
+            case MathCoords(axis=ax):
+                return ax
+            case MathUnaryOp(child=c) | MathDt(child=c):
+                return infer_domain_name(c)
+            case MathBinaryOp(left=l, right=r):
+                return infer_domain_name(l) or infer_domain_name(r)
+            case MathClamp(child=c):
+                return infer_domain_name(c)
+            case _:
+                return None
+
+    def check_expr(expr: MathExpr, active_axes: set, context_label: str) -> None:
+        match expr:
+            case MathState(name=s_name, domain_name=d_name):
+                foreign = base_axes_of(d_name) - active_axes
+                if foreign:
+                    raise ValueError(
+                        f"Dimensional Broadcast Error in {context_label}: spatial state '{s_name}' "
+                        f"(unreduced axes {sorted(foreign)}) is referenced without a boundary or integral reduction."
+                    )
+            case MathCoords(axis=axis):
+                foreign = base_axes_of(axis) - active_axes
+                if foreign:
+                    raise ValueError(
+                        f"Dimensional Broadcast Error in {context_label}: coordinate axis '{axis}' "
+                        f"is referenced without an integral or matching spatial domain."
+                    )
+            case MathIntegral(child=child, over_domain=over_domain):
+                check_expr(child, active_axes | base_axes_of(over_domain), context_label)
+            case MathBoundaryRef(child=child, domain=domain):
+                pin_dom = domain or infer_domain_name(child)
+                pinned = set()
+                if pin_dom:
+                    axes = topo.get_axes(pin_dom)
+                    if axes:
+                        pinned.add(topo.get_base_axis(axes[-1]))
+                check_expr(child, active_axes | pinned, context_label)
+            case MathUnaryOp(child=child) | MathGrad(child=child) | MathDiv(child=child) | MathDt(child=child):
+                check_expr(child, active_axes, context_label)
+            case MathBinaryOp(left=left, right=right):
+                check_expr(left, active_axes, context_label)
+                check_expr(right, active_axes, context_label)
+            case MathClamp(child=child, lower=lower, upper=upper):
+                check_expr(child, active_axes, context_label)
+                check_expr(lower, active_axes, context_label)
+                check_expr(upper, active_axes, context_label)
+
+    for eq in math_sys.equations:
+        eq_axes = base_axes_of(eq.target_domain)
+        ctx = f"equation '{eq.state_name}'"
+        check_expr(eq.lhs, eq_axes, ctx)
+        check_expr(eq.rhs, eq_axes, ctx)
+
+    for obs in math_sys.observables:
+        obs_axes = base_axes_of(obs.target_domain)
+        check_expr(obs.expr, obs_axes, f"observable '{obs.name}'")

@@ -172,3 +172,25 @@ class InitialCondition(Node):
     def __call__(self) -> "InitialCondition": return self
     def to_dict(self, tags: Optional[Dict[int, str]] = None) -> Dict[str, Any]: return {"type": "InitialCondition", "child": self.child.to_dict(tags)}
     def __repr__(self) -> str: return f"{self.child}.t0"
+
+class Clamp(Node):
+    __slots__ = ["child", "lower", "upper", "label"]
+    def __init__(self, child: Node, lower: Node, upper: Node, label: str = ""):
+        self.child = child
+        self.lower = lower
+        self.upper = upper
+        self.label = validate_identifier(label) if label else ""
+    def to_dict(self, tags: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
+        d = {
+            "type": "Clamp",
+            "child": self.child.to_dict(tags),
+            "lower": self.lower.to_dict(tags),
+            "upper": self.upper.to_dict(tags),
+        }
+        if self.label:
+            d["label"] = self.label
+        if tags and id(self) in tags:
+            d["_bc_id"] = tags[id(self)]
+        return d
+    def __repr__(self) -> str:
+        return f"clamp({self.child}, {self.lower}, {self.upper})"
