@@ -1,7 +1,8 @@
 use std::io::Write;
+use crate::diagnostics::SequenceTransition;
 use crate::stepper::problem::Problem;
 use crate::stepper::state::TimeStepper;
-use crate::control::bisection::{TrigInfo, check_trigger, execute_bisection};
+use crate::control::bisection::{TrigInfo, check_trigger, execute_bisection, BisectionResult};
 pub use crate::api::SolverError;
 
 #[derive(Clone, Debug)]
@@ -102,12 +103,19 @@ pub fn run_sequence<S: TimeStepper>(
                     Some(ref mut h) => Some(&mut **h),
                     None => None,
                 };
-                let low = if let Some(ref c) = ckpt {
+                let bisect_res = if let Some(ref c) = ckpt {
                     execute_bisection(prob, stepper, dt_step, &step.trig, c, hist_bisection)
                 } else {
-                    0.0
+                    BisectionResult { dt: 0.0, width: 0.0, residual: 0.0 }
                 };
-                t_elapsed += low;
+                t_elapsed += bisect_res.dt;
+                stepper.record_transition(SequenceTransition {
+                    step_idx,
+                    termination_reason: "Trigger".to_string(),
+                    trigger_t: stepper.t(),
+                    bisection_width: bisect_res.width,
+                    trigger_residual: bisect_res.residual,
+                });
                 record_point(prob, stepper, out_t, out_traj, out_obs, &mut step_obs);
                 if show_progress { print_progress(step.s_type, stepper.t(), 1.0, v_idx, stepper.y(), true); }
                 break;
@@ -117,8 +125,17 @@ pub fn run_sequence<S: TimeStepper>(
             record_point(prob, stepper, out_t, out_traj, out_obs, &mut step_obs);
             if show_progress { print_progress(step.s_type, stepper.t(), t_elapsed / step.t_limit, v_idx, stepper.y(), false); }
         }
-        if show_progress && t_elapsed >= step.t_limit && step.t_limit != std::f64::INFINITY {
-            print_progress(step.s_type, stepper.t(), 1.0, v_idx, stepper.y(), true);
+        if t_elapsed >= step.t_limit && step.t_limit != std::f64::INFINITY {
+            stepper.record_transition(SequenceTransition {
+                step_idx,
+                termination_reason: "TimeLimit".to_string(),
+                trigger_t: stepper.t(),
+                bisection_width: 0.0,
+                trigger_residual: 0.0,
+            });
+            if show_progress {
+                print_progress(step.s_type, stepper.t(), 1.0, v_idx, stepper.y(), true);
+            }
         }
     }
     Ok(())

@@ -126,27 +126,44 @@ class Engine:
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
               t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True,
               rel_tol: Optional[float] = None, abs_tol: Optional[float] = None,
-              max_newton_iters: Optional[int] = None, record_trace: bool = False) -> SimulationResult:
+              max_newton_iters: Optional[int] = None, record_trace: bool = False,
+              audit_solver: bool = False) -> SimulationResult:
         """
         Executes a single continuous simulation trajectory.
         Canonicalizes inputs and delegates directly to solve_batch.
         """
         current_params = {**{k: v.value for k, v in self.parameters.items()}, **(parameters or {})}
+        effective_record_trace = record_trace or audit_solver
+        effective_requires_grad = requires_grad if requires_grad is not None else ([] if audit_solver else None)
+
         results = self.solve_batch(
             parameters=[current_params],
             t_span=t_span,
             protocols=[protocol] if protocol is not None else None,
             t_eval=t_eval,
-            requires_grad=requires_grad,
+            requires_grad=effective_requires_grad,
             max_workers=1,
             threads=threads,
             show_progress=show_progress,
             rel_tol=rel_tol,
             abs_tol=abs_tol,
             max_newton_iters=max_newton_iters,
-            record_trace=record_trace,
+            record_trace=effective_record_trace,
         )
-        return results[0]
+        res = results[0]
+        if audit_solver:
+            from ion_flux.runtime.audit import run_solver_audit
+            res.audit = run_solver_audit(
+                engine=self,
+                result=res,
+                parameters=current_params,
+                protocol=protocol,
+                t_span=t_span,
+                t_eval=t_eval,
+                rel_tol=rel_tol,
+                abs_tol=abs_tol,
+            )
+        return res
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), protocols: Any = None, 
                     t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, 

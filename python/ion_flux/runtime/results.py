@@ -13,15 +13,16 @@ class Variable:
 
 class SimulationResult:
     """Data object returning exact multi-dimensional trajectories outputted by the Engine."""
-    __slots__ = ["_data", "parameters", "status", "engine", "trajectory", "diagnostics"]
+    __slots__ = ["_data", "parameters", "status", "engine", "trajectory", "diagnostics", "audit"]
     
-    def __init__(self, data: Dict[str, np.ndarray], parameters: Dict[str, float], status: str = "completed", engine: Optional[Any] = None, trajectory: Optional[Dict] = None, diagnostics: Optional[Dict[str, Any]] = None):
+    def __init__(self, data: Dict[str, np.ndarray], parameters: Dict[str, float], status: str = "completed", engine: Optional[Any] = None, trajectory: Optional[Dict] = None, diagnostics: Optional[Dict[str, Any]] = None, audit: Optional[Any] = None):
         self._data = data
         self.parameters = parameters
         self.status = status
         self.engine = engine
         self.trajectory = trajectory
         self.diagnostics = diagnostics or {}
+        self.audit = audit
 
     def __getitem__(self, key: str) -> Variable:
         if key not in self._data: raise KeyError(f"Variable '{key}' not found.")
@@ -34,6 +35,10 @@ class SimulationResult:
 
     def print_summary(self) -> None:
         """Prints a structured execution and diagnostic summary."""
+        if self.audit is not None and hasattr(self.audit, "print_summary"):
+            self.audit.print_summary()
+            return
+
         print("=" * 64)
         print("ION_FLUX EXECUTION & DIAGNOSTIC SUMMARY")
         print("=" * 64)

@@ -32,6 +32,13 @@ pub fn check_trigger<S: TimeStepper>(prob: &Problem, stepper: &S, info: &TrigInf
     false
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct BisectionResult {
+    pub dt: f64,
+    pub width: f64,
+    pub residual: f64,
+}
+
 pub fn execute_bisection<S: TimeStepper>(
     prob: &Problem,
     stepper: &mut S,
@@ -39,7 +46,7 @@ pub fn execute_bisection<S: TimeStepper>(
     info: &TrigInfo,
     ckpt: &Checkpoint,
     mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
-) -> f64 {
+) -> BisectionResult {
     let mut step_obs = vec![0.0; prob.n_obs];
     let (mut low, mut high) = (0.0, dt_step);
 
@@ -58,6 +65,9 @@ pub fn execute_bisection<S: TimeStepper>(
         }
     }
 
+    let width = high - low;
+    let mut residual = 0.0;
+
     stepper.rollback(ckpt);
     if low > 1e-12 {
         let hist_step = match history_cache {
@@ -66,8 +76,20 @@ pub fn execute_bisection<S: TimeStepper>(
         };
         if stepper.step(prob, low, hist_step).is_err() {
             stepper.rollback(ckpt);
-            return 0.0;
+            return BisectionResult { dt: 0.0, width, residual: 0.0 };
+        }
+        if info.has_trig {
+            let y = stepper.y();
+            let v = if info.is_obs {
+                if let Some(obs_fn) = prob.fns.obs_fn {
+                    unsafe { obs_fn(y.as_ptr(), stepper.ydot().as_ptr(), stepper.p().as_ptr(), prob.m.as_ptr(), step_obs.as_mut_ptr()); }
+                }
+                step_obs[info.idx]
+            } else {
+                y[info.idx]
+            };
+            residual = v - info.val;
         }
     }
-    low
+    BisectionResult { dt: low, width, residual }
 }

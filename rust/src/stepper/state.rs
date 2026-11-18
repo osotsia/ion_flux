@@ -2,7 +2,7 @@ use crate::api::SolverError;
 use crate::stepper::history::BdfHistory;
 use crate::stepper::problem::Problem;
 use crate::linear::solver::LinearSolver;
-use crate::diagnostics::{Diagnostics, CrashReport};
+use crate::diagnostics::{Diagnostics, CrashReport, SequenceTransition};
 use crate::stepper::bdf;
 use crate::nonlinear::algebraic_roots;
 
@@ -91,6 +91,7 @@ pub trait TimeStepper {
         }
         self.step(prob, dt, history_cache)
     }
+    fn record_transition(&mut self, _tr: SequenceTransition) {}
     fn checkpoint(&self) -> Checkpoint;
     fn rollback(&mut self, ckpt: &Checkpoint);
 }
@@ -194,6 +195,10 @@ impl TimeStepper for SolverInstance {
 
     fn checkpoint(&self) -> Checkpoint {
         SolverInstance::checkpoint(self)
+    }
+
+    fn record_transition(&mut self, tr: SequenceTransition) {
+        self.diag.sequence_transitions.push(tr);
     }
 
     fn rollback(&mut self, ckpt: &Checkpoint) {

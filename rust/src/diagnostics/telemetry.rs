@@ -18,6 +18,15 @@ pub fn get_peak_rss_bytes() -> u64 {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SequenceTransition {
+    pub step_idx: usize,
+    pub termination_reason: String,
+    pub trigger_t: f64,
+    pub bisection_width: f64,
+    pub trigger_residual: f64,
+}
+
 pub struct PmuGuard {
     #[cfg(target_os = "linux")]
     fd_cycles: libc::c_int,
@@ -152,6 +161,7 @@ pub struct Diagnostics {
     pub t0_max_res: f64,
     pub t0_max_res_idx: usize,
     pub recent_newton_norms: std::collections::VecDeque<(usize, f64, f64)>,
+    pub sequence_transitions: Vec<SequenceTransition>,
 }
 
 impl Diagnostics {
@@ -169,6 +179,7 @@ impl Diagnostics {
             realtime_frozen_steps: 0, init_jac_max: 0.0, init_jac_min: 0.0,
             jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0,
             recent_newton_norms: std::collections::VecDeque::with_capacity(10),
+            sequence_transitions: Vec::new(),
         }
     }
 

@@ -245,3 +245,46 @@ def test_phase1_trace_gating_and_health_counters():
     assert "trace_t" in res_traced.diagnostics
     assert len(res_traced.diagnostics["trace_t"]) == res_traced.diagnostics["accepted_steps"]
     assert len(res_traced.diagnostics["trace_dt"]) == len(res_traced.diagnostics["trace_t"])
+
+
+@REQUIRES_RUNTIME
+def test_phase3_audit_solver_residual_sweep_and_sensitivity():
+    """
+    Validates Phase 3:
+      - `audit_solver=True` performs post-hoc DAE residual sweep and surfaces passed status.
+      - Scans parameter sensitivities (detects dead parameter and top sensitive parameter).
+      - Cross-check against SUNDIALS runs and passes on ODE systems.
+    """
+    class AuditedODEWithDeadParam(fx.PDE):
+        y = fx.State(domain=None, name="y")
+        V = fx.State(domain=None, name="V")
+        k_active = fx.Parameter(default=1.0, name="k_active")
+        k_dead = fx.Parameter(default=5.0, name="k_dead")
+
+        def math(self):
+            return {
+                "equations": {
+                    self.y: fx.dt(self.y) == -self.k_active * self.y,
+                    self.V: self.V == self.y * 2.0,
+                },
+                "boundaries": {},
+                "initial_conditions": {self.y: 1.0, self.V: 2.0},
+            }
+
+    eng = fx.Engine(model=AuditedODEWithDeadParam(), target="cpu:serial")
+    res = eng.solve(t_span=(0, 1.0), audit_solver=True, show_progress=False)
+
+    assert res.audit is not None
+    assert hasattr(res.audit, "print_summary")
+    assert res.audit.checks["dae_residual"]["status"] == "PASS"
+    assert res.audit.checks["dae_residual"]["max_residual"] < 1e-4
+
+    # Check dead parameter detection
+    sens = res.audit.checks["parameter_sensitivity"]
+    assert "k_dead" in sens["dead_params"]
+    assert sens["status"] == "WARN"
+
+    # SUNDIALS cross-check passed
+    sun = res.audit.checks["sundials_cross_check"]
+    assert sun["status"] == "PASS"
+    assert sun["rmse_mv"] < 1.0

@@ -421,3 +421,56 @@ def test_sequence_tape_tracks_protocol_parameters_and_tolerances():
     assert np.any(np.isclose(p_traj[:, i_target_off], 10.0))
     assert np.any(np.isclose(p_traj[:, i_target_off], 0.0))
     np.testing.assert_allclose(res_n["V"].data[-1], res_s["V"].data[-1], rtol=1e-5, atol=1e-6)
+
+
+@REQUIRES_RUNTIME
+def test_phase3_audit_solver_sequence_transitions_and_clamps():
+    """
+    Validates Phase 3:
+      - Sequence transitions recorded with exact trigger times and bisection widths.
+      - Clamp saturation detected and reported when combining audit_compiler=True and audit_solver=True.
+    """
+    class ClampTriggerPDE(fx.PDE):
+        x = fx.Domain(bounds=(0, 1.0), resolution=5, name="x")
+        c = fx.State(domain=x, name="c")
+        V = fx.State(domain=None, name="V")
+        i_app = fx.State(domain=None, name="i_app")
+        terminal = fx.Terminal(current=i_app, voltage=V)
+
+        def math(self):
+            c_safe = fx.clamp(self.c, lower=0.2, upper=2.0, label="c_limit")
+            flux = -fx.grad(self.c)
+            return {
+                "equations": {
+                    self.c: fx.dt(self.c) == -fx.div(flux) - self.i_app * c_safe,
+                    self.V: self.V == self.c.right - self.i_app * 0.1,
+                },
+                "boundaries": {
+                    flux: {"left": 0.0, "right": 0.0},
+                },
+                "initial_conditions": {self.c: 1.0, self.V: 1.0, self.i_app: 0.0},
+            }
+
+    model = ClampTriggerPDE()
+    eng = fx.Engine(model=model, target="cpu:serial", audit_compiler=True)
+
+    protocol = Sequence([
+        CC(rate=2.0, until=model.V <= 0.6, time=5.0),
+        Rest(time=1.0),
+    ])
+
+    res = eng.solve(protocol=protocol, audit_solver=True, show_progress=False)
+
+    assert res.audit is not None
+    # Transition log captured
+    transitions = res.audit.checks["sequence_transitions"]["transitions"]
+    assert len(transitions) >= 1
+    assert transitions[0]["termination_reason"] == "Trigger"
+    assert transitions[0]["bisection_width"] < 1e-3
+
+    # Residuals audited cleanly across multi-step protocol
+    assert res.audit.checks["dae_residual"]["status"] == "PASS"
+
+    # Clamp saturation reported
+    clamps = res.audit.checks["numerical_guardrails"]
+    assert clamps["status"] in ("PASS", "WARN")

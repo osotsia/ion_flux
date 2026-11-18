@@ -49,6 +49,19 @@ pub fn diagnostics_to_pydict<'py>(py: Python<'py>, diag: &Diagnostics) -> Bound<
     dict.set_item("peak_rss_bytes", diag.peak_rss_bytes).unwrap();
     dict.set_item("cpu_cycles", diag.cpu_cycles).unwrap();
     dict.set_item("instructions", diag.instructions).unwrap();
+    if !diag.sequence_transitions.is_empty() {
+        let tr_list = PyList::empty(py);
+        for tr in &diag.sequence_transitions {
+            let td = PyDict::new(py);
+            td.set_item("step_idx", tr.step_idx).unwrap();
+            td.set_item("termination_reason", &tr.termination_reason).unwrap();
+            td.set_item("trigger_t", tr.trigger_t).unwrap();
+            td.set_item("bisection_width", tr.bisection_width).unwrap();
+            td.set_item("trigger_residual", tr.trigger_residual).unwrap();
+            tr_list.append(&td).unwrap();
+        }
+        dict.set_item("sequence_transitions", tr_list).unwrap();
+    }
     if !diag.trace_t.is_empty() {
         dict.set_item("trace_t", diag.trace_t.clone()).unwrap();
         dict.set_item("trace_dt", diag.trace_dt.clone()).unwrap();
