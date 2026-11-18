@@ -111,9 +111,21 @@ pub fn step(
                 }
                 
                 diag.accepted_steps += 1;
-                diag.trace_t.push(abs_t + t_local); diag.trace_dt.push(history.h_used);
-                diag.trace_order.push(history.order); diag.trace_iters.push(iters); diag.trace_err.push(err_k);
-                
+                if prob.config.record_trace && !prob.config.is_realtime {
+                    if diag.trace_t.capacity() == 0 {
+                        diag.trace_t.reserve(1000);
+                        diag.trace_dt.reserve(1000);
+                        diag.trace_order.reserve(1000);
+                        diag.trace_iters.reserve(1000);
+                        diag.trace_err.reserve(1000);
+                    }
+                    diag.trace_t.push(abs_t + t_local);
+                    diag.trace_dt.push(history.h_used);
+                    diag.trace_order.push(history.order);
+                    diag.trace_iters.push(iters);
+                    diag.trace_err.push(err_k);
+                }
+
                 t_local += history.h_used;
                 if let Some(ref mut hist) = history_cache { hist.push((abs_t + t_local, state.y.clone(), state.ydot.clone())); }
             },
@@ -124,6 +136,7 @@ pub fn step(
                         state.ydot[i] = 0.0;
                     }
                     diag.rejected_steps += 1;
+                    diag.realtime_frozen_steps += 1;
                     t_local += history.h;
                     break;
                 }

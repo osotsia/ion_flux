@@ -1,4 +1,5 @@
 use std::time::Instant;
+use crate::ffi::SafeEvaluator;
 use crate::stepper::problem::Problem;
 use crate::stepper::state::{SystemState, StepScratchpad};
 use crate::stepper::history::BdfHistory;
@@ -31,6 +32,7 @@ pub fn solve(
     linear_solver: &mut LinearSolver,
     diag: &mut Diagnostics,
 ) -> NewtonResult {
+    let evaluator = SafeEvaluator::new(prob.fns, prob.n, state.p.len(), prob.n_obs);
     let c_j = history.c_j;
     let mut cj_ratio = if history.c_j_old == 0.0 { 1.0 } else { c_j / history.c_j_old };
     if !prob.config.is_realtime && (cj_ratio < 0.6 || cj_ratio > 1.6666666666666667) { 
@@ -49,7 +51,7 @@ pub fn solve(
         }
 
         let t_res = Instant::now();
-        unsafe { (prob.fns.res_fn)(state.y.as_ptr(), state.ydot.as_ptr(), state.p.as_ptr(), prob.m.as_ptr(), scratch.res.as_mut_ptr()) };
+        evaluator.evaluate_residual(&state.y, &state.ydot, &state.p, &prob.m, &mut scratch.res);
         diag.residual_time_us += t_res.elapsed().as_micros();
         diag.last_res.copy_from_slice(&scratch.res);
 

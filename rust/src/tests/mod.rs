@@ -436,6 +436,7 @@ fn test_protocol_hysteresis() {
         &mut out_traj,
         &mut out_obs,
         None,
+        None,
         false,
         -1,
     );
@@ -504,6 +505,7 @@ fn test_protocol_bisection_trigger_rollback() {
         &mut out_t,
         &mut out_traj,
         &mut out_obs,
+        None,
         None,
         false,
         -1,
@@ -626,6 +628,7 @@ fn test_run_sequence_microstep_tape_capture() {
         },
     ];
 
+    let mut param_events = Vec::new();
     let res = crate::control::sequence::run_sequence(
         &prob,
         &mut instance,
@@ -634,11 +637,15 @@ fn test_run_sequence_microstep_tape_capture() {
         &mut out_traj,
         &mut out_obs,
         Some(&mut history_tape),
+        Some(&mut param_events),
         false,
         -1,
     );
 
     assert!(res.is_ok(), "Protocol sequence with tape capture failed: {:?}", res.err());
+    assert_eq!(param_events.len(), 2, "Expected parameter switchpoint logged for each protocol step");
+    assert_eq!(param_events[0].1[1], 0.1);
+    assert_eq!(param_events[1].1[1], 0.0);
     assert!(!history_tape.is_empty(), "History tape must not be empty");
     assert_eq!(history_tape[0].0, 0.0, "First tape step must be t=0.0");
     assert!((history_tape.last().unwrap().0 - 0.1).abs() < 1e-4, "Final tape step must align with end time");
@@ -651,4 +658,87 @@ fn test_run_sequence_microstep_tape_capture() {
             assert!(val.is_finite(), "Non-finite entry recorded in history tape");
         }
     }
+}
+
+#[test]
+fn test_diagnostics_record_trace_gating() {
+    let (mut prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+    prob.config.record_trace = false;
+    bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, 0.01, None)
+        .expect("Step failed with record_trace=false");
+    assert!(diag.trace_t.is_empty(), "trace_t must remain empty when record_trace=false");
+    assert_eq!(diag.trace_t.capacity(), 0, "trace_t must not allocate when record_trace=false");
+
+    let (mut prob_tr, mut state_tr, mut history_tr, mut scratch_tr, mut lu_tr, mut diag_tr) = create_mock_fixture();
+    prob_tr.config.record_trace = true;
+    bdf::step(&prob_tr, &mut state_tr, &mut history_tr, &mut scratch_tr, &mut lu_tr, &mut diag_tr, 0.01, None)
+        .expect("Step failed with record_trace=true");
+    assert!(!diag_tr.trace_t.is_empty(), "trace_t must populate when record_trace=true");
+    assert_eq!(diag_tr.trace_t.len(), diag_tr.trace_dt.len());
+}
+
+#[test]
+fn test_ic_convergence_flag_on_unsolvable_algebraic_root() {
+    unsafe extern "C" fn paradox_res(
+        _y: *const f64, _ydot: *const f64, _p: *const f64, _m: *const f64, res: *mut f64,
+    ) {
+        *res = 1.0;
+    }
+    unsafe extern "C" fn paradox_jvp(
+        _y: *const f64, _ydot: *const f64, _p: *const f64, _m: *const f64,
+        _cj: f64, _v: *const f64, _dy: *mut f64, _dydot: *mut f64, _rd: *mut f64, out: *mut f64,
+    ) {
+        *out = 0.0;
+    }
+
+    let mut prob = crate::stepper::problem::Problem {
+        n: 1,
+        bw: 0,
+        n_obs: 0,
+        id: vec![0.0],
+        constraints: vec![0.0],
+        m: vec![],
+        spatial_diag: vec![0.0],
+        max_steps: vec![0.0],
+        cpr: crate::stepper::problem::CprData {
+            color_seeds: vec![vec![1.0]],
+            color_ptrs: vec![0, 1],
+            color_rows: vec![0],
+            color_cols: vec![0],
+            dense_rows: vec![],
+        },
+        config: crate::stepper::problem::SolverConfig::default(),
+        fns: crate::ffi::callbacks::Callbacks {
+            res_fn: paradox_res,
+            obs_fn: None,
+            jvp_fn: Some(paradox_jvp),
+            vjp_fn: None,
+            set_threads_fn: None,
+        },
+    };
+    prob.config.record_trace = false;
+    let mut state = crate::stepper::state::SystemState::new(vec![0.0], vec![0.0], vec![]);
+    let mut history = crate::stepper::history::BdfHistory::new(1);
+    let mut scratch = crate::stepper::state::StepScratchpad::new(1);
+    let mut lu = crate::linear::solver::LinearSolver::new(1, 0);
+    let mut diag = crate::diagnostics::Diagnostics::new(1);
+
+    let res = algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut lu, &mut diag);
+    assert!(res.is_ok());
+    assert!(!diag.ic_converged, "ic_converged must be false when residual cannot converge");
+    assert!((diag.ic_final_max_res - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn test_realtime_frozen_step_counter() {
+    let (mut prob, mut state, mut history, mut scratch, mut lu, mut diag) = create_mock_fixture();
+    prob.config = crate::stepper::problem::SolverConfig::realtime();
+    prob.config.max_newton_iters = 1;
+    prob.config.eps_newt = 1e-30;
+    state.y[0] = 1e6;
+
+    let res = bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut lu, &mut diag, 0.01, None);
+    assert!(res.is_ok(), "Realtime step must not return Err on divergence");
+    assert_eq!(diag.realtime_frozen_steps, 1);
+    assert_eq!(diag.rejected_steps, 1);
 }

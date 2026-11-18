@@ -212,3 +212,36 @@ def test_hardware_and_memory_telemetry(capsys):
     assert "ION_FLUX EXECUTION & DIAGNOSTIC SUMMARY" in captured
     assert "Solver Dynamics:" in captured
     assert "Peak Resident Memory:" in captured
+
+
+@REQUIRES_RUNTIME
+def test_phase1_trace_gating_and_health_counters():
+    """
+    Validates Phase 1:
+      - `record_trace=False` omits trace vectors (zero hot-loop trace allocs).
+      - `record_trace=True` exposes `trace_t`, `trace_dt`, `trace_order`, `trace_iters`, `trace_err`.
+      - Honest IC and Jacobian initialization counters are populated.
+      - Removed `debug` flag is absent from Engine.
+    """
+    class SimpleODE(fx.PDE):
+        y = fx.State(domain=None, name="y")
+        def math(self):
+            return {
+                "equations": {self.y: fx.dt(self.y) == -self.y},
+                "boundaries": {},
+                "initial_conditions": {self.y: 1.0}
+            }
+
+    engine = fx.Engine(model=SimpleODE(), target="cpu:serial")
+    assert not hasattr(engine, "debug")
+
+    res_default = engine.solve(t_span=(0, 1.0), show_progress=False)
+    assert "trace_t" not in res_default.diagnostics
+    assert res_default.diagnostics["ic_converged"] is True
+    assert res_default.diagnostics["ic_final_max_res"] < 1e-8
+    assert res_default.diagnostics["realtime_frozen_steps"] == 0
+
+    res_traced = engine.solve(t_span=(0, 1.0), show_progress=False, record_trace=True)
+    assert "trace_t" in res_traced.diagnostics
+    assert len(res_traced.diagnostics["trace_t"]) == res_traced.diagnostics["accepted_steps"]
+    assert len(res_traced.diagnostics["trace_dt"]) == len(res_traced.diagnostics["trace_t"])

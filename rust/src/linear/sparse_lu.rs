@@ -85,6 +85,10 @@ impl NativeSparseLuSolver {
 
         diag.jac_max = j_max;
         diag.jac_min = j_min;
+        if diag.accepted_steps == 0 && diag.init_jac_max == 0.0 {
+            diag.init_jac_max = j_max;
+            diag.init_jac_min = j_min;
+        }
 
         for scale in &mut self.row_scales {
             *scale = if *scale > 0.0 { 1.0 / *scale } else { 1.0 };

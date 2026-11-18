@@ -40,9 +40,22 @@ pub fn diagnostics_to_pydict<'py>(py: Python<'py>, diag: &Diagnostics) -> Bound<
     dict.set_item("linear_solve_time_us", diag.linear_solve_time_us as u64).unwrap();
     dict.set_item("residual_time_us", diag.residual_time_us as u64).unwrap();
     dict.set_item("last_rho", diag.last_rho).unwrap();
+    dict.set_item("ic_converged", diag.ic_converged).unwrap();
+    dict.set_item("ic_final_max_res", diag.ic_final_max_res).unwrap();
+    dict.set_item("ic_iters", diag.ic_iters).unwrap();
+    dict.set_item("realtime_frozen_steps", diag.realtime_frozen_steps).unwrap();
+    dict.set_item("init_jac_max", diag.init_jac_max).unwrap();
+    dict.set_item("init_jac_min", diag.init_jac_min).unwrap();
     dict.set_item("peak_rss_bytes", diag.peak_rss_bytes).unwrap();
     dict.set_item("cpu_cycles", diag.cpu_cycles).unwrap();
     dict.set_item("instructions", diag.instructions).unwrap();
+    if !diag.trace_t.is_empty() {
+        dict.set_item("trace_t", diag.trace_t.clone()).unwrap();
+        dict.set_item("trace_dt", diag.trace_dt.clone()).unwrap();
+        dict.set_item("trace_order", diag.trace_order.clone()).unwrap();
+        dict.set_item("trace_iters", diag.trace_iters.clone()).unwrap();
+        dict.set_item("trace_err", diag.trace_err.clone()).unwrap();
+    }
     dict
 }
 

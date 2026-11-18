@@ -90,10 +90,16 @@ pub struct SundialsHandle {
 #[pymethods]
 impl SundialsHandle {
     #[new]
+    #[pyo3(signature = (
+        lib_path, n, y0, ydot0, id, p, m, n_obs,
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense,
+        rel_tol=None, abs_tol=None
+    ))]
     pub fn new(
         lib_path: String, n: usize, mut y0: Vec<f64>, mut ydot0: Vec<f64>, mut id: Vec<f64>, 
         p: Vec<f64>, m: Vec<f64>, n_obs: usize, 
-        cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>
+        cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
+        rel_tol: Option<f64>, abs_tol: Option<f64>
     ) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).expect("Failed to load JIT shared library.") };
         let res_fn: NativeResFn = unsafe { *lib.get::<NativeResFn>(b"evaluate_residual\0").unwrap() };
@@ -127,7 +133,7 @@ impl SundialsHandle {
         
         unsafe {
             IDAInit(ida_mem, Some(ida_res_callback), 0.0, y_vec, yp_vec);
-            IDASStolerances(ida_mem, 1e-6, 1e-8);
+            IDASStolerances(ida_mem, rel_tol.unwrap_or(1e-6), abs_tol.unwrap_or(1e-8));
             IDASetSuppressAlg(ida_mem, 1);
             IDASetUserData(ida_mem, &*user_data as *const _ as *mut c_void);
             IDASetId(ida_mem, id_vec);
@@ -311,18 +317,18 @@ fn evaluate_sundials_ic(lib_path: &str, n: usize, p_list: &[f64], m_list: &[f64]
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, show_progress=true, v_idx=-1))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, t_eval, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, show_progress=true, v_idx=-1, rel_tol=None, abs_tol=None))]
 pub fn solve_ida_sundials<'py>(
     py: Python<'py>, lib_path: String, y0_py: Vec<f64>, ydot0_py: Vec<f64>, id_py: Vec<f64>, p_list: Vec<f64>, m_list: Vec<f64>, t_eval: Vec<f64>, n_obs: usize, 
     cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
-    show_progress: bool, v_idx: i32
+    show_progress: bool, v_idx: i32, rel_tol: Option<f64>, abs_tol: Option<f64>
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
 
     let n = y0_py.len();
     let (y0_init, ydot0_init) = evaluate_sundials_ic(&lib_path, n, &p_list, &m_list, y0_py, ydot0_py);
     let mut handle = SundialsHandle::new(
         lib_path, n, y0_init, ydot0_init, id_py, p_list, m_list, n_obs, 
-        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, rel_tol, abs_tol
     )?;
     
     let mut out_traj = vec![0.0; t_eval.len() * handle.n];
@@ -366,7 +372,7 @@ pub fn solve_ida_sundials<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, protocol_steps, show_progress=true, v_idx=-1))]
+#[pyo3(signature = (lib_path, y0_py, ydot0_py, id_py, p_list, m_list, n_obs, cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, protocol_steps, show_progress=true, v_idx=-1, rel_tol=None, abs_tol=None))]
 pub fn solve_ida_sequence<'py>(
     py: Python<'py>,
     lib_path: String,
@@ -384,6 +390,8 @@ pub fn solve_ida_sequence<'py>(
     protocol_steps: Vec<RawProtocolStep>,
     show_progress: bool,
     v_idx: i32,
+    rel_tol: Option<f64>,
+    abs_tol: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
     let n = y0_py.len();
     let (y0_init, ydot0_init) = evaluate_sundials_ic(&lib_path, n, &p_list, &m_list, y0_py, ydot0_py);
@@ -401,6 +409,8 @@ pub fn solve_ida_sequence<'py>(
         cpr_rows,
         cpr_cols,
         cpr_dense,
+        rel_tol,
+        abs_tol,
     )?;
 
     let prob = Problem {
@@ -428,7 +438,7 @@ pub fn solve_ida_sequence<'py>(
     let mut out_traj = Vec::new();
     let mut out_obs = Vec::new();
 
-    run_sequence(&prob, &mut handle, &steps, &mut out_t, &mut out_traj, &mut out_obs, None, show_progress, v_idx)
+    run_sequence(&prob, &mut handle, &steps, &mut out_t, &mut out_traj, &mut out_obs, None, None, show_progress, v_idx)
         .map_err(|e| match e {
             SolverError::Crash(r) => pyo3::exceptions::PyRuntimeError::new_err(r.reason),
             SolverError::Message(m) => pyo3::exceptions::PyRuntimeError::new_err(m),

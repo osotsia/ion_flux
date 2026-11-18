@@ -388,3 +388,36 @@ def test_sundials_protocol_bisection_parity():
     assert res_n["Time [s]"].data[-1] == pytest.approx(4.6, abs=1e-3)
     assert res_s["Time [s]"].data[-1] == pytest.approx(4.6, abs=1e-3)
     np.testing.assert_allclose(res_n["V"].data[-1], res_s["V"].data[-1], rtol=1e-4, atol=1e-5)
+
+
+@REQUIRES_RUNTIME
+def test_sequence_tape_tracks_protocol_parameters_and_tolerances():
+    """
+    Validates Phase 1:
+      - Multi-step Sequence with `requires_grad` records accurate per-step `_p_traj`
+        across CC -> Rest transitions.
+      - Tolerance overrides (`rel_tol`, `abs_tol`) execute cleanly on both Native and SUNDIALS.
+    """
+    model = BatteryProtocolPDE()
+    eng_n = fx.Engine(model=model, target="cpu", solver_backend="native")
+    eng_s = fx.Engine(model=model, target="cpu", solver_backend="sundials")
+
+    protocol = Sequence([
+        CC(rate=10.0, time=2.0),
+        Rest(time=2.0),
+    ])
+
+    res_n = eng_n.solve(
+        protocol=protocol, requires_grad=["R"], show_progress=False,
+        rel_tol=1e-8, abs_tol=1e-10
+    )
+    res_s = eng_s.solve(
+        protocol=protocol, show_progress=False,
+        rel_tol=1e-8, abs_tol=1e-10
+    )
+
+    p_traj = res_n.trajectory["_p_traj"]
+    i_target_off = eng_n.layout.get_param_offset("_term_i_target")
+    assert np.any(np.isclose(p_traj[:, i_target_off], 10.0))
+    assert np.any(np.isclose(p_traj[:, i_target_off], 0.0))
+    np.testing.assert_allclose(res_n["V"].data[-1], res_s["V"].data[-1], rtol=1e-5, atol=1e-6)

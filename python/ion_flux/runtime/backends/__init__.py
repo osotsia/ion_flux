@@ -22,7 +22,11 @@ def dispatch_native(
     solver_backend: str,
     requires_grad: Optional[List[str]],
     max_workers: int, spatial_threads: int,
-    show_progress: bool, debug: bool, v_idx: int,
+    show_progress: bool, v_idx: int,
+    record_trace: bool = False,
+    rel_tol: Optional[float] = None,
+    abs_tol: Optional[float] = None,
+    max_newton_iters: Optional[int] = None,
 ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[Dict[str, Any]], Dict[str, Any]]]:
     """Unified dispatch gateway routing execution configurations to the correct solver backend."""
     if not RUST_FFI_AVAILABLE or not manifest.native_lib:
@@ -38,8 +42,10 @@ def dispatch_native(
         "p_batch": [manifest.pack_parameters(p) for p in parameters],
         "m_list": manifest.layout.get_mesh_data(), "t_eval": t_eval, "protocols": protocols,
         "protocol_payloads": _serialize_protocols(manifest, protocols),
-        "record_tape": record_tape, "max_workers": max_workers, "spatial_threads": spatial_threads,
-        "show_progress": show_progress, "debug": debug, "v_idx": v_idx
+        "record_tape": record_tape, "record_trace": record_trace,
+        "rel_tol": rel_tol, "abs_tol": abs_tol, "max_newton_iters": max_newton_iters,
+        "max_workers": max_workers, "spatial_threads": spatial_threads,
+        "show_progress": show_progress, "v_idx": v_idx
     }
 
     backend = SundialsBackend(ctx) if solver_backend == "sundials" else NativeBackend(ctx)
@@ -50,13 +56,14 @@ def dispatch_native(
         raise format_native_crash(e, manifest) from None
 
     dispatched = []
-    for p_dict, p_list, (t_res, y_res, obs_res, micro_t, micro_y, micro_ydot, diag_dict) in zip(parameters, ctx["p_batch"], raw_results):
+    for p_dict, p_list, (t_res, y_res, obs_res, micro_t, micro_y, micro_ydot, micro_p, diag_dict) in zip(parameters, ctx["p_batch"], raw_results):
         trajectory = None
         if record_tape and len(micro_t) > 0:
+            p_traj = micro_p if (micro_p is not None and micro_p.size > 0) else np.tile(p_list, (len(micro_t), 1))
             trajectory = {
                 "Time [s]": t_res, "_y_raw": y_res,
                 "_micro_t": micro_t, "_micro_y": micro_y, "_micro_ydot": micro_ydot,
-                "_p_traj": np.tile(p_list, (len(micro_t), 1)), "requires_grad": requires_grad,
+                "_p_traj": p_traj, "requires_grad": requires_grad,
             }
         dispatched.append((t_res, y_res, obs_res, trajectory, diag_dict))
 

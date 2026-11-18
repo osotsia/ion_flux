@@ -24,12 +24,11 @@ class Engine:
     """
     def __init__(self, model: Optional[PDE] = None, target: str = "cpu:serial", solver_backend: str = "native", 
                  cache: bool = True, mock_execution: bool = False, jacobian_bandwidth: Optional[int] = None, 
-                 debug: bool = False, **kwargs):
+                 **kwargs):
         self.model = model
         self.target = target
         self.solver_backend = solver_backend.lower()
         self.mock_execution = mock_execution
-        self.debug = debug
         
         if model:
             self.manifest = build_manifest(model, target, cache, jacobian_bandwidth, mock_execution)
@@ -57,11 +56,10 @@ class Engine:
 
     # --- Architectural Serialization Boundaries ---
     @classmethod
-    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native", debug: bool = False) -> "Engine":
+    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native") -> "Engine":
         engine = cls.__new__(cls)
         engine.target = target
         engine.solver_backend = solver_backend
-        engine.debug = debug
         engine.mock_execution = False
         
         engine.manifest = ExecutableManifest.load(binary_path)
@@ -77,7 +75,9 @@ class Engine:
     def telemetry(self) -> Optional[TelemetryReport]: 
         return TelemetryReport(self.manifest) if self.manifest else None
 
-    def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None, mode: str = "scientific") -> Session:
+    def start_session(self, parameters: Optional[Dict[str, float]] = None, soc: Optional[float] = None, mode: str = "scientific",
+                      rel_tol: Optional[float] = None, abs_tol: Optional[float] = None,
+                      max_newton_iters: Optional[int] = None, record_trace: bool = False) -> Session:
         """
         Instantiates a persistent native solver session.
 
@@ -89,11 +89,18 @@ class Engine:
             parameters (Dict[str, float], optional): Base parameter initialization for the session.
             soc (float, optional): Initial State of Charge.
             mode (str): Execution profile ("scientific" for adaptive VSVO BDF, "realtime" for deterministic bounds).
+            rel_tol (float, optional): Override relative integration tolerance.
+            abs_tol (float, optional): Override absolute integration tolerance.
+            max_newton_iters (int, optional): Override maximum Newton iterations per step.
+            record_trace (bool): Retain per-step solver trace vectors in scientific mode.
 
         Returns:
             Session: A stateful object holding the active FFI integration pointer.
         """
-        return Session(engine=self, parameters=parameters or {}, soc=soc, debug=self.debug, mode=mode)
+        return Session(
+            engine=self, parameters=parameters or {}, soc=soc, mode=mode,
+            rel_tol=rel_tol, abs_tol=abs_tol, max_newton_iters=max_newton_iters, record_trace=record_trace
+        )
 
     # --- Primary Dispatch Hooks ---
     def evaluate_residual(self, y: List[float], ydot: List[float], parameters: Optional[Dict[str, float]] = None) -> List[float]:
@@ -107,7 +114,9 @@ class Engine:
         return self.manifest.evaluate_jacobian(y, ydot, c_j, parameters).tolist()
 
     def solve(self, t_span: tuple = (0, 1), protocol: Any = None, parameters: Optional[Dict[str, float]] = None, 
-              t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True) -> SimulationResult:
+              t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, threads: int = 1, show_progress: bool = True,
+              rel_tol: Optional[float] = None, abs_tol: Optional[float] = None,
+              max_newton_iters: Optional[int] = None, record_trace: bool = False) -> SimulationResult:
         """
         Executes a single continuous simulation trajectory.
         Canonicalizes inputs and delegates directly to solve_batch.
@@ -121,13 +130,19 @@ class Engine:
             requires_grad=requires_grad,
             max_workers=1,
             threads=threads,
-            show_progress=show_progress
+            show_progress=show_progress,
+            rel_tol=rel_tol,
+            abs_tol=abs_tol,
+            max_newton_iters=max_newton_iters,
+            record_trace=record_trace,
         )
         return results[0]
 
     def solve_batch(self, parameters: List[Dict[str, float]], t_span: tuple = (0, 1), protocols: Any = None, 
                     t_eval: Optional[np.ndarray] = None, requires_grad: Optional[List[str]] = None, 
-                    max_workers: int = 1, threads: int = 1, show_progress: bool = False) -> List[SimulationResult]:
+                    max_workers: int = 1, threads: int = 1, show_progress: bool = False,
+                    rel_tol: Optional[float] = None, abs_tol: Optional[float] = None,
+                    max_newton_iters: Optional[int] = None, record_trace: bool = False) -> List[SimulationResult]:
         """
         Executes an array of independent models across multiple vCPUs concurrently.
         """
@@ -174,7 +189,8 @@ class Engine:
 
         dispatched = dispatch_native(
             self.manifest, y0, ydot0, merged_parameters, t_eval_arr, protocols,
-            self.solver_backend, requires_grad, max_workers, spatial_threads, show_progress, self.debug, v_idx
+            self.solver_backend, requires_grad, max_workers, spatial_threads, show_progress, v_idx,
+            record_trace=record_trace, rel_tol=rel_tol, abs_tol=abs_tol, max_newton_iters=max_newton_iters,
         )
 
         results = []

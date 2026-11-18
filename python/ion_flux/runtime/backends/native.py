@@ -67,5 +67,6 @@ class NativeBackend:
             self.ctx["p_batch"], self.ctx["m_list"], self.ctx["t_eval"].tolist(),
             manifest.jacobian_bandwidth, manifest.spatial_diag, manifest.max_steps, manifest.layout.n_obs,
             *manifest.cpr_cache, self.ctx["protocol_payloads"], self.ctx["record_tape"],
+            self.ctx["record_trace"], self.ctx["rel_tol"], self.ctx["abs_tol"], self.ctx["max_newton_iters"],
             self.ctx["max_workers"], self.ctx["spatial_threads"], self.ctx["show_progress"], self.ctx["v_idx"]
         )

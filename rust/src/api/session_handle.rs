@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use numpy::{PyArray1, PyArray2, PyReadwriteArray1, ToPyArray};
+use crate::ffi::SafeEvaluator;
 use crate::stepper::problem::{Problem, Callbacks, CprData, SolverConfig};
 use crate::stepper::state::{SolverInstance, Checkpoint};
 use crate::api::{NativeSolverCrash, crash_report_to_pydict, diagnostics_to_pydict};
@@ -16,20 +17,23 @@ pub struct SolverHandle {
 impl SolverHandle {
     #[new]
     #[pyo3(signature = (
-        lib_path, n, bw, y0, ydot0, id, constraints, p, m, spatial_diag, max_steps, n_obs, debug, 
-        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, is_realtime=false
+        lib_path, n, bw, y0, ydot0, id, constraints, p, m, spatial_diag, max_steps, n_obs,
+        cpr_seeds, cpr_ptrs, cpr_rows, cpr_cols, cpr_dense, is_realtime=false,
+        rel_tol=None, abs_tol=None, max_newton_iters=None, record_trace=false
     ))]
     pub fn new(
         lib_path: String, n: usize, bw: isize, y0: Vec<f64>, ydot0: Vec<f64>, id: Vec<f64>, 
         constraints: Vec<f64>, p: Vec<f64>, m: Vec<f64>, spatial_diag: Vec<f64>, max_steps: Vec<f64>, 
-        n_obs: usize, debug: bool, 
+        n_obs: usize,
         cpr_seeds: Vec<Vec<f64>>, cpr_ptrs: Vec<usize>, cpr_rows: Vec<usize>, cpr_cols: Vec<usize>, cpr_dense: Vec<usize>,
-        is_realtime: bool
+        is_realtime: bool, rel_tol: Option<f64>, abs_tol: Option<f64>, max_newton_iters: Option<usize>, record_trace: bool
     ) -> PyResult<Self> {
-        let _ = debug;
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
         let fns = Callbacks {
-            res_fn: unsafe { *lib.get(b"evaluate_residual\0").unwrap() },
+            res_fn: unsafe {
+                *lib.get(b"evaluate_residual\0")
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_residual: {e}")))?
+            },
             obs_fn: unsafe { lib.get(b"evaluate_observables\0").map(|s| *s).ok() },
             jvp_fn: unsafe { lib.get(b"evaluate_jvp\0").map(|s| *s).ok() },
             vjp_fn: unsafe { lib.get(b"evaluate_vjp\0").map(|s| *s).ok() },
@@ -37,7 +41,11 @@ impl SolverHandle {
         };
         
         let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
-        let config = if is_realtime { SolverConfig::realtime() } else { SolverConfig::default() };
+        let mut config = if is_realtime { SolverConfig::realtime() } else { SolverConfig::default() };
+        if let Some(rt) = rel_tol { config.rel_tol = rt; }
+        if let Some(at) = abs_tol { config.abs_tol = at; }
+        if let Some(mi) = max_newton_iters { config.max_newton_iters = mi; }
+        config.record_trace = record_trace && !is_realtime;
         let prob = Problem { n, bw, n_obs, id, constraints, m, spatial_diag, max_steps, cpr, config, fns };
 
         let mut instance = SolverInstance::new(n, bw, y0, ydot0, p);
@@ -72,10 +80,14 @@ impl SolverHandle {
             }
         }
         
+        let arr_y = numpy::ndarray::Array2::from_shape_vec((h_len, self.prob.n), micro_y)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let arr_ydot = numpy::ndarray::Array2::from_shape_vec((h_len, self.prob.n), micro_ydot)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok((
             numpy::ndarray::Array1::from_vec(micro_t).to_pyarray(py),
-            numpy::ndarray::Array2::from_shape_vec((h_len, self.prob.n), micro_y).unwrap().to_pyarray(py),
-            numpy::ndarray::Array2::from_shape_vec((h_len, self.prob.n), micro_ydot).unwrap().to_pyarray(py)
+            arr_y.to_pyarray(py),
+            arr_ydot.to_pyarray(py),
         ))
     }
 
@@ -113,9 +125,8 @@ impl SolverHandle {
 
     pub fn get_observables_py<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let mut obs = vec![0.0; self.prob.n_obs];
-        if let Some(obs_fn) = self.prob.fns.obs_fn {
-            unsafe { obs_fn(self.instance.state.y.as_ptr(), self.instance.state.ydot.as_ptr(), self.instance.state.p.as_ptr(), self.prob.m.as_ptr(), obs.as_mut_ptr()); }
-        }
+        let evaluator = SafeEvaluator::new(self.prob.fns, self.prob.n, self.instance.state.p.len(), self.prob.n_obs);
+        evaluator.evaluate_observables(&self.instance.state.y, &self.instance.state.ydot, &self.instance.state.p, &self.prob.m, &mut obs);
         Ok(numpy::ndarray::Array1::from_vec(obs).to_pyarray(py))
     }
 
@@ -129,10 +140,9 @@ impl SolverHandle {
                 slice.len(), self.prob.n_obs
             )));
         }
-        if let Some(obs_fn) = self.prob.fns.obs_fn {
-            unsafe {
-                obs_fn(self.instance.state.y.as_ptr(), self.instance.state.ydot.as_ptr(), self.instance.state.p.as_ptr(), self.prob.m.as_ptr(), slice.as_mut_ptr());
-            }
+        let evaluator = SafeEvaluator::new(self.prob.fns, self.prob.n, self.instance.state.p.len(), self.prob.n_obs);
+        if self.prob.fns.obs_fn.is_some() {
+            evaluator.evaluate_observables(&self.instance.state.y, &self.instance.state.ydot, &self.instance.state.p, &self.prob.m, slice);
         } else {
             slice.fill(0.0);
         }

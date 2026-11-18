@@ -16,12 +16,18 @@ pub fn discrete_adjoint_native<'py>(
     event_trigger_idx: isize
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-    let jvp_fn: NativeJvpFn = unsafe { *lib.get(b"evaluate_jvp\0").unwrap() };
-    let vjp_fn: NativeVjpFn = unsafe { *lib.get(b"evaluate_vjp\0").unwrap() };
+    let jvp_fn: NativeJvpFn = unsafe {
+        *lib.get(b"evaluate_jvp\0")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_jvp: {e}")))?
+    };
+    let vjp_fn: NativeVjpFn = unsafe {
+        *lib.get(b"evaluate_vjp\0")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_vjp: {e}")))?
+    };
 
     let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
-    let id_slice = id_arr.as_slice().expect("id_arr must be contiguous");
-    let m_slice = m_list.as_slice().expect("m_list must be contiguous");
+    let id_slice = id_arr.as_slice().map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("id_arr must be contiguous: {e}")))?;
+    let m_slice = m_list.as_slice().map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("m_list must be contiguous: {e}")))?;
 
     let params = AdjointParams {
         bandwidth,

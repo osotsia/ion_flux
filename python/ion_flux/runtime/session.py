@@ -64,7 +64,9 @@ class Session:
     Stateful execution session for Hardware/Software-in-the-Loop co-simulation.
     Keeps native memory, sparse matrices, and integration history "hot" in hardware.
     """
-    def __init__(self, engine: Any, parameters: Dict[str, float], soc: Optional[float] = None, debug: bool = False, mode: str = "scientific"):
+    def __init__(self, engine: Any, parameters: Dict[str, float], soc: Optional[float] = None, mode: str = "scientific",
+                 rel_tol: Optional[float] = None, abs_tol: Optional[float] = None,
+                 max_newton_iters: Optional[int] = None, record_trace: bool = False):
         self.engine = engine
         self.manifest = engine.manifest
         self.mode = mode
@@ -72,7 +74,6 @@ class Session:
         
         self.parameters = {**{k: v.value for k, v in engine.parameters.items()}, **parameters}
         self.time = 0.0
-        self.debug = debug
         
         y0, ydot0 = self.manifest.evaluate_ic(self.parameters)
         p_list = self.manifest.pack_parameters(self.parameters)
@@ -91,14 +92,15 @@ class Session:
                 self.handle = SundialsHandle(
                     self.manifest.lib_path, self.manifest.layout.n_states,
                     y0, ydot0, self.manifest.id_arr, p_list, m_list, self.manifest.layout.n_obs,
-                    c_seeds, c_ptrs, c_rows, c_cols, c_dense
+                    c_seeds, c_ptrs, c_rows, c_cols, c_dense, rel_tol, abs_tol
                 )
             else:
                 self.handle = SolverHandle(
                     self.manifest.lib_path, self.manifest.layout.n_states, self.manifest.jacobian_bandwidth,
                     y0, ydot0, self.manifest.id_arr, constraints, p_list, m_list, self.manifest.spatial_diag, 
-                    self.manifest.max_steps, self.manifest.layout.n_obs, self.debug,
-                    c_seeds, c_ptrs, c_rows, c_cols, c_dense, is_realtime
+                    self.manifest.max_steps, self.manifest.layout.n_obs,
+                    c_seeds, c_ptrs, c_rows, c_cols, c_dense, is_realtime,
+                    rel_tol, abs_tol, max_newton_iters, record_trace
                 )
                 try:
                     self.handle.calc_algebraic_roots()

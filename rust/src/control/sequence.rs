@@ -44,6 +44,7 @@ pub fn run_sequence<S: TimeStepper>(
     out_traj: &mut Vec<f64>,
     out_obs: &mut Vec<f64>,
     mut history_cache: Option<&mut Vec<(f64, Vec<f64>, Vec<f64>)>>,
+    mut param_events: Option<&mut Vec<(usize, Vec<f64>)>>,
     show_progress: bool,
     v_idx: i32
 ) -> Result<(), SolverError> {
@@ -65,6 +66,11 @@ pub fn run_sequence<S: TimeStepper>(
         }
         
         stepper.calc_algebraic_roots(prob)?;
+
+        if let Some(ref mut pe) = param_events {
+            let start_idx = history_cache.as_ref().map(|h| h.len()).unwrap_or(0);
+            pe.push((start_idx, stepper.p().to_vec()));
+        }
         
         if step_idx == 0 {
             record_point(prob, stepper, out_t, out_traj, out_obs, &mut step_obs);

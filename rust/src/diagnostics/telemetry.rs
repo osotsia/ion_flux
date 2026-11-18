@@ -139,7 +139,14 @@ pub struct Diagnostics {
     pub last_dy: Vec<f64>,
     pub last_weights: Vec<f64>,
     pub last_rho: f64,
-    
+
+    pub ic_converged: bool,
+    pub ic_final_max_res: f64,
+    pub ic_iters: usize,
+    pub realtime_frozen_steps: usize,
+    pub init_jac_max: f64,
+    pub init_jac_min: f64,
+
     pub jac_max: f64,
     pub jac_min: f64,
     pub t0_max_res: f64,
@@ -154,10 +161,12 @@ impl Diagnostics {
             jacobian_evaluations: 0, numeric_factorizations: 0, symbolic_factorizations: 0,
             jacobian_assembly_time_us: 0, linear_solve_time_us: 0, residual_time_us: 0,
             peak_rss_bytes: 0, cpu_cycles: 0, instructions: 0,
-            trace_t: Vec::with_capacity(1000), trace_dt: Vec::with_capacity(1000),
-            trace_order: Vec::with_capacity(1000), trace_iters: Vec::with_capacity(1000),
-            trace_err: Vec::with_capacity(1000),
+            trace_t: Vec::new(), trace_dt: Vec::new(),
+            trace_order: Vec::new(), trace_iters: Vec::new(),
+            trace_err: Vec::new(),
             last_res: vec![0.0; n], last_dy: vec![0.0; n], last_weights: vec![0.0; n], last_rho: 0.0,
+            ic_converged: true, ic_final_max_res: 0.0, ic_iters: 0,
+            realtime_frozen_steps: 0, init_jac_max: 0.0, init_jac_min: 0.0,
             jac_max: 0.0, jac_min: 0.0, t0_max_res: 0.0, t0_max_res_idx: 0,
             recent_newton_norms: std::collections::VecDeque::with_capacity(10),
         }
