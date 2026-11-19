@@ -82,10 +82,10 @@ class Loop(Stmt):
         self.pragma = pragma
 
 class IfElse(Stmt):
-    def __init__(self, cond: Expr, then_body: List[Stmt], else_body: List[Stmt]):
+    def __init__(self, cond: Expr, then_body: List[Stmt], else_body: Optional[List[Stmt]] = None):
         self.cond = cond
         self.then_body = then_body
-        self.else_body = else_body
+        self.else_body = else_body or []
 
 class Comment(Stmt):
     def __init__(self, text: str, is_section: bool = False):
@@ -104,14 +104,20 @@ def format_compute_ir(stmts: List[Stmt], indent: int = 0) -> str:
     def fmt_expr(node: Expr) -> str:
         match node:
             case Literal(val=v):
+                if isinstance(v, float):
+                    return f"{v:.6g}"
                 return str(v)
             case Var(name=n):
                 return n
-            case ArrayAccess(array_name=arr, index=idx, symbol=sym, field=fld):
-                if sym and fld:
-                    return f"{arr}[{sym}.{fld} @ {fmt_expr(idx)}]"
+            case ArrayAccess(array_name=arr, index=idx, symbol=sym, field=fld, base_offset=bo):
                 if sym:
-                    return f"{arr}[{sym} @ {fmt_expr(idx)}]"
+                    tag = f"{sym}.{fld}" if fld else sym
+                    match idx:
+                        case Literal(val=v) if int(float(v)) == bo:
+                            return f"{arr}[{tag}]"
+                        case BinaryOp(op="+", left=Literal(val=v), right=rest) if int(float(v)) == bo:
+                            return f"{arr}[{tag} + {fmt_expr(rest)}]"
+                    return f"{arr}[{tag} @ {fmt_expr(idx)}]"
                 return f"{arr}[{fmt_expr(idx)}]"
             case BinaryOp(op=op, left=l, right=r):
                 return f"({fmt_expr(l)} {op} {fmt_expr(r)})"
@@ -142,15 +148,15 @@ def format_compute_ir(stmts: List[Stmt], indent: int = 0) -> str:
                 lines.append(f"{pad}{vt} {n} = {fmt_expr(init)};")
             case Assign(lhs=lhs, rhs=rhs):
                 lines.append(f"{pad}{fmt_expr(lhs)} = {fmt_expr(rhs)};")
+            case Loop(var=v, start=s, end=e, body=body, pragma=p):
+                if p:
+                    lines.append(f"{pad}{p}")
+                lines.append(f"{pad}for {v} in [{fmt_expr(s)} .. {fmt_expr(e)}):")
+                lines.append(format_compute_ir(body, indent + 1))
             case IfElse(cond=c, then_body=tb, else_body=eb):
                 lines.append(f"{pad}if ({fmt_expr(c)}):")
                 lines.append(format_compute_ir(tb, indent + 1))
                 if eb:
                     lines.append(f"{pad}else:")
                     lines.append(format_compute_ir(eb, indent + 1))
-            case Loop(var=v, start=s, end=e, body=body, pragma=p):
-                if p:
-                    lines.append(f"{pad}{p}")
-                lines.append(f"{pad}for {v} in [{fmt_expr(s)} .. {fmt_expr(e)}):")
-                lines.append(format_compute_ir(body, indent + 1))
     return "\n".join(lines)

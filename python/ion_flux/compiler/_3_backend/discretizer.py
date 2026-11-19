@@ -23,7 +23,7 @@ from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._3_backend.compute_ir import (
     Expr, Stmt, Literal, Var, ArrayAccess, BinaryOp, FuncCall, Ternary,
-    UnaryMinus, VarDecl, Loop, Assign, IfElse, Comment, UnstructuredRead, Reduction
+    UnaryMinus, VarDecl, Loop, IfElse, Assign, Comment, UnstructuredRead, Reduction
 )
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
@@ -45,6 +45,81 @@ def resolve_axis(topo: TopologyAnalyzer, axis_name: Optional[str]) -> Optional[s
     if axes:
         return topo.get_base_axis(axes[-1])
     return topo.get_base_axis(axis_name)
+
+
+def _simplify_idx_expr(expr: Expr) -> Expr:
+    """Fold affine integer offsets: (x + c1) - c2 -> x + (c1 - c2)."""
+    match expr:
+        case BinaryOp(op="+" | "-" as op, left=l, right=r):
+            sl = _simplify_idx_expr(l)
+            sr = _simplify_idx_expr(r)
+            if isinstance(sl, Literal) and isinstance(sr, Literal):
+                try:
+                    lv, rv = int(float(sl.val)), int(float(sr.val))
+                    return Literal(lv + rv if op == "+" else lv - rv)
+                except (TypeError, ValueError):
+                    return BinaryOp(op, sl, sr)
+            if isinstance(sr, Literal):
+                try:
+                    rv = int(float(sr.val))
+                except (TypeError, ValueError):
+                    return BinaryOp(op, sl, sr)
+                if rv == 0:
+                    return sl
+                if op == "-" and rv < 0:
+                    return _simplify_idx_expr(BinaryOp("+", sl, Literal(-rv)))
+                if isinstance(sl, BinaryOp) and sl.op in ("+", "-") and isinstance(sl.right, Literal):
+                    try:
+                        c1 = int(float(sl.right.val)) * (1 if sl.op == "+" else -1)
+                        c2 = rv * (1 if op == "+" else -1)
+                        total = c1 + c2
+                        if total == 0:
+                            return sl.left
+                        if total > 0:
+                            return BinaryOp("+", sl.left, Literal(total))
+                        return BinaryOp("-", sl.left, Literal(-total))
+                    except (TypeError, ValueError):
+                        pass
+            return BinaryOp(op, sl, sr)
+        case _:
+            return expr
+
+
+def _eval_idx_bounds(expr: Expr, var_bounds: Optional[Dict[str, Tuple[int, int]]]) -> Optional[Tuple[int, int]]:
+    """Computes conservative inclusive [min, max] integer bounds for an index expression."""
+    match expr:
+        case Literal(val=v):
+            try:
+                iv = int(float(v))
+                return (iv, iv)
+            except (TypeError, ValueError):
+                return None
+        case Var(name=n):
+            return var_bounds.get(n) if var_bounds else None
+        case BinaryOp(op="+", left=l, right=r):
+            bl = _eval_idx_bounds(l, var_bounds)
+            br = _eval_idx_bounds(r, var_bounds)
+            return (bl[0] + br[0], bl[1] + br[1]) if (bl and br) else None
+        case BinaryOp(op="-", left=l, right=r):
+            bl = _eval_idx_bounds(l, var_bounds)
+            br = _eval_idx_bounds(r, var_bounds)
+            return (bl[0] - br[1], bl[1] - br[0]) if (bl and br) else None
+        case BinaryOp(op="*", left=l, right=r):
+            bl = _eval_idx_bounds(l, var_bounds)
+            br = _eval_idx_bounds(r, var_bounds)
+            if bl and br and bl[0] >= 0 and br[0] >= 0:
+                return (bl[0] * br[0], bl[1] * br[1])
+            return None
+        case _:
+            return None
+
+
+def _clamp_or_direct(idx_expr: Expr, bound: int, var_bounds: Optional[Dict[str, Tuple[int, int]]]) -> Expr:
+    clean = _simplify_idx_expr(idx_expr)
+    b = _eval_idx_bounds(clean, var_bounds)
+    if b is not None and 0 <= b[0] and b[1] < bound:
+        return clean
+    return FuncCall("CLAMP", [clean, Literal(bound)])
 
 
 def extract_domain_name(expr: MathExpr) -> Optional[str]:
@@ -75,6 +150,7 @@ class IndexManager:
     def __init__(self, topo: TopologyAnalyzer):
         self.topo = topo
         self.active_indices: Dict[str, Expr] = {}
+        self.var_bounds: Dict[str, Tuple[int, int]] = {}
 
     def register(self, axis: str, expr: Expr) -> None:
         """Binds a spatial coordinate axis to an active index expression."""
@@ -114,8 +190,12 @@ class IndexManager:
             else:
                 local_idx = BinaryOp("-", abs_idx, Literal(start_idx))
 
+            local_idx = _simplify_idx_expr(local_idx)
+            bounds = _eval_idx_bounds(local_idx, self.var_bounds)
             if isinstance(local_idx, Literal):
                 clamped_idx = Literal(max(0, min(int(local_idx.val), res - 1)))
+            elif bounds is not None and 0 <= bounds[0] and bounds[1] < res:
+                clamped_idx = local_idx
             elif isinstance(local_idx, Var) and local_idx.name == f"idx_{axis}":
                 clamped_idx = local_idx
             else:
@@ -133,12 +213,13 @@ class IndexManager:
         flat_expr = terms[0]
         for term in terms[1:]:
             flat_expr = BinaryOp("+", flat_expr, term)
-        return flat_expr
+        return _simplify_idx_expr(flat_expr)
 
     def clone(self) -> "IndexManager":
         """Creates an independent copy of active index bindings."""
         cloned = IndexManager(self.topo)
         cloned.active_indices = self.active_indices.copy()
+        cloned.var_bounds = self.var_bounds.copy()
         return cloned
 
 
@@ -160,19 +241,19 @@ class MeshMetrics:
         """Returns the physical length variable for an axis (or default 1.0)."""
         return Var(f"L_phys_{base_axis}") if base_axis else Var("L_phys_default")
 
-    def face_dx(self, base_axis: str, face_idx: Expr, resolution: int) -> Expr:
+    def face_dx(self, base_axis: str, face_idx: Expr, resolution: int, var_bounds: Optional[Dict[str, Tuple[int, int]]] = None) -> Expr:
         """Returns the distance between cell centers across a given face."""
         off_w_dx = self.layout.mesh_offsets[base_axis]["w_dx_faces"]
-        clamped_face = FuncCall("CLAMP", [face_idx, Literal(max(resolution - 1, 1))])
+        clamped_face = _clamp_or_direct(face_idx, max(resolution - 1, 1), var_bounds)
         w_dx = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_face), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
         l_phys = self.domain_length(base_axis)
         return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", l_phys, w_dx)])
 
-    def node_span_dx(self, base_axis: str, node_idx: Expr, resolution: int) -> Expr:
+    def node_span_dx(self, base_axis: str, node_idx: Expr, resolution: int, var_bounds: Optional[Dict[str, Tuple[int, int]]] = None) -> Expr:
         """Returns the total distance spanning across the cell (dx_left + dx_right)."""
         off_w_dx = self.layout.mesh_offsets[base_axis]["w_dx_faces"]
-        clamped_r = FuncCall("CLAMP", [node_idx, Literal(max(resolution - 1, 1))])
-        clamped_l = FuncCall("CLAMP", [BinaryOp("-", node_idx, Literal(1)), Literal(max(resolution - 1, 1))])
+        clamped_r = _clamp_or_direct(node_idx, max(resolution - 1, 1), var_bounds)
+        clamped_l = _clamp_or_direct(BinaryOp("-", node_idx, Literal(1)), max(resolution - 1, 1), var_bounds)
         w_dx_r = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_r), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
         w_dx_l = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_l), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
         l_phys = self.domain_length(base_axis)
@@ -181,7 +262,7 @@ class MeshMetrics:
     def face_area(self, base_axis: str, face_idx: Expr) -> Expr:
         """Returns the interfacial face area A_face at face_idx."""
         off_area = self.layout.mesh_offsets[base_axis]["w_A_faces"]
-        return ArrayAccess("m", BinaryOp("+", Literal(off_area), face_idx), symbol=base_axis, field="w_A_faces", base_offset=off_area)
+        return ArrayAccess("m", BinaryOp("+", Literal(off_area), _simplify_idx_expr(face_idx)), symbol=base_axis, field="w_A_faces", base_offset=off_area)
 
     def scaled_cell_volume(self, base_axis: str, node_idx: Expr) -> Expr:
         """Returns the control volume V_cell scaled by physical domain length."""
@@ -254,7 +335,7 @@ class StateSampler:
         # Check for explicit Dirichlet boundary overrides applied at this face
         dirichlet_bcs = self.dirichlet_bcs.get(node.name)
         if dirichlet_bcs:
-            local_idx = BinaryOp("-", idx_mgr.get_local(base_axis), Literal(start))
+            local_idx = _simplify_idx_expr(BinaryOp("-", idx_mgr.get_local(base_axis), Literal(start)))
             if face == "left" and "left" in dirichlet_bcs:
                 is_edge = BinaryOp("==", local_idx, Literal(0))
                 boundary_ir = lower_expr_fn(dirichlet_bcs["left"], idx_mgr, current_axis)
@@ -335,13 +416,15 @@ class SpatialStencils:
         stitcher: PiecewiseFluxStitcher,
         topo: TopologyAnalyzer,
         layout: Any,
-        neumann_bcs: Optional[Dict[str, Dict[str, MathNeumannBC]]] = None
+        neumann_bcs: Optional[Dict[str, Dict[str, MathNeumannBC]]] = None,
+        discretizer: Optional[Any] = None,
     ):
         self.metrics = metrics
         self.stitcher = stitcher
         self.topo = topo
         self.layout = layout
         self.neumann_bcs = neumann_bcs or {}
+        self.discretizer = discretizer
 
     def gradient(
         self,
@@ -376,7 +459,7 @@ class SpatialStencils:
             c_current = lower_expr_fn(child, idx_mgr, axis_name, face=None, current_eq=current_eq)
 
             face_idx = idx_expr if face == "right" else BinaryOp("-", idx_expr, Literal(1))
-            dist_safe = self.metrics.face_dx(base_axis, face_idx, res)
+            dist_safe = self.metrics.face_dx(base_axis, face_idx, res, var_bounds=idx_mgr.var_bounds)
 
             if face == "right":
                 return BinaryOp("/", BinaryOp("-", c_shifted, c_current), dist_safe)
@@ -390,7 +473,7 @@ class SpatialStencils:
 
         val_right = lower_expr_fn(child, idx_right, axis_name, face=None, current_eq=current_eq)
         val_left = lower_expr_fn(child, idx_left, axis_name, face=None, current_eq=current_eq)
-        dist_safe = self.metrics.node_span_dx(base_axis, idx_expr, res)
+        dist_safe = self.metrics.node_span_dx(base_axis, idx_expr, res, var_bounds=idx_mgr.var_bounds)
 
         return BinaryOp("/", BinaryOp("-", val_right, val_left), dist_safe)
 
@@ -411,6 +494,11 @@ class SpatialStencils:
 
         if coord_sys == "unstructured":
             return self._unstructured_divergence(child, axis_name, idx_mgr, current_eq, lower_expr_fn)
+
+        if self.discretizer is not None and self.discretizer._stmt_sink is not None:
+            return self.discretizer._emit_divergence_stmts(
+                child, axis_name, base_axis, idx_mgr, current_eq
+            )
 
         right_flux = lower_expr_fn(child, idx_mgr, axis_name, face="right", current_eq=current_eq)
         left_flux = lower_expr_fn(child, idx_mgr, axis_name, face="left", current_eq=current_eq)
@@ -539,10 +627,11 @@ class AleKinematics:
 class IntegralQuadrature:
     """Lowers multidimensional integral reductions into discrete control-volume summations."""
 
-    def __init__(self, metrics: MeshMetrics, topo: TopologyAnalyzer, layout: Any):
+    def __init__(self, metrics: MeshMetrics, topo: TopologyAnalyzer, layout: Any, discretizer: Optional[Any] = None):
         self.metrics = metrics
         self.topo = topo
         self.layout = layout
+        self.discretizer = discretizer
         self._reduction_counter = 0
 
     def lower_integral(
@@ -568,10 +657,18 @@ class IntegralQuadrature:
             iter_var = f"i_{integral_id}_{axis}"
 
             loops.append((iter_var, Literal(res)))
+            reduction_idx_mgr.var_bounds[iter_var] = (0, max(res - 1, 0))
             reduction_idx_mgr.register(base_axis, BinaryOp("+", Var(iter_var), Literal(start_idx)))
             volume_exprs.append(self._get_volume_weight(axis, base_axis, iter_var, start_idx))
 
-        child_ir = lower_expr_fn(child, reduction_idx_mgr, current_axis=axes[-1] if axes else None)
+        saved_sink = self.discretizer._stmt_sink if self.discretizer is not None else None
+        if self.discretizer is not None:
+            self.discretizer._stmt_sink = None
+        try:
+            child_ir = lower_expr_fn(child, reduction_idx_mgr, current_axis=axes[-1] if axes else None)
+        finally:
+            if self.discretizer is not None:
+                self.discretizer._stmt_sink = saved_sink
         return Reduction(loops, child_ir, volume_exprs)
 
     def _get_volume_weight(self, axis: str, base_axis: str, iter_var: str, start_idx: int) -> Expr:
@@ -632,6 +729,7 @@ class FVMDiscretizer:
         self.audit_compiler = False
         self._clamp_watchpoints: Dict[tuple, Dict[str, Any]] = {}
         self._cse_counter = 0
+        self._stmt_sink: Optional[List[Stmt]] = None
 
         self.neumann_bcs = math_sys.neumann_bcs if math_sys else {}
         self.dirichlet_bcs = math_sys.dirichlet_bcs if math_sys else {}
@@ -641,9 +739,9 @@ class FVMDiscretizer:
         self.metrics = MeshMetrics(layout, topo)
         self.sampler = StateSampler(layout, topo, self.dirichlet_bcs)
         self.stitcher = PiecewiseFluxStitcher(topo)
-        self.stencils = SpatialStencils(self.metrics, self.stitcher, topo, layout, self.neumann_bcs)
+        self.stencils = SpatialStencils(self.metrics, self.stitcher, topo, layout, self.neumann_bcs, discretizer=self)
         self.ale = AleKinematics(self.dynamic_domain_bindings, self.state_map, layout)
-        self.quadrature = IntegralQuadrature(self.metrics, topo, layout)
+        self.quadrature = IntegralQuadrature(self.metrics, topo, layout, discretizer=self)
 
     def _bind_math_system(self, math_sys: MathSystem) -> None:
         self.neumann_bcs = math_sys.neumann_bcs
@@ -788,20 +886,28 @@ class FVMDiscretizer:
             "region_name": eq.current_region.domain_name if (eq.is_piecewise and eq.current_region) else None,
         }
 
-        lhs_expr = self.lower_expr(eq.lhs, idx_mgr, current_axis=base_axis, current_eq=eq)
-        rhs_expr = self.lower_expr(eq.rhs, idx_mgr, current_axis=base_axis, current_eq=eq)
+        sink: List[Stmt] = []
+        self._stmt_sink = sink
+        try:
+            lhs_expr = self.lower_expr(eq.lhs, idx_mgr, current_axis=base_axis, current_eq=eq)
+            rhs_expr = self.lower_expr(eq.rhs, idx_mgr, current_axis=base_axis, current_eq=eq)
 
-        # Inject ALE grid velocity dilution terms if domain boundary is dynamic
-        for ale_term in self.ale.generate_dilution_terms(
-            eq.state_name, idx_mgr, base_axis, self.lower_expr
-        ):
-            rhs_expr = BinaryOp("+", rhs_expr, ale_term)
+            # Inject ALE grid velocity dilution terms if domain boundary is dynamic
+            for ale_term in self.ale.generate_dilution_terms(
+                eq.state_name, idx_mgr, base_axis, self.lower_expr
+            ):
+                rhs_expr = BinaryOp("+", rhs_expr, ale_term)
+        finally:
+            self._stmt_sink = None
+            self._active_eq_ctx = None
 
-        self._active_eq_ctx = None
-
-        # Implicit residual convention: res = lhs - rhs
-        assignment = Assign(res_access, BinaryOp("-", lhs_expr, rhs_expr))
-        body = self._hoist_cse_and_reductions(assignment)
+        # Implicit residual convention: res = lhs - rhs (drop redundant - 0.0)
+        if isinstance(rhs_expr, Literal) and float(rhs_expr.val) == 0.0:
+            res_expr = lhs_expr
+        else:
+            res_expr = BinaryOp("-", lhs_expr, rhs_expr)
+        assignment = Assign(res_access, res_expr)
+        body = sink + self._hoist_cse_and_reductions(assignment)
         reg_tag = f", region={eq.current_region.domain_name}" if (eq.is_piecewise and eq.current_region) else ""
         header = Comment(f"Eq: {eq.state_name} (domain={eq.target_domain or '0D'}{reg_tag})", is_section=True)
         return [header] + self._wrap_in_loop_nest(body, axes, bounds_override)
@@ -875,19 +981,149 @@ class FVMDiscretizer:
         if face and getattr(node, "bc_id", None):
             bc_info = self.neumann_bcs.get(node.bc_id, {}).get(face)
             if bc_info is not None:
-                bc_ir = self.lower_expr(bc_info.expr, idx_mgr, current_axis, face=None, current_eq=current_eq)
-
                 axis = resolve_axis(self.topo, bc_info.domain) or current_axis
                 res = self.topo.domains.get(axis, {}).get("resolution", 1)
                 start = self.topo.domains.get(axis, {}).get("start_idx", 0)
                 base_axis = self.topo.get_base_axis(axis)
 
                 edge_idx = start if face == "left" else start + res - 1
-                is_edge = BinaryOp("==", idx_mgr.get_local(base_axis), Literal(edge_idx))
-
-                return Ternary(is_edge, bc_ir, self._dispatch(node, idx_mgr, current_axis, face, current_eq))
+                cond = self._simplify_eq_cond(idx_mgr.get_local(base_axis), edge_idx, idx_mgr.var_bounds)
+                if cond is False:
+                    return self._dispatch(node, idx_mgr, current_axis, face, current_eq)
+                bc_ir = self.lower_expr(bc_info.expr, idx_mgr, current_axis, face=None, current_eq=current_eq)
+                if cond is True:
+                    return bc_ir
+                return Ternary(cond, bc_ir, self._dispatch(node, idx_mgr, current_axis, face, current_eq))
 
         return self._dispatch(node, idx_mgr, current_axis, face, current_eq)
+
+    def _simplify_eq_cond(
+        self,
+        idx_expr: Expr,
+        target_val: int,
+        var_bounds: Optional[Dict[str, Tuple[int, int]]],
+    ) -> Any:
+        idx_s = _simplify_idx_expr(idx_expr)
+        b = _eval_idx_bounds(idx_s, var_bounds)
+        if b is not None:
+            if target_val < b[0] or target_val > b[1]:
+                return False
+            if b[0] == b[1] == target_val:
+                return True
+        return BinaryOp("==", idx_s, Literal(target_val))
+
+    def _emit_face_flux(
+        self,
+        child: MathExpr,
+        axis_name: str,
+        idx_mgr: IndexManager,
+        face: str,
+        current_eq: Optional[MathEquation],
+        flux_var: str,
+    ) -> List[Stmt]:
+        saved_sink = self._stmt_sink
+        self._stmt_sink = None
+        try:
+            bc_info = (
+                self.neumann_bcs.get(child.bc_id, {}).get(face)
+                if getattr(child, "bc_id", None) else None
+            )
+
+            neighbor = None
+            if current_eq and current_eq.is_piecewise and current_eq.current_region:
+                cr = current_eq.current_region
+                for nb in (current_eq.regions or []):
+                    if face == "right" and nb.start_idx == cr.end_idx and nb.div_flux:
+                        neighbor = nb
+                        break
+                    if face == "left" and nb.end_idx == cr.start_idx and nb.div_flux:
+                        neighbor = nb
+                        break
+
+            def cse_assign_stmts(target_var: str, expr: Expr) -> List[Stmt]:
+                return self._hoist_cse_and_reductions(Assign(Var(target_var), expr))
+
+            def cse_var_stmts(target_var: str, expr: Expr) -> List[Stmt]:
+                stmts = self._hoist_cse_and_reductions(Assign(Var(target_var), expr))
+                last = stmts[-1]
+                if isinstance(last, Assign):
+                    stmts[-1] = VarDecl("const double", target_var, last.rhs)
+                return stmts
+
+            if bc_info is not None:
+                bc_axis = resolve_axis(self.topo, bc_info.domain) or axis_name
+                res = self.topo.domains.get(bc_axis, {}).get("resolution", 1)
+                start = self.topo.domains.get(bc_axis, {}).get("start_idx", 0)
+                base_ax = self.topo.get_base_axis(bc_axis)
+                edge_idx = start if face == "left" else start + res - 1
+                cond = self._simplify_eq_cond(idx_mgr.get_local(base_ax), edge_idx, idx_mgr.var_bounds)
+                if cond is True:
+                    bc_ir = self.lower_expr(bc_info.expr, idx_mgr, axis_name, face=None, current_eq=current_eq)
+                    return cse_var_stmts(flux_var, bc_ir)
+                if cond is not False:
+                    bc_ir = self.lower_expr(bc_info.expr, idx_mgr, axis_name, face=None, current_eq=current_eq)
+                    bulk_ir = self._dispatch(child, idx_mgr, axis_name, face, current_eq)
+                    return [
+                        VarDecl("double", flux_var, Literal(0.0)),
+                        IfElse(cond, cse_assign_stmts(flux_var, bc_ir), cse_assign_stmts(flux_var, bulk_ir)),
+                    ]
+
+            if neighbor is not None:
+                cr = current_eq.current_region
+                base_ax = self.topo.get_base_axis(axis_name)
+                bnd_idx = (cr.end_idx - 1) if face == "right" else cr.start_idx
+                bnd_cond = self._simplify_eq_cond(idx_mgr.get_local(base_ax), bnd_idx, idx_mgr.var_bounds)
+                this_flux = self._dispatch(child, idx_mgr, axis_name, face, current_eq)
+                if bnd_cond is False:
+                    return cse_var_stmts(flux_var, this_flux)
+
+                nb_flux = self.lower_expr(neighbor.div_flux, idx_mgr, axis_name, face=face, current_eq=current_eq)
+                fa_var = f"_fa_{self._cse_counter}"
+                fb_var = f"_fb_{self._cse_counter}"
+                self._cse_counter += 1
+                then_stmts = (
+                    cse_var_stmts(fa_var, this_flux)
+                    + cse_var_stmts(fb_var, nb_flux)
+                    + [Assign(Var(flux_var), self.stitcher.harmonic_mean(Var(fa_var), Var(fb_var)))]
+                )
+                if bnd_cond is True:
+                    return [VarDecl("double", flux_var, Literal(0.0))] + then_stmts
+                return [
+                    VarDecl("double", flux_var, Literal(0.0)),
+                    IfElse(bnd_cond, then_stmts, cse_assign_stmts(flux_var, this_flux)),
+                ]
+
+            bulk_ir = self._dispatch(child, idx_mgr, axis_name, face, current_eq)
+            return cse_var_stmts(flux_var, bulk_ir)
+        finally:
+            self._stmt_sink = saved_sink
+
+    def _emit_divergence_stmts(
+        self,
+        child: MathExpr,
+        axis_name: Optional[str],
+        base_axis: Optional[str],
+        idx_mgr: IndexManager,
+        current_eq: Optional[MathEquation],
+    ) -> Expr:
+        div_id = self._cse_counter
+        self._cse_counter += 1
+        r_var = f"_flux_r_{div_id}"
+        l_var = f"_flux_l_{div_id}"
+        d_var = f"_div_{div_id}"
+
+        stmts_r = self._emit_face_flux(child, axis_name or "", idx_mgr, "right", current_eq, r_var)
+        stmts_l = self._emit_face_flux(child, axis_name or "", idx_mgr, "left", current_eq, l_var)
+        self._stmt_sink.extend(stmts_r)
+        self._stmt_sink.extend(stmts_l)
+
+        idx_expr = idx_mgr.get_local(base_axis)
+        area_left = self.metrics.face_area(base_axis, idx_expr)
+        area_right = self.metrics.face_area(base_axis, BinaryOp("+", idx_expr, Literal(1)))
+        vol_safe = self.metrics.scaled_cell_volume(base_axis, idx_expr)
+        net_flux = BinaryOp("-", BinaryOp("*", area_right, Var(r_var)), BinaryOp("*", area_left, Var(l_var)))
+        self._stmt_sink.append(VarDecl("const double", d_var, BinaryOp("/", net_flux, vol_safe)))
+        return Var(d_var)
 
     def _dispatch(
         self,
@@ -1052,8 +1288,9 @@ class FVMDiscretizer:
             base_axis = self.topo.get_base_axis(axis)
             start_idx = self.topo.domains.get(axis, {}).get("start_idx", 0)
             res = self.topo.domains.get(axis, {}).get("resolution", 1)
-            loop_start, _ = bounds_override.get(base_axis, (start_idx, res))
+            loop_start, loop_res = bounds_override.get(base_axis, (start_idx, res))
             loop_var = f"idx_{axis}"
+            idx_mgr.var_bounds[loop_var] = (0, max(loop_res - 1, 0))
             idx_expr = Var(loop_var) if loop_start == 0 else BinaryOp("+", Var(loop_var), Literal(loop_start))
             idx_mgr.register(base_axis, idx_expr)
         return idx_mgr
@@ -1083,24 +1320,7 @@ class FVMDiscretizer:
         """
         hoisted: List[Stmt] = []
 
-        def expr_weight(node: Expr) -> int:
-            match node:
-                case Literal() | Var():
-                    return 1
-                case ArrayAccess(index=idx):
-                    return 1 + expr_weight(idx)
-                case UnaryMinus(expr=e):
-                    return 1 + expr_weight(e)
-                case BinaryOp(left=l, right=r):
-                    return 1 + expr_weight(l) + expr_weight(r)
-                case FuncCall(args=args):
-                    return 1 + sum(expr_weight(a) for a in args)
-                case Ternary(cond=c, true_val=tv, false_val=fv):
-                    return 1 + expr_weight(c) + expr_weight(tv) + expr_weight(fv)
-                case _:
-                    return 10
-
-        def hoist_loops_and_branches(node: Expr) -> Expr:
+        def hoist_loops(node: Expr) -> Expr:
             match node:
                 case Reduction(loops=loops, child_expr=child_expr, vol_exprs=vol_exprs):
                     pre_stmts, clean_child = self._cse_expr(child_expr)
@@ -1115,25 +1335,17 @@ class FVMDiscretizer:
                     hoisted.append(VarDecl("const double", name, node))
                     return Var(name)
                 case Ternary(cond=c, true_val=tv, false_val=fv):
-                    if max(expr_weight(tv), expr_weight(fv)) > 25:
-                        br_name = f"_br_{self._cse_counter}"
-                        self._cse_counter += 1
-                        hoisted.append(VarDecl("double", br_name, Literal(0.0)))
-                        tb_stmts = self._hoist_cse_and_reductions(Assign(Var(br_name), tv))
-                        eb_stmts = self._hoist_cse_and_reductions(Assign(Var(br_name), fv))
-                        hoisted.append(IfElse(hoist_loops_and_branches(c), tb_stmts, eb_stmts))
-                        return Var(br_name)
-                    return Ternary(hoist_loops_and_branches(c), tv, fv)
+                    return Ternary(hoist_loops(c), tv, fv)
                 case BinaryOp(op=op, left=l, right=r):
-                    return BinaryOp(op, hoist_loops_and_branches(l), hoist_loops_and_branches(r))
+                    return BinaryOp(op, hoist_loops(l), hoist_loops(r))
                 case UnaryMinus(expr=e):
-                    return UnaryMinus(hoist_loops_and_branches(e))
+                    return UnaryMinus(hoist_loops(e))
                 case FuncCall(func=f, args=args):
-                    return FuncCall(f, [hoist_loops_and_branches(a) for a in args])
+                    return FuncCall(f, [hoist_loops(a) for a in args])
                 case _:
                     return node
 
-        rhs_no_lambdas = hoist_loops_and_branches(assign.rhs)
+        rhs_no_lambdas = hoist_loops(assign.rhs)
         cse_stmts, final_rhs = self._cse_expr(rhs_no_lambdas)
         return hoisted + cse_stmts + [Assign(assign.lhs, final_rhs)]
 

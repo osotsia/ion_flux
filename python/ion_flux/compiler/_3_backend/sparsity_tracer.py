@@ -8,7 +8,7 @@ Uses structural pattern matching over Compute IR nodes.
 
 from typing import Dict, Any, List, Set, Tuple, Optional
 from ion_flux.compiler._3_backend.compute_ir import (
-    Loop, Assign, IfElse, ArrayAccess, BinaryOp, Ternary, FuncCall,
+    Loop, IfElse, Assign, ArrayAccess, BinaryOp, Ternary, FuncCall,
     Literal, Var, VarDecl, UnaryMinus, UnstructuredRead, Reduction
 )
 
@@ -51,15 +51,15 @@ class IndexEvaluator:
                         case False:
                             self.evaluate(eb, env)
                         case None:
-                            before = {k: list(v) for k, v in self.var_deps.items()}
+                            saved = {k: list(v) for k, v in self.var_deps.items()}
                             self.evaluate(tb, env)
-                            after_tb = {k: list(v) for k, v in self.var_deps.items()}
-                            self.var_deps = before
+                            then_deps = {k: list(v) for k, v in self.var_deps.items()}
+                            self.var_deps = saved
                             self.evaluate(eb, env)
-                            for k, v in after_tb.items():
-                                if k in self.var_deps:
-                                    self.var_deps[k] = list(set(v) | set(self.var_deps[k]))
-                                else:
+                            for k, v in then_deps.items():
+                                if k in self.var_deps and self.var_deps[k] != v:
+                                    self.var_deps[k] = list(dict.fromkeys(self.var_deps[k] + v))
+                                elif k not in self.var_deps:
                                     self.var_deps[k] = v
 
                 case Assign(lhs=ArrayAccess(array_name="res", index=idx), rhs=rhs):

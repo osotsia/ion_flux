@@ -10,7 +10,10 @@ from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._2_middle_end.topology import TopologyAnalyzer
 from ion_flux.compiler._3_backend.math_ir import MathSystem
 from ion_flux.compiler._3_backend.discretizer import FVMDiscretizer
-from ion_flux.compiler._3_backend.compute_ir import Stmt, format_compute_ir
+from ion_flux.compiler._3_backend.compute_ir import (
+    Stmt, Expr, Var, ArrayAccess, BinaryOp, UnaryMinus, FuncCall,
+    Ternary, VarDecl, Assign, Loop, IfElse, UnstructuredRead, Reduction, format_compute_ir
+)
 from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
 from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
 
@@ -44,6 +47,48 @@ def _build_offset_aliases(layout: Any) -> Tuple[Dict[Tuple[str, str, str], str],
     return alias_map, decls
 
 
+def _collect_used_vars(stmts: List[Stmt]) -> set:
+    used: set = set()
+
+    def walk_expr(e: Expr) -> None:
+        match e:
+            case Var(name=n):
+                used.add(n)
+            case ArrayAccess(index=idx):
+                walk_expr(idx)
+            case BinaryOp(left=l, right=r):
+                walk_expr(l); walk_expr(r)
+            case UnaryMinus(expr=c):
+                walk_expr(c)
+            case FuncCall(args=args):
+                for a in args: walk_expr(a)
+            case Ternary(cond=c, true_val=t, false_val=f):
+                walk_expr(c); walk_expr(t); walk_expr(f)
+            case Reduction(loops=loops, child_expr=ce, vol_exprs=ves, pre_stmts=ps):
+                for _, end_e in loops: walk_expr(end_e)
+                walk_stmts(ps)
+                walk_expr(ce)
+                for ve in ves: walk_expr(ve)
+            case UnstructuredRead(state_offset=so, rp_offset=rp, ci_offset=ci, w_offset=wo, idx_expr=ie):
+                walk_expr(so); walk_expr(rp); walk_expr(ci); walk_expr(wo); walk_expr(ie)
+
+    def walk_stmts(ss: List[Stmt]) -> None:
+        for s in ss:
+            match s:
+                case VarDecl(init=init): walk_expr(init)
+                case Assign(lhs=lhs, rhs=rhs): walk_expr(lhs); walk_expr(rhs)
+                case Loop(start=st, end=en, body=b): walk_expr(st); walk_expr(en); walk_stmts(b)
+                case IfElse(cond=c, then_body=tb, else_body=eb): walk_expr(c); walk_stmts(tb); walk_stmts(eb)
+
+    walk_stmts(stmts)
+    return used
+
+
+def _filter_l_phys(l_phys_stmts: List[Stmt], stmts: List[Stmt]) -> List[Stmt]:
+    used = _collect_used_vars(stmts)
+    return [s for s in l_phys_stmts if not isinstance(s, VarDecl) or s.name in used]
+
+
 def _emit_block(emitter: CppEmitter, preamble: List[str], stmts: List[Stmt]) -> str:
     if not stmts:
         return ""
@@ -74,10 +119,10 @@ def generate_cpp_with_audit(
     alias_map, preamble_decls = _build_offset_aliases(layout)
     emitter = CppEmitter(alias_map=alias_map)
 
-    body_str = _emit_block(emitter, preamble_decls, l_phys_stmts + eq_stmts)
-    obs_body_str = _emit_block(emitter, preamble_decls, l_phys_stmts + obs_stmts) if obs_stmts else ""
-    ic_body_str = _emit_block(emitter, preamble_decls, l_phys_ic_stmts + ic_stmts)
-    audit_obs_body_str = _emit_block(emitter, preamble_decls, l_phys_stmts + audit_obs_stmts) if audit_obs_stmts else ""
+    body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, eq_stmts) + eq_stmts)
+    obs_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, obs_stmts) + obs_stmts) if obs_stmts else ""
+    ic_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_ic_stmts, ic_stmts) + ic_stmts)
+    audit_obs_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, audit_obs_stmts) + audit_obs_stmts) if audit_obs_stmts else ""
 
     cpp_str = generate_cpp_skeleton(
         n_states=layout.n_states,

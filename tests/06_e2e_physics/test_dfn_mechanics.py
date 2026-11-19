@@ -640,4 +640,66 @@ def test_oracle_integrated_hierarchical_dfn():
     assert np.isfinite(J).all(), "Enzyme LLVM AD generated NaNs evaluating the coupled Jacobian."
     assert np.linalg.matrix_rank(J) == engine.layout.n_states, "Jacobian contains structurally singular rows."
 
-    
+
+@REQUIRES_RUNTIME
+def test_phase4_reference_models_full_audit(tmp_path, capsys):
+    """
+    Validates Phase 4 end-to-end audit workflow across industry battery models
+    (Chen2020_DFN, Brosa2021_TSPMe, Paten2026_DC1):
+      - `audit_compiler=True` + `engine.audit()` / `audit_solver=True`
+      - 1-screen scorecard, telemetry preservation in `res.print_summary()`,
+        JSON archival, and drill-down views.
+    """
+    from Chen2020_DFN import Chen2020_DFN  # type: ignore
+    from Brosa2021_TSPMe import ExactTSPMe  # type: ignore
+    from Paten2026_DC1 import Paten2026_DC1  # type: ignore
+
+    # 1. Chen2020_DFN (1C pulse + rest)
+    dfn_model = Chen2020_DFN()
+    eng_dfn = fx.Engine(model=dfn_model, target="cpu:serial", audit_compiler=True)
+    prot_dfn = Sequence([CC(rate=5.0, time=30.0), Rest(time=10.0)])
+    res_dfn = eng_dfn.solve(protocol=prot_dfn, audit_solver=True, show_progress=False)
+
+    assert res_dfn.audit is not None
+    assert res_dfn.audit.passed is True
+    assert res_dfn.audit.checks["dae_residual"]["status"] == "PASS"
+    assert res_dfn.audit.provenance["cpp_sha256"]
+
+    # Telemetry preserved + audit banner appended in SimulationResult.print_summary()
+    res_dfn.print_summary()
+    out_summary = capsys.readouterr().out
+    assert "ION_FLUX EXECUTION & DIAGNOSTIC SUMMARY" in out_summary
+    assert "Audit Verdict:" in out_summary
+
+    # Scorecard + drill-downs + JSON export
+    res_dfn.audit.print_summary()
+    res_dfn.audit.show_residuals(n=3)
+    res_dfn.audit.show_sensitivities()
+    res_dfn.audit.show_boundaries()
+    out_audit = capsys.readouterr().out
+    assert "ION_FLUX MODEL AUDIT SCORECARD: Chen2020_DFN" in out_audit
+
+    json_path = tmp_path / "dfn_audit.json"
+    json_str = res_dfn.audit.to_json(str(json_path))
+    assert json_path.exists()
+    assert '"model_name": "Chen2020_DFN"' in json_str
+
+    # 2. Brosa2021_TSPMe & Paten2026_DC1 via `with fx.audit() as audit:` context manager
+    with fx.audit() as ctx_audit:
+        for cls_model in (ExactTSPMe, Paten2026_DC1):
+            m = cls_model()
+            eng = fx.Engine(model=m, target="cpu:serial")
+            assert eng.audit_compiler is True
+            r = eng.solve(protocol=Sequence([CC(rate=5.0, time=20.0)]), show_progress=False)
+            assert r.audit is not None
+
+    assert len(ctx_audit) == 2
+    assert ctx_audit.passed is True
+    assert ctx_audit[0].checks["dae_residual"]["status"] == "PASS"
+    assert ctx_audit[1].checks["dae_residual"]["status"] == "PASS"
+
+    # 3. Context isolation verified: subsequent calls revert to zero-overhead default
+    eng_clean = fx.Engine(model=ExactTSPMe(), target="cpu:serial")
+    assert eng_clean.audit_compiler is False
+    res_clean = eng_clean.solve(protocol=Sequence([CC(rate=5.0, time=5.0)]), show_progress=False)
+    assert res_clean.audit is None

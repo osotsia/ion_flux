@@ -94,7 +94,8 @@ ion_flux/
 │       │       └── clang_invoker.py    # Subprocesses Clang + Enzyme to compile C++ into a native .so binary.
 │       │
 │       └── runtime/                    # --- PYTHON EXECUTION ORCHESTRATION ---
-│           ├── engine.py               # User-facing API facade (solve, solve_batch, solve_async, export_binary).
+│           ├── audit.py                # AuditReport & run_solver_audit: post-hoc residuals, SUNDIALS diff, VJP scan.
+│           ├── engine.py               # User-facing API facade (solve, solve_batch, solve_async, audit, export_binary).
 │           ├── manifest.py             # ExecutableManifest & build_manifest: compiles/loads .so artifacts & layouts.
 │           ├── session.py              # Stateful handle preserving hot solver memory for real-time HIL loops.
 │           ├── diagnostics.py          # Intercepts native solver crash payloads and maps flat indices to state names.

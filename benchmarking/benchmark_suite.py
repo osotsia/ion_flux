@@ -31,9 +31,9 @@ import ion_flux as fx
 from ion_flux.protocols import Sequence, CC, Rest
 
 # Import Standard Models
-from Chen2020_DFN import Chen2020_DFN
-from Brosa2021_TSPMe import ExactTSPMe
-from Paten2026_DC1 import Paten2026_DC1
+from Chen2020_DFN import Chen2020_DFN # type:ignore
+from Brosa2021_TSPMe import ExactTSPMe # type:ignore
+from Paten2026_DC1 import Paten2026_DC1 # type:ignore
 
 # Import Example Models dynamically
 from importlib.machinery import SourceFileLoader

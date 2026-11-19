@@ -9,7 +9,7 @@ Performs no mathematical or topological transformations.
 from typing import Dict, Tuple, Optional
 from ion_flux.compiler._3_backend.compute_ir import (
     IRNode, Literal, Var, ArrayAccess, BinaryOp, UnaryMinus,
-    FuncCall, Ternary, VarDecl, Assign, IfElse, Loop, Comment, RawCpp, UnstructuredRead, Reduction
+    FuncCall, Ternary, VarDecl, Assign, Loop, IfElse, Comment, RawCpp, UnstructuredRead, Reduction
 )
 
 
@@ -120,20 +120,6 @@ class CppEmitter:
             case Assign(lhs=lhs, rhs=rhs):
                 return f"{self.emit(lhs)} = {self.emit(rhs)};"
 
-            case IfElse(cond=cond, then_body=tb, else_body=eb):
-                tb_lines = []
-                for s in tb:
-                    tb_lines.extend(self.emit(s).splitlines())
-                tb_str = "\n    ".join(tb_lines)
-                out = f"if ({self.emit(cond, 0)}) {{\n    {tb_str}\n}}"
-                if eb:
-                    eb_lines = []
-                    for s in eb:
-                        eb_lines.extend(self.emit(s).splitlines())
-                    eb_str = "\n    ".join(eb_lines)
-                    out += f" else {{\n    {eb_str}\n}}"
-                return out
-
             case Loop(var=var, start=start, end=end, body=body, pragma=pragma):
                 lines = []
                 for b in body:
@@ -144,6 +130,20 @@ class CppEmitter:
                     f"{pragma_str}for (int {var} = {self.emit(start)}; "
                     f"{var} < {self.emit(end)}; ++{var}) {{\n    {body_str}\n}}"
                 )
+
+            case IfElse(cond=cond, then_body=tb, else_body=eb):
+                then_lines = []
+                for s in tb:
+                    then_lines.extend(self.emit(s).splitlines())
+                then_str = "\n    ".join(then_lines)
+                out = f"if ({self.emit(cond, 0)}) {{\n    {then_str}\n}}"
+                if eb:
+                    else_lines = []
+                    for s in eb:
+                        else_lines.extend(self.emit(s).splitlines())
+                    else_str = "\n    ".join(else_lines)
+                    out += f" else {{\n    {else_str}\n}}"
+                return out
 
             case UnstructuredRead(state_offset=s_off, rp_offset=rp, ci_offset=ci, w_offset=w, idx_expr=idx):
                 return (

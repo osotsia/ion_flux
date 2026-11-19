@@ -1,9 +1,9 @@
-# ion_flux: The End-to-End Differentiable Engine for Battery Physics
+# ion_flux: An End-to-End Differentiable Engine for Battery Physics
 
 ![CI Status](https://github.com/osotsia/ion_flux/actions/workflows/build_and_test_and_publish.yml/badge.svg)
 [![PyPI version](https://badge.fury.io/py/ion-flux.svg)](https://badge.fury.io/py/ion-flux)
 
-An end-to-end differentiable execution engine for battery physics utilizing a strict compiler-and-runtime architecture. You write physics in declarative Python, and the engine automatically figures out how to discretize, differentiate, compile, and solve them using a native Rust orchestrator, LLVM compilation, and Enzyme Automatic Differentiation.
+An end-to-end differentiable execution engine for battery physics, utilizing a strict compiler-and-runtime architecture. You write physics in declarative Python, and the engine automatically figures out how to discretize, differentiate, compile, and solve them using a native Rust orchestrator, LLVM compilation, and Enzyme Automatic Differentiation.
 
 **Target:** macOS, Linux | Python 3.10–3.14
 
@@ -44,7 +44,7 @@ python examples/9_sensitivity_analysis.py
 
 ---
 
-## 🔬 For Researchers: Declarative Physics & Infinite Modularity
+## 🔬 For Researchers: Declarative Physics, Modularity, & Verification
 
 ### 1. Topology-Agnostic Operators
 Mathematical operators like `fx.grad` and `fx.div` dynamically adapt to their domain. The exact same Python syntax compiles to a tridiagonal banded matrix on a 1D line, a spherical finite-volume stencil, or a massive unstructured 3D CSR graph traversal.
@@ -118,6 +118,27 @@ result = engine.solve(t_span=(0, 3600))
 
 ### 3. Native Multi-Scale Meshes & DAEs
 Want to build a Doyle-Fuller-Newman (DFN) model? Just multiply domains together (`macro_micro = x * r`). `ion_flux` automatically logically places a full 1D spherical mesh at *every* node in the macroscopic `x` mesh, flattening them into highly efficient C-arrays automatically.
+
+### 4. Model Verification
+
+Wrap any model build and simulation inside `with fx.audit() as audit:` to enable both compile-time and solve-time verification without editing existing `Engine` or `solve` calls.
+
+```python
+with fx.audit() as audit:
+    engine = fx.Engine(model=ModularSPM())
+    res = engine.solve(t_span=(0,3600))
+
+# Executes various compile-time checks and solve-time checks
+# Outputs a 1-screen scorecard ([PASS] / [WARN] / [FAIL] / [SKIP])
+audit.print_summary()
+
+# Drill-down & CI archival
+assert audit.passed
+audit.show_clamps()
+audit.show_residuals(n=5)
+audit.show_sensitivities()
+audit.to_json("audit_report.json")
+```
 
 ---
 
@@ -201,6 +222,7 @@ Benchmarked on an Apple Silicon host over a 10,000-step discontinuous pulse-disc
 > *\*Note on DFN at 1 kHz:* 99% of DFN steps execute in `≤ 80.0 µs` (`6.75%` median CPU at 1 kHz), supporting 1 kHz execution under smooth/continuous setpoint ramping ($|\Delta I| \le 0.05\,\text{A/step}$). The `4.10 ms` WCET occurs on instantaneous step discontinuities requiring algebraic re-equilibration and Sparse LU refactorization, capping hard real-time guarantees across arbitrary step loads to **100–200 Hz** (`41.04%` peak load at 100 Hz, `82.08%` at 200 Hz).
 
 ---
+
 ## 🧠 How it Works Under the Hood
 
 `ion_flux` replaces the traditional symbolic-to-numeric computation graph paradigm with a strictly staged Compiler-and-Runtime architecture structured as a unidirectional lowering pipeline: $1 \rightarrow 2 \rightarrow 3 \rightarrow 4$.

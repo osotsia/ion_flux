@@ -20,22 +20,30 @@ pub fn calc_algebraic_roots(
     let mut converged = false;
     let mut final_max_res = 0.0_f64;
     let mut iters_used = 0_usize;
+    let mut active_row_scales: Option<Vec<f64>> = None;
 
     for iter in 0..50 {
         evaluator.evaluate_residual(&state.y, &state.ydot, &state.p, &prob.m, &mut scratch.res);
 
         let mut max_res = 0.0_f64;
+        let mut max_scaled_res = 0.0_f64;
         for i in 0..prob.n {
             if prob.id[i] < 0.5 {
                 let r = scratch.res[i].abs();
                 if !r.is_finite() || r > max_res {
                     max_res = r;
                 }
+                let scale = active_row_scales.as_ref().and_then(|s| s.get(i).copied()).unwrap_or(1.0);
+                let sr = r * scale;
+                if !sr.is_finite() || sr > max_scaled_res {
+                    max_scaled_res = sr;
+                }
             }
         }
         final_max_res = max_res;
         iters_used = iter;
-        if max_res < 1e-8 {
+        let check_metric = if active_row_scales.is_some() { max_scaled_res } else { max_res };
+        if check_metric < 1e-8 {
             converged = true;
             break;
         }
@@ -65,6 +73,9 @@ pub fn calc_algebraic_roots(
                 if linear_solver.factorize_from_triplets(diag).is_err() {
                     iters_used = iter + 1;
                     break;
+                }
+                if let Some(lu) = linear_solver.as_sparse_lu() {
+                    active_row_scales = Some(lu.row_scales.clone());
                 }
             }
             if linear_solver.solve(&mut scratch.dy, diag).is_err() {
@@ -96,16 +107,23 @@ pub fn calc_algebraic_roots(
     if !converged && state.y.iter().all(|v| v.is_finite()) {
         evaluator.evaluate_residual(&state.y, &state.ydot, &state.p, &prob.m, &mut scratch.res);
         let mut max_res = 0.0_f64;
+        let mut max_scaled_res = 0.0_f64;
         for i in 0..prob.n {
             if prob.id[i] < 0.5 {
                 let r = scratch.res[i].abs();
                 if !r.is_finite() || r > max_res {
                     max_res = r;
                 }
+                let scale = active_row_scales.as_ref().and_then(|s| s.get(i).copied()).unwrap_or(1.0);
+                let sr = r * scale;
+                if !sr.is_finite() || sr > max_scaled_res {
+                    max_scaled_res = sr;
+                }
             }
         }
         final_max_res = max_res;
-        converged = max_res.is_finite() && max_res < 1e-8;
+        let check_metric = if active_row_scales.is_some() { max_scaled_res } else { max_res };
+        converged = check_metric.is_finite() && check_metric < 1e-8;
     }
 
     diag.ic_converged = converged;

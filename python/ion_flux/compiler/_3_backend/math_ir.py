@@ -350,12 +350,43 @@ def _format_math_expr(expr: MathExpr, parent_prec: int = 0, cse_aliases: Optiona
             if op in ("max", "min"):
                 return f"{op}({_format_math_expr(l, 0, cse_aliases)}, {_format_math_expr(r, 0, cse_aliases)})"
             prec, sym = _MATH_OP_PREC.get(op, (0, op))
+            if op == "add" and isinstance(r, MathScalar) and r.value < 0:
+                l_str = _format_math_expr(l, prec, cse_aliases)
+                r_str = _format_math_expr(MathScalar(-r.value), prec + 1, cse_aliases)
+                out = f"{l_str} - {r_str}"
+                return f"({out})" if prec < parent_prec else out
+            if op == "add" and isinstance(r, MathUnaryOp) and r.op == "neg":
+                l_str = _format_math_expr(l, prec, cse_aliases)
+                r_str = _format_math_expr(r.child, prec + 1, cse_aliases)
+                out = f"{l_str} - {r_str}"
+                return f"({out})" if prec < parent_prec else out
+            if op == "sub" and isinstance(r, MathUnaryOp) and r.op == "neg":
+                l_str = _format_math_expr(l, prec, cse_aliases)
+                r_str = _format_math_expr(r.child, prec, cse_aliases)
+                out = f"{l_str} + {r_str}"
+                return f"({out})" if prec < parent_prec else out
             l_str = _format_math_expr(l, prec, cse_aliases)
             r_str = _format_math_expr(r, prec + (1 if op in ("sub", "div", "pow") else 0), cse_aliases)
             out = f"{l_str} {sym} {r_str}"
             return f"({out})" if prec < parent_prec else out
         case _:
             return str(expr)
+
+
+def _collect_bc_ids(expr: MathExpr, out: List[str]) -> None:
+    bid = getattr(expr, "bc_id", None)
+    if bid and bid not in out:
+        out.append(bid)
+    match expr:
+        case MathUnaryOp(child=c) | MathGrad(child=c) | MathDiv(child=c) | MathDt(child=c) | MathIntegral(child=c) | MathBoundaryRef(child=c):
+            _collect_bc_ids(c, out)
+        case MathBinaryOp(left=l, right=r):
+            _collect_bc_ids(l, out)
+            _collect_bc_ids(r, out)
+        case MathClamp(child=c, lower=lo, upper=hi):
+            _collect_bc_ids(c, out)
+            _collect_bc_ids(lo, out)
+            _collect_bc_ids(hi, out)
 
 
 def format_math_system(math_sys: "MathSystem", state_filter: Optional[str] = None) -> str:
@@ -392,15 +423,45 @@ def format_math_system(math_sys: "MathSystem", state_filter: Optional[str] = Non
         is_pde = any(has_time_derivative(e.lhs) or has_time_derivative(e.rhs) for e in eqs)
         kind = "PDE/ODE" if is_pde else "DAE"
         lines.append(f"  [{kind}] {s_name} (domain={dom}):")
+        eq_bc_ids: List[str] = []
         for eq in eqs:
+            _collect_bc_ids(eq.lhs, eq_bc_ids)
+            _collect_bc_ids(eq.rhs, eq_bc_ids)
             lhs_s = _format_math_expr(eq.lhs, 0, cse_aliases)
             rhs_s = _format_math_expr(eq.rhs, 0, cse_aliases)
             if eq.is_piecewise and eq.current_region:
-                lines.append(f"    region {eq.current_region.domain_name}: {lhs_s} == {rhs_s}")
+                reg = eq.current_region
+                lines.append(f"    region {reg.domain_name}[{reg.start_idx}:{reg.end_idx}]: {lhs_s} == {rhs_s}")
             else:
                 lines.append(f"    {lhs_s} == {rhs_s}")
         if s_name in math_sys.dirichlet_bcs:
             bc_parts = [f"{side}={_format_math_expr(val, 0, cse_aliases)}" for side, val in math_sys.dirichlet_bcs[s_name].items()]
             lines.append(f"    Dirichlet BCs: {', '.join(bc_parts)}")
+        neumann_parts: List[str] = []
+        for bid in eq_bc_ids:
+            for side, nbc in math_sys.neumann_bcs.get(bid, {}).items():
+                dom_tag = f"({nbc.domain})" if nbc.domain else ""
+                neumann_parts.append(f"{side}{dom_tag}={_format_math_expr(nbc.expr, 0, cse_aliases)}")
+        if neumann_parts:
+            lines.append(f"    Neumann BCs:   {', '.join(neumann_parts)}")
+
+    if math_sys.dynamic_domain_bindings and not state_filter:
+        lines.append("ALE Moving Boundaries:")
+        for d_name, binding in math_sys.dynamic_domain_bindings.items():
+            lines.append(f"  {d_name}.{binding['side']} == {_format_math_expr(binding['rhs_expr'], 0, cse_aliases)}")
+
+    ics = [ic for ic in math_sys.initial_conditions if not state_filter or ic.state_name == state_filter]
+    if ics:
+        lines.append("Initial Conditions:")
+        for ic in ics:
+            dom = ic.target_domain or "0D"
+            lines.append(f"  {ic.state_name}({dom}) = {_format_math_expr(ic.expr, 0, cse_aliases)}")
+
+    obs_list = [o for o in math_sys.observables if not state_filter or o.name == state_filter]
+    if obs_list:
+        lines.append("Observables:")
+        for o in obs_list:
+            dom = o.target_domain or "0D"
+            lines.append(f"  {o.name}({dom}) = {_format_math_expr(o.expr, 0, cse_aliases)}")
 
     return "\n".join(lines)

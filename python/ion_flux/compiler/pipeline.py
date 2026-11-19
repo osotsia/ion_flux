@@ -16,6 +16,7 @@ from ion_flux.compiler._2_middle_end.semantics import SemanticContext
 from ion_flux.compiler._2_middle_end.verification import verify_manifold
 from ion_flux.compiler._3_backend.normalization import NormalizationPass, verify_no_unreduced_broadcasts
 from ion_flux.compiler._3_backend.cpr_orchestrator import compute_cpr
+from ion_flux.compiler._3_backend.compute_ir import format_compute_ir
 from ion_flux.compiler._3_backend.math_ir import MathSystem, MathDiv, MathGrad, MathUnaryOp, MathBinaryOp, MathClamp, MathBoundaryRef, MathIntegral, extract_math_state_names, has_time_derivative
 from ion_flux.compiler._4_codegen.builder import generate_cpp_with_audit
 
@@ -83,8 +84,8 @@ class Compiler:
             "topo": topo,
             "jacobian_bandwidth": jacobian_bandwidth,
             "math_sys": math_sys,
-            "math_pretty": math_sys.pretty() if audit_compiler else "",
-            "compute_pretty": bundle["compute_pretty"],
+            "math_pretty": math_sys.pretty(),
+            "compute_pretty": bundle["compute_pretty"] or format_compute_ir(eq_stmts),
             "clamp_meta": bundle["clamp_meta"],
             "boundary_ledger": boundary_ledger,
         }

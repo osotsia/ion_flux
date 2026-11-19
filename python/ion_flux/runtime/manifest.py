@@ -40,7 +40,9 @@ class ExecutableManifest:
                  max_steps: List[float],
                  state_domain_map: Dict[str, str],
                  cpp_source: str = "",
-                 static_audit: Optional[Dict[str, Any]] = None):
+                 static_audit: Optional[Dict[str, Any]] = None,
+                 math_ir: str = "",
+                 compute_ir: str = ""):
         self.lib_path = lib_path
         self.layout = layout
         self.default_parameters = default_parameters
@@ -53,6 +55,8 @@ class ExecutableManifest:
         self.state_domain_map = state_domain_map
         self.cpp_source = cpp_source
         self.static_audit = static_audit
+        self.math_ir = math_ir
+        self.compute_ir = compute_ir
         
         self.terminal_meta = {
             "has_terminal": "_term_mode" in self.layout.param_offsets,
@@ -180,7 +184,7 @@ class ExecutableManifest:
                    cpr_cache, id_arr, spatial_diag, max_steps, state_domain_map, cpp_source, static_audit)
 
 
-COMPILER_CACHE_VERSION = "2026.04.v6"
+COMPILER_CACHE_VERSION = "2026.04.v7"
 
 
 def _compute_ast_fingerprint(ast_payload: Dict[str, Any], layout: MemoryLayout, target: str, jacobian_bandwidth: Optional[int], audit_compiler: bool = False) -> str:
@@ -216,7 +220,7 @@ def _encode_meta_cpp(meta_json_str: str) -> str:
     )
 
 
-def _run_native_static_audit(
+def run_native_static_audit(
     manifest: ExecutableManifest,
     default_parameters: Dict[str, float],
     cpr_cache: Tuple[List, List, List, List, List],
@@ -236,14 +240,19 @@ def _run_native_static_audit(
     c_arr = np.asarray(cols, dtype=np.intp)
     v_arr = np.asarray(vals, dtype=np.float64)
 
-    max_jvp_diff = 0.0
+    max_jvp_abs_diff = 0.0
+    max_jvp_rel_diff = 0.0
     for seed_idx in range(3):
         vec = rng.standard_normal(n)
         jvp_enzyme = manifest.evaluate_jvp(y_probe.tolist(), ydot_probe.tolist(), 1.0, vec.tolist(), default_parameters)
         j_cpr_vec = np.bincount(r_arr, weights=v_arr * vec[c_arr], minlength=n) if len(v_arr) > 0 else np.zeros(n)
-        diff = float(np.max(np.abs(jvp_enzyme - j_cpr_vec)))
-        if diff > max_jvp_diff:
-            max_jvp_diff = diff
+        abs_diff = float(np.max(np.abs(jvp_enzyme - j_cpr_vec)))
+        jvp_scale = max(1.0, float(np.max(np.abs(jvp_enzyme))))
+        rel_diff = abs_diff / jvp_scale
+        if abs_diff > max_jvp_abs_diff:
+            max_jvp_abs_diff = abs_diff
+        if rel_diff > max_jvp_rel_diff:
+            max_jvp_rel_diff = rel_diff
 
     res_pre = np.asarray(manifest.evaluate_residual(y0, ydot0, default_parameters), dtype=np.float64)
     id_np = np.asarray(manifest.id_arr, dtype=np.float64)
@@ -297,8 +306,9 @@ def _run_native_static_audit(
             ic_info["ic_error"] = str(e)
 
     return {
-        "cpr_jvp_probe_max_diff": max_jvp_diff,
-        "cpr_jvp_probe_passed": bool(np.isfinite(max_jvp_diff) and max_jvp_diff < 1e-8),
+        "cpr_jvp_probe_max_diff": max_jvp_rel_diff,
+        "cpr_jvp_probe_abs_diff": max_jvp_abs_diff,
+        "cpr_jvp_probe_passed": bool(np.isfinite(max_jvp_rel_diff) and max_jvp_rel_diff < 1e-8),
         "ic_health": ic_info,
     }
 
@@ -348,6 +358,8 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
     state_domain_map = {s.name: getattr(s.domain, "name", "") for s in states}
     lib_path = ""
     cpp_source = ""
+    math_ir_str = ""
+    compute_ir_str = ""
     id_arr = [0.0] * layout.n_states
     cpr_cache = ([], [], [], [], [])
     static_audit: Optional[Dict[str, Any]] = None
@@ -358,6 +370,8 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
         )
 
         cpp_source = compiler_result["cpp_source"]
+        math_ir_str = compiler_result["math_pretty"]
+        compute_ir_str = compiler_result["compute_pretty"]
         cpr_cache = compiler_result["cpr_cache"]
         id_arr = compiler_result["id_arr"]
         ast_payload = compiler_result["ast_payload"]
@@ -396,15 +410,6 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
             compiler = NativeCompiler() if cache else NativeCompiler(cache_dir=os.path.join(tempfile.gettempdir(), "nocache"))
             if audit_compiler and static_audit is not None:
                 static_audit["toolchain"] = compiler.get_toolchain_info()
-                # Compile once with initial static_audit, run native JVP & IC probes, then finalize embedded metadata
-                meta_dict["static_audit"] = static_audit
-                temp_lib = compiler.compile(cpp_source, layout.n_states, meta_source=_encode_meta_cpp(json.dumps(meta_dict, sort_keys=True)))
-                temp_manifest = ExecutableManifest(
-                    temp_lib, layout, default_parameters, ast_payload, jacobian_bandwidth or 0,
-                    cpr_cache, id_arr, spatial_diag, max_steps, state_domain_map, cpp_source, static_audit
-                )
-                if RUST_FFI_AVAILABLE and temp_manifest.native_lib is not None:
-                    static_audit.update(_run_native_static_audit(temp_manifest, default_parameters, cpr_cache, spatial_diag, max_steps))
                 meta_dict["static_audit"] = static_audit
 
             meta_cpp = _encode_meta_cpp(json.dumps(meta_dict, sort_keys=True))
@@ -420,7 +425,7 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
         id_arr = [0.0] * layout.n_states
         spatial_diag, max_steps = _compute_static_metadata(layout, state_max_steps)
 
-    return ExecutableManifest(
+    manifest = ExecutableManifest(
         lib_path=lib_path,
         layout=layout,
         default_parameters=default_parameters,
@@ -433,7 +438,12 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
         state_domain_map=state_domain_map,
         cpp_source=cpp_source,
         static_audit=static_audit,
+        math_ir=math_ir_str,
+        compute_ir=compute_ir_str,
     )
+    if audit_compiler and static_audit is not None and not mock_execution and RUST_FFI_AVAILABLE and manifest.native_lib is not None:
+        static_audit.update(run_native_static_audit(manifest, default_parameters, cpr_cache, spatial_diag, max_steps))
+    return manifest
 
 
 def _compute_static_metadata(layout: MemoryLayout, state_max_steps: Dict[str, Any]):

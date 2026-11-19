@@ -5,8 +5,20 @@ Executes post-hoc trajectory verification, guarded differential cross-checks,
 all-parameter sensitivity scans, clamp saturation detection, and sequence transition audits.
 """
 
+import contextvars
+import json
 from typing import Dict, Any, List, Optional
 import numpy as np
+
+
+_AUDIT_CONTEXT: contextvars.ContextVar[Optional["AuditSession"]] = contextvars.ContextVar(
+    "ion_flux_audit_context", default=None
+)
+
+
+def get_active_audit() -> Optional["AuditSession"]:
+    """Returns the currently active AuditSession context, if any."""
+    return _AUDIT_CONTEXT.get()
 
 
 class SolverAuditReport:
@@ -19,23 +31,38 @@ class SolverAuditReport:
         n_params: int,
         checks: Dict[str, Any],
         static_audit: Optional[Dict[str, Any]] = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ):
         self.model_name = model_name
         self.n_states = n_states
         self.n_params = n_params
         self.checks = checks
         self.static_audit = static_audit or {}
+        self.provenance = provenance or {}
+
+    def _all_statuses(self) -> List[str]:
+        statuses = [c.get("status", "PASS") for c in self.checks.values()]
+        if self.static_audit:
+            if "cpr_jvp_probe_passed" in self.static_audit:
+                statuses.append("PASS" if self.static_audit["cpr_jvp_probe_passed"] else "WARN")
+            ledger = self.static_audit.get("boundary_ledger", [])
+            if any(e.get("implicit_zero_flux_faces") for e in ledger):
+                statuses.append("WARN")
+            ic = self.static_audit.get("ic_health")
+            if ic is not None:
+                statuses.append("PASS" if ic.get("ic_converged", False) else "FAIL")
+                j_max, j_min = ic.get("init_jac_max", 0.0), ic.get("init_jac_min", 0.0)
+                if j_min > 0.0 and j_max > 0.0 and (j_max / j_min) > 1e20:
+                    statuses.append("WARN")
+        return statuses
 
     @property
     def passed(self) -> bool:
-        for c in self.checks.values():
-            if c.get("status") == "FAIL":
-                return False
-        return True
+        return "FAIL" not in self._all_statuses()
 
     @property
     def status(self) -> str:
-        statuses = [c.get("status", "PASS") for c in self.checks.values()]
+        statuses = self._all_statuses()
         if "FAIL" in statuses:
             return "FAIL"
         if "WARN" in statuses:
@@ -49,16 +76,25 @@ class SolverAuditReport:
             "n_params": self.n_params,
             "status": self.status,
             "passed": self.passed,
+            "provenance": self.provenance,
             "checks": self.checks,
             "static_audit": self.static_audit,
         }
 
+    def to_json(self, path: Optional[str] = None) -> str:
+        payload = json.dumps(self.to_dict(), indent=2, default=str)
+        if path:
+            with open(path, "w", encoding="utf-8") as fp:
+                fp.write(payload)
+        return payload
+
     def print_summary(self) -> None:
         print("=" * 80)
         print(f"ION_FLUX MODEL AUDIT SCORECARD: {self.model_name} (N={self.n_states} states, {self.n_params} params)")
-        n_fail = sum(1 for c in self.checks.values() if c.get("status") == "FAIL")
-        n_warn = sum(1 for c in self.checks.values() if c.get("status") == "WARN")
-        n_pass = sum(1 for c in self.checks.values() if c.get("status") == "PASS")
+        all_st = self._all_statuses()
+        n_fail = sum(1 for s in all_st if s == "FAIL")
+        n_warn = sum(1 for s in all_st if s == "WARN")
+        n_pass = sum(1 for s in all_st if s == "PASS")
         print(f"OVERALL STATUS: {self.status} ({n_fail} FAIL, {n_warn} WARN, {n_pass} PASS)")
         print("=" * 80)
 
@@ -67,7 +103,7 @@ class SolverAuditReport:
         if self.static_audit:
             cpr_st = "PASS" if self.static_audit.get("cpr_jvp_probe_passed", False) else "WARN"
             cpr_diff = self.static_audit.get("cpr_jvp_probe_max_diff", 0.0)
-            print(f"  [{cpr_st:<4}] CPR vs. Enzyme JVP        Max diff {cpr_diff:.1e} across random probes")
+            print(f"  [{cpr_st:<4}] CPR vs. Enzyme JVP        Max rel diff {cpr_diff:.1e} across random probes")
 
             ledger = self.static_audit.get("boundary_ledger", [])
             implicit_count = sum(len(e.get("implicit_zero_flux_faces", [])) for e in ledger)
@@ -91,8 +127,8 @@ class SolverAuditReport:
             j_max = ic.get("init_jac_max", 0.0)
             j_min = ic.get("init_jac_min", 0.0)
             cond_spread = (j_max / j_min) if (j_min > 0.0 and j_max > 0.0) else 0.0
-            cond_st = "WARN" if cond_spread > 1e12 else "PASS"
-            print(f"  [{cond_st:<4}] Jacobian Conditioning     Spread: {cond_spread:.1e} (max={j_max:.1e}, min={j_min:.1e})")
+            cond_st = "WARN" if cond_spread > 1e20 else "PASS"
+            print(f"  [{cond_st:<4}] Jacobian Conditioning     Raw spread: {cond_spread:.1e} (row-equilibrated in LU)")
         else:
             print("  [SKIP] Initialization Audit    Compile with Engine(..., audit_compiler=True) for t=0 checks")
 
@@ -172,8 +208,47 @@ class SolverAuditReport:
             print(f"  [SKIP] Protocol Transitions      {trans_chk.get('reason', 'N/A')}")
 
         print("-" * 80)
-        print("Drill-down: .show_math() | .show_boundaries() | .show_clamps() | .to_dict()")
+        print("Drill-down: .show_math() | .show_compute() | .show_boundaries() | .show_clamps() | .show_residuals() | .show_sensitivities() | .to_json()")
         print("=" * 80 + "\n")
+
+    def show_compute(self, state: Optional[str] = None) -> None:
+        pretty = self.static_audit.get("compute_pretty")
+        if not pretty:
+            print("Compute IR unavailable. Compile Engine with `audit_compiler=True`.")
+            return
+        if not state:
+            print(pretty)
+            return
+        sections = pretty.split("// === Eq: ")
+        matched = [sections[0]] if state in sections[0] else []
+        for sec in sections[1:]:
+            if sec.startswith(f"{state} "):
+                matched.append("// === Eq: " + sec)
+        print("\n".join(matched) if matched else f"No Compute IR section found for '{state}'.")
+
+    def show_residuals(self, n: int = 5) -> None:
+        chk = self.checks.get("dae_residual", {})
+        top = chk.get("top_offenders", [])
+        if not top:
+            print("No post-hoc residual samples recorded.")
+            return
+        print(f"Top {min(n, len(top))} Worst Residual Samples:")
+        print(f"{'Time [s]':<12} | {'State':<24} | {'|Residual|':<12} | {'WRMS':<10}")
+        print("-" * 66)
+        for item in top[:n]:
+            print(f"{item['time']:<12.4f} | {item['state']:<24} | {item['residual']:<12.3e} | {item['wrms']:<10.3f}")
+
+    def show_sensitivities(self) -> None:
+        chk = self.checks.get("parameter_sensitivity", {})
+        ranking = chk.get("sens_ranking", [])
+        if not ranking:
+            print("No parameter sensitivity data recorded.")
+            return
+        print(f"Parameter Sensitivity Ranking (QoI: {chk.get('qoi_name', 'QoI')}):")
+        print(f"{'Parameter':<20} | {'Normalized Sens':<16} | {'Raw d(QoI)/dp':<16}")
+        print("-" * 58)
+        for p_name, norm_s, raw_g in ranking:
+            print(f"{p_name:<20} | {norm_s:<16.4e} | {raw_g:<16.4e}")
 
     def show_clamps(self) -> None:
         chk = self.checks.get("numerical_guardrails", {})
@@ -220,6 +295,13 @@ class SolverAuditReport:
             print(f"{e['state']:<16} | {e['domain']:<12} | {kind:<8} | {faces_str}")
 
 
+def _state_name_for_idx(layout: Any, flat_idx: int) -> str:
+    for s_name, (off, sz) in layout.state_offsets.items():
+        if off <= flat_idx < off + sz:
+            return f"{s_name}[{flat_idx - off}]" if sz > 1 else s_name
+    return f"state[{flat_idx}]"
+
+
 def run_solver_audit(
     engine: Any,
     result: Any,
@@ -237,7 +319,9 @@ def run_solver_audit(
     n_params = manifest.layout.n_params
     model_name = type(engine.model).__name__ if engine.model else "Model"
 
-    # 1. Post-Hoc DAE Residual Sweep
+    static_audit = engine.audit_compiler_report() if getattr(engine, "audit_compiler", False) else getattr(manifest, "static_audit", None)
+
+    # 1. Post-Hoc DAE Residual Sweep (uncapped up to 50,000 steps)
     traj = result.trajectory
     if traj and "_micro_y" in traj and len(traj["_micro_y"]) > 0:
         micro_y = traj["_micro_y"]
@@ -247,17 +331,46 @@ def run_solver_audit(
         m_list = manifest.layout.get_mesh_data()
 
         n_micro = len(micro_t)
-        stride = max(1, n_micro // 2000)
+        stride = 1 if n_micro <= 50000 else max(1, n_micro // 50000)
         sample_indices = range(0, n_micro, stride)
 
         id_arr = np.asarray(manifest.id_arr, dtype=np.float64)
+
+        # Compute Oettli-Prager Jacobian row-scaling tolerances across sample points
+        # so residuals in equation units (e.g., A/m^3) normalize cleanly to state tolerances.
+        eq_tol = 1e-4 * np.max(np.abs(micro_y), axis=0) + 1e-6
+        if hasattr(manifest, "evaluate_jacobian_triplets"):
+            probe_pts = sorted({min(1, n_micro - 1), n_micro // 2, n_micro - 1})
+            row_tol_max = np.full(n_states, 1e-8, dtype=np.float64)
+            p_default_list = manifest.pack_parameters(parameters)
+            for pt in probe_pts:
+                y_pt = micro_y[pt]
+                ydot_pt = micro_ydot[pt]
+                col_scale = 1e-4 * (np.abs(y_pt) + np.abs(ydot_pt)) + 1e-6
+                # Override params with active tape step if available
+                pt_overrides = {
+                    p_name: float(p_traj[pt, off])
+                    for p_name, (off, _) in manifest.layout.param_offsets.items()
+                } if p_traj.shape[1] == manifest.layout.p_length else parameters
+                for c_j in (0.0, 1.0):
+                    r_j, c_j_idx, v_j = manifest.evaluate_jacobian_triplets(
+                        y_pt.tolist(), ydot_pt.tolist(), c_j, pt_overrides
+                    )
+                    if v_j:
+                        r_arr = np.asarray(r_j, dtype=np.intp)
+                        c_arr = np.asarray(c_j_idx, dtype=np.intp)
+                        v_arr = np.abs(np.asarray(v_j, dtype=np.float64))
+                        tol_pt = np.bincount(r_arr, weights=v_arr * col_scale[c_arr], minlength=n_states)
+                        row_tol_max = np.maximum(row_tol_max, tol_pt)
+            eq_tol = np.maximum(eq_tol, row_tol_max)
+
         max_res = 0.0
         max_wrms = 0.0
-        max_res_idx = 0
         max_res_state = ""
         sum_res = 0.0
         worst_res_t = 0.0
         count = 0
+        top_offenders: List[Dict[str, Any]] = []
 
         for idx in sample_indices:
             y_step = micro_y[idx].tolist()
@@ -266,12 +379,9 @@ def run_solver_audit(
             res_vec = manifest.native_lib.evaluate_residual(y_step, ydot_step, p_step, m_list)
             res_arr = np.abs(res_vec)
             if idx == 0:
-                # At t=0, ydot is uninitialized for differential equations; only algebraic constraints are snapped
                 res_arr = np.where(id_arr < 0.5, res_arr, 0.0)
 
-            # Scale-invariant weighted residual norm with standard engineering tolerance (1e-4 rel, 1e-6 abs)
-            weights = 1.0 / (1e-4 * np.abs(y_step) + 1e-6)
-            local_weighted = res_arr * weights
+            local_weighted = res_arr / eq_tol
             local_max_idx = int(np.argmax(local_weighted))
             local_max = float(res_arr[local_max_idx])
             local_max_w = float(local_weighted[local_max_idx])
@@ -281,13 +391,19 @@ def run_solver_audit(
             if local_max_w > max_wrms:
                 max_wrms = local_max_w
                 max_res = local_max
-                max_res_idx = local_max_idx
                 worst_res_t = float(micro_t[idx])
+                max_res_state = _state_name_for_idx(manifest.layout, local_max_idx)
 
-        for s_name, (off, sz) in manifest.layout.state_offsets.items():
-            if off <= max_res_idx < off + sz:
-                max_res_state = f"{s_name}[{max_res_idx - off}]" if sz > 1 else s_name
-                break
+            if len(top_offenders) < 5 or local_max_w > top_offenders[-1]["wrms"]:
+                top_offenders.append({
+                    "time": float(micro_t[idx]),
+                    "state": _state_name_for_idx(manifest.layout, local_max_idx),
+                    "residual": local_max,
+                    "wrms": local_max_w,
+                })
+                top_offenders.sort(key=lambda x: x["wrms"], reverse=True)
+                if len(top_offenders) > 5:
+                    top_offenders.pop()
 
         res_st = "PASS" if max_wrms <= 2.0 else ("WARN" if max_wrms <= 20.0 else "FAIL")
         checks["dae_residual"] = {
@@ -298,6 +414,7 @@ def run_solver_audit(
             "worst_time": worst_res_t,
             "worst_state": max_res_state,
             "samples": count,
+            "top_offenders": top_offenders,
         }
     else:
         checks["dae_residual"] = {"status": "SKIP", "reason": "No microstep tape recorded"}
@@ -436,40 +553,44 @@ def run_solver_audit(
     else:
         checks["parameter_sensitivity"] = {"status": "SKIP", "error": "No trajectory tape"}
 
-    # 4. Numerical Guardrail (Clamp) Watchpoints
-    static_audit = getattr(manifest, "static_audit", None)
+    # 4. Numerical Guardrail (Clamp) Watchpoints (single pass over sampled steps)
     if static_audit and static_audit.get("clamp_meta"):
         clamp_meta = static_audit["clamp_meta"]
         t_times = result._data["Time [s]"]
         y_traj_raw = traj.get("_y_raw") if traj else None
         if y_traj_raw is not None and len(y_traj_raw) == len(t_times):
-            active_clamps = []
-            for wp in clamp_meta:
-                lo_slot = wp["lower_slot"]
-                hi_slot = wp["upper_slot"]
-                lo_hits = []
-                hi_hits = []
-                stride_step = max(1, len(t_times) // 200)
-                for s_i in range(0, len(t_times), stride_step):
-                    y_i = y_traj_raw[s_i].tolist()
-                    ydot_i = [0.0] * n_states
-                    audit_obs = manifest.evaluate_audit_observables(y_i, ydot_i, parameters)
+            lo_hits_map: Dict[int, List[tuple]] = {wp["index"]: [] for wp in clamp_meta}
+            hi_hits_map: Dict[int, List[tuple]] = {wp["index"]: [] for wp in clamp_meta}
+            stride_step = 1 if len(t_times) <= 500 else max(1, len(t_times) // 500)
+            ydot_zero = [0.0] * n_states
+
+            for s_i in range(0, len(t_times), stride_step):
+                audit_obs = manifest.evaluate_audit_observables(y_traj_raw[s_i].tolist(), ydot_zero, parameters)
+                for wp in clamp_meta:
+                    idx_w = wp["index"]
+                    hi_slot = wp["upper_slot"]
                     if len(audit_obs) > hi_slot:
-                        frac_lo = audit_obs[lo_slot]
+                        frac_lo = audit_obs[wp["lower_slot"]]
                         frac_hi = audit_obs[hi_slot]
                         if frac_lo > 0.0:
-                            lo_hits.append((float(t_times[s_i]), float(frac_lo)))
+                            lo_hits_map[idx_w].append((float(t_times[s_i]), float(frac_lo)))
                         if frac_hi > 0.0:
-                            hi_hits.append((float(t_times[s_i]), float(frac_hi)))
-                if lo_hits or hi_hits:
+                            hi_hits_map[idx_w].append((float(t_times[s_i]), float(frac_hi)))
+
+            active_clamps = []
+            for wp in clamp_meta:
+                idx_w = wp["index"]
+                lo_h = lo_hits_map[idx_w]
+                hi_h = hi_hits_map[idx_w]
+                if lo_h or hi_h:
                     active_clamps.append({
                         "label": wp["label"],
                         "state": wp["state"],
                         "domain": wp["domain"],
-                        "lo_hits_max_pct": max([h[1] for h in lo_hits], default=0.0) * 100.0,
-                        "hi_hits_max_pct": max([h[1] for h in hi_hits], default=0.0) * 100.0,
-                        "lo_t_range": (lo_hits[0][0], lo_hits[-1][0]) if lo_hits else None,
-                        "hi_t_range": (hi_hits[0][0], hi_hits[-1][0]) if hi_hits else None,
+                        "lo_hits_max_pct": max([h[1] for h in lo_h], default=0.0) * 100.0,
+                        "hi_hits_max_pct": max([h[1] for h in hi_h], default=0.0) * 100.0,
+                        "lo_t_range": (lo_h[0][0], lo_h[-1][0]) if lo_h else None,
+                        "hi_t_range": (hi_h[0][0], hi_h[-1][0]) if hi_h else None,
                     })
             checks["numerical_guardrails"] = {
                 "status": "WARN" if active_clamps else "PASS",
@@ -518,10 +639,203 @@ def run_solver_audit(
         "notes": health_notes,
     }
 
+    provenance = {
+        "solver_backend": engine.solver_backend,
+        "rel_tol": rel_tol if rel_tol is not None else 1e-6,
+        "abs_tol": abs_tol if abs_tol is not None else 1e-8,
+        "cpp_sha256": (static_audit or {}).get("cpp_sha256", ""),
+        "toolchain": (static_audit or {}).get("toolchain", {}),
+    }
+
     return SolverAuditReport(
         model_name=model_name,
         n_states=n_states,
         n_params=n_params,
         checks=checks,
         static_audit=static_audit,
+        provenance=provenance,
     )
+
+
+AuditReport = SolverAuditReport
+
+
+class AuditSession:
+    """
+    Context manager orchestrating scoped compile-time and solve-time model audits:
+        with fx.audit() as audit:
+            engine = fx.Engine(model=MyModel())
+            res = engine.solve(protocol=protocol)
+        audit.print_summary()
+        assert audit.passed
+    """
+
+    def __init__(
+        self,
+        compiler: bool = True,
+        solver: bool = True,
+        rel_tol: Optional[float] = None,
+        abs_tol: Optional[float] = None,
+    ):
+        self.compiler = compiler
+        self.solver = solver
+        self.rel_tol = rel_tol
+        self.abs_tol = abs_tol
+        self._token: Optional[contextvars.Token] = None
+        self.static_reports: List[Dict[str, Any]] = []
+        self.reports: List[SolverAuditReport] = []
+
+    def __enter__(self) -> "AuditSession":
+        self._token = _AUDIT_CONTEXT.set(self)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._token is not None:
+            _AUDIT_CONTEXT.reset(self._token)
+            self._token = None
+
+    def record_static(self, static_report: Dict[str, Any]) -> None:
+        self.static_reports.append(static_report)
+
+    def record_solver(self, solver_report: SolverAuditReport) -> None:
+        self.reports.append(solver_report)
+
+    @property
+    def report(self) -> Optional[SolverAuditReport]:
+        return self.reports[-1] if self.reports else None
+
+    @property
+    def checks(self) -> Dict[str, Any]:
+        return self.reports[-1].checks if self.reports else {}
+
+    @property
+    def provenance(self) -> Dict[str, Any]:
+        return self.reports[-1].provenance if self.reports else {}
+
+    @property
+    def passed(self) -> bool:
+        solver_ok = all(r.passed for r in self.reports)
+        static_ok = all(s.get("ic_health", {}).get("ic_converged", True) for s in self.static_reports)
+        return solver_ok and static_ok
+
+    @property
+    def status(self) -> str:
+        if not self.reports and not self.static_reports:
+            return "EMPTY"
+        statuses = [r.status for r in self.reports]
+        for s in self.static_reports:
+            if not s.get("ic_health", {}).get("ic_converged", True):
+                statuses.append("FAIL")
+            elif not s.get("cpr_jvp_probe_passed", True):
+                statuses.append("WARN")
+        if "FAIL" in statuses:
+            return "FAIL"
+        if "WARN" in statuses:
+            return "WARN"
+        return "PASS"
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __len__(self) -> int:
+        return len(self.reports)
+
+    def __getitem__(self, idx: int) -> SolverAuditReport:
+        return self.reports[idx]
+
+    def to_dict(self) -> Dict[str, Any]:
+        if len(self.reports) == 1 and len(self.static_reports) <= 1:
+            return self.reports[0].to_dict()
+        return {
+            "status": self.status,
+            "passed": self.passed,
+            "n_runs": len(self.reports),
+            "runs": [r.to_dict() for r in self.reports],
+            "static_audits": self.static_reports if not self.reports else [],
+        }
+
+    def to_json(self, path: Optional[str] = None) -> str:
+        payload = json.dumps(self.to_dict(), indent=2, default=str)
+        if path:
+            with open(path, "w", encoding="utf-8") as fp:
+                fp.write(payload)
+        return payload
+
+    def print_summary(self) -> None:
+        if self.reports:
+            for r in self.reports:
+                r.print_summary()
+            return
+        if self.static_reports:
+            for s in self.static_reports:
+                stub = SolverAuditReport(
+                    model_name="StaticOnly",
+                    n_states=0,
+                    n_params=0,
+                    checks={"dae_residual": {"status": "SKIP", "reason": "No solve() executed inside fx.audit()"}},
+                    static_audit=s,
+                )
+                stub.print_summary()
+            return
+        print("AuditSession: no Engine compilation or solve() calls captured.")
+
+    def _require_report(self) -> SolverAuditReport:
+        if not self.reports:
+            raise RuntimeError("No solve() report captured in this AuditSession.")
+        return self.reports[-1]
+
+    def show_clamps(self) -> None:
+        self._require_report().show_clamps()
+
+    def show_transitions(self) -> None:
+        self._require_report().show_transitions()
+
+    def show_residuals(self, n: int = 5) -> None:
+        self._require_report().show_residuals(n=n)
+
+    def show_sensitivities(self) -> None:
+        self._require_report().show_sensitivities()
+
+    def show_math(self, state: Optional[str] = None) -> None:
+        if self.reports:
+            self.reports[-1].show_math(state=state)
+        elif self.static_reports:
+            print(self.static_reports[-1].get("math_pretty", "Math IR unavailable."))
+        else:
+            print("No audit data captured.")
+
+    def show_compute(self, state: Optional[str] = None) -> None:
+        if self.reports:
+            self.reports[-1].show_compute(state=state)
+        elif self.static_reports:
+            print(self.static_reports[-1].get("compute_pretty", "Compute IR unavailable."))
+        else:
+            print("No audit data captured.")
+
+    def show_boundaries(self) -> None:
+        if self.reports:
+            self.reports[-1].show_boundaries()
+        elif self.static_reports:
+            stub = SolverAuditReport("StaticOnly", 0, 0, {}, static_audit=self.static_reports[-1])
+            stub.show_boundaries()
+        else:
+            print("No audit data captured.")
+
+
+def audit(
+    compiler: bool = True,
+    solver: bool = True,
+    rel_tol: Optional[float] = None,
+    abs_tol: Optional[float] = None,
+) -> AuditSession:
+    """
+    Creates a scoped model-auditing context manager.
+
+    Usage:
+        with fx.audit() as report:
+            engine = fx.Engine(model=MyModel())
+            res = engine.solve(protocol=protocol)
+        report.print_summary()
+        assert report.passed
+    """
+    return AuditSession(compiler=compiler, solver=solver, rel_tol=rel_tol, abs_tol=abs_tol)

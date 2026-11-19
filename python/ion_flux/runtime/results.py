@@ -35,10 +35,6 @@ class SimulationResult:
 
     def print_summary(self) -> None:
         """Prints a structured execution and diagnostic summary."""
-        if self.audit is not None and hasattr(self.audit, "print_summary"):
-            self.audit.print_summary()
-            return
-
         print("=" * 64)
         print("ION_FLUX EXECUTION & DIAGNOSTIC SUMMARY")
         print("=" * 64)
@@ -75,6 +71,14 @@ class SimulationResult:
                 print(f"  Hardware Counters (PMU):")
                 print(f"    CPU Cycles:            {cycles:,}")
                 print(f"    Instructions:          {instr:,} (IPC: {ipc:.2f})")
+        if self.audit is not None:
+            checks = getattr(self.audit, "checks", {})
+            n_fail = sum(1 for c in checks.values() if c.get("status") == "FAIL")
+            n_warn = sum(1 for c in checks.values() if c.get("status") == "WARN")
+            n_pass = sum(1 for c in checks.values() if c.get("status") == "PASS")
+            print("-" * 64)
+            print(f"Audit Verdict:             {self.audit.status} ({n_fail} FAIL, {n_warn} WARN, {n_pass} PASS)")
+            print("                           Run res.audit.print_summary() for full scorecard.")
         print("=" * 64)
 
 

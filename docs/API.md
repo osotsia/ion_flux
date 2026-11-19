@@ -256,6 +256,28 @@ grads = loss.backward()
 print(grads["anode_D_s"]) 
 ```
 
+#### End-to-End Model Auditing (`with fx.audit() as audit:`)
+To audit a specific model's equations, boundaries, numerical residuals, and parameter sensitivities without adding overhead to production workloads, wrap the build and solve inside `fx.audit()` (or pass `audit_compiler=True` / `audit_solver=True` individually):
+
+~~~python
+with fx.audit() as audit:
+    engine = fx.Engine(model=MinimalDFN(), target="cpu:serial")
+    res = engine.solve(protocol=protocol)
+
+# Consolidated 1-screen scorecard + CI gate
+audit.print_summary()
+assert audit.passed
+
+# Targeted drill-downs and provenance JSON export
+audit.show_math(state="phi_e")
+audit.show_compute(state="c_e")
+audit.show_boundaries()
+audit.show_clamps()
+audit.show_residuals()
+audit.show_sensitivities()
+audit.to_json("dfn_audit.json")
+~~~
+
 ---
 
 ### Level 5: Cloud Scale & Native Parallelism
