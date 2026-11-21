@@ -123,11 +123,18 @@ def compute_expr_children(expr: Expr) -> Tuple[Expr, ...]:
             raise TypeError(f"Unhandled Compute IR Expr node: {type(expr).__name__}")
 
 
+_IR_PREC = {
+    "==": 1, "!=": 1, "<": 2, "<=": 2, ">": 2, ">=": 2,
+    "+": 3, "-": 3,
+    "*": 4, "/": 4,
+}
+
+
 def format_compute_ir(stmts: List[Stmt], indent: int = 0) -> str:
-    """Renders Compute IR statements with symbolic MemoryRefs and indented loop blocks."""
+    """Renders Compute IR statements with symbolic MemoryRefs and precedence-minimal syntax."""
     pad = "  " * indent
 
-    def fmt_expr(node: Expr) -> str:
+    def fmt_expr(node: Expr, parent_prec: int = 0) -> str:
         match node:
             case Literal(val=v):
                 if isinstance(v, float):
@@ -142,22 +149,35 @@ def format_compute_ir(stmts: List[Stmt], indent: int = 0) -> str:
                         case Literal(val=v) if int(float(v)) == bo:
                             return f"{arr}[{tag}]"
                         case BinaryOp(op="+", left=Literal(val=v), right=rest) if int(float(v)) == bo:
-                            return f"{arr}[{tag} + {fmt_expr(rest)}]"
-                    return f"{arr}[{tag} @ {fmt_expr(idx)}]"
-                return f"{arr}[{fmt_expr(idx)}]"
+                            return f"{arr}[{tag} + {fmt_expr(rest, 3)}]"
+                    return f"{arr}[{tag} @ {fmt_expr(idx, 0)}]"
+                return f"{arr}[{fmt_expr(idx, 0)}]"
+            case BinaryOp(op="+", left=l, right=UnaryMinus(expr=inner)):
+                return fmt_expr(BinaryOp("-", l, inner), parent_prec)
+            case BinaryOp(op="-", left=l, right=UnaryMinus(expr=inner)):
+                return fmt_expr(BinaryOp("+", l, inner), parent_prec)
             case BinaryOp(op=op, left=l, right=r):
-                return f"({fmt_expr(l)} {op} {fmt_expr(r)})"
+                prec = _IR_PREC.get(op, 0)
+                l_str = fmt_expr(l, prec)
+                r_prec = prec + (1 if op in ("-", "/", "==", "!=", "<", "<=", ">", ">=") else 0)
+                r_str = fmt_expr(r, r_prec)
+                out = f"{l_str} {op} {r_str}"
+                return f"({out})" if prec < parent_prec else out
+            case UnaryMinus(expr=UnaryMinus(expr=inner)):
+                return fmt_expr(inner, parent_prec)
             case UnaryMinus(expr=e):
-                return f"-({fmt_expr(e)})"
+                out = f"-{fmt_expr(e, 5)}"
+                return f"({out})" if parent_prec > 5 else out
             case FuncCall(func=f, args=args):
-                return f"{f}({', '.join(fmt_expr(a) for a in args)})"
+                return f"{f}({', '.join(fmt_expr(a, 0) for a in args)})"
             case Ternary(cond=c, true_val=tv, false_val=fv):
-                return f"({fmt_expr(c)} ? {fmt_expr(tv)} : {fmt_expr(fv)})"
+                out = f"{fmt_expr(c, 1)} ? {fmt_expr(tv, 1)} : {fmt_expr(fv, 1)}"
+                return f"({out})" if parent_prec > 0 else out
             case Reduction(loops=loops, child_expr=ce):
-                dom_s = " x ".join(f"{v}<{fmt_expr(end)}" for v, end in loops)
-                return f"SUM[{dom_s}]({fmt_expr(ce)})"
+                dom_s = " x ".join(f"{v}<{fmt_expr(end, 0)}" for v, end in loops)
+                return f"SUM[{dom_s}]({fmt_expr(ce, 0)})"
             case UnstructuredRead(idx_expr=ie):
-                return f"CSR_DIV(idx={fmt_expr(ie)})"
+                return f"CSR_DIV(idx={fmt_expr(ie, 0)})"
             case RawCpp(code=code):
                 return code
             case _:
@@ -170,17 +190,21 @@ def format_compute_ir(stmts: List[Stmt], indent: int = 0) -> str:
                 lines.append(f"{pad}// === {t} ===")
             case Comment(text=t, is_section=False):
                 lines.append(f"{pad}// {t}")
+            case VarDecl(var_type=vt, name=n, init=Ternary(cond=c, true_val=tv, false_val=fv)):
+                lines.append(f"{pad}{vt} {n} = {fmt_expr(c, 1)}")
+                lines.append(f"{pad}  ? {fmt_expr(tv, 1)}")
+                lines.append(f"{pad}  : {fmt_expr(fv, 1)};")
             case VarDecl(var_type=vt, name=n, init=init):
-                lines.append(f"{pad}{vt} {n} = {fmt_expr(init)};")
+                lines.append(f"{pad}{vt} {n} = {fmt_expr(init, 0)};")
             case Assign(lhs=lhs, rhs=rhs):
-                lines.append(f"{pad}{fmt_expr(lhs)} = {fmt_expr(rhs)};")
+                lines.append(f"{pad}{fmt_expr(lhs, 0)} = {fmt_expr(rhs, 0)};")
             case Loop(var=v, start=s, end=e, body=body, pragma=p):
                 if p:
                     lines.append(f"{pad}{p}")
-                lines.append(f"{pad}for {v} in [{fmt_expr(s)} .. {fmt_expr(e)}):")
+                lines.append(f"{pad}for {v} in [{fmt_expr(s, 0)} .. {fmt_expr(e, 0)}):")
                 lines.append(format_compute_ir(body, indent + 1))
             case IfElse(cond=c, then_body=tb, else_body=eb):
-                lines.append(f"{pad}if ({fmt_expr(c)}):")
+                lines.append(f"{pad}if {fmt_expr(c, 0)}:")
                 lines.append(format_compute_ir(tb, indent + 1))
                 if eb:
                     lines.append(f"{pad}else:")

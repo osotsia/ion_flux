@@ -114,6 +114,20 @@ class CppEmitter:
                     f"}}"
                 )
 
+            case VarDecl(var_type=var_type, name=name, init=Ternary(cond=cond, true_val=t, false_val=f)):
+                return (
+                    f"{var_type} {name} = {self.emit(cond, 1)}\n"
+                    f"    ? {self.emit(t, 1)}\n"
+                    f"    : {self.emit(f, 1)};"
+                )
+
+            case VarDecl(var_type=var_type, name=name, init=Ternary(cond=cond, true_val=t, false_val=f)):
+                return (
+                    f"{var_type} {name} = {self.emit(cond, 1)}\n"
+                    f"    ? {self.emit(t, 1)}\n"
+                    f"    : {self.emit(f, 1)};"
+                )
+
             case VarDecl(var_type=var_type, name=name, init=init):
                 return f"{var_type} {name} = {self.emit(init)};"
 

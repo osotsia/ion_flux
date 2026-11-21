@@ -19,31 +19,31 @@ from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
 from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
 
 
-def _build_offset_aliases(layout: Any) -> Tuple[Dict[Tuple[str, str, str], str], List[str]]:
+def _build_offset_aliases(layout: Any) -> Tuple[Dict[Tuple[str, str, str], str], List[Tuple[str, str]]]:
     alias_map: Dict[Tuple[str, str, str], str] = {}
-    decls: List[str] = []
+    decls: List[Tuple[str, str]] = []
 
     for s_name, (off, _) in getattr(layout, "state_offsets", {}).items():
         c_name = f"Y_{s_name}"
         alias_map[("y", s_name, "")] = c_name
-        decls.append(f"constexpr int {c_name} = {off};")
+        decls.append((c_name, f"static constexpr int {c_name} = {off};"))
 
     for p_name, (off, _) in getattr(layout, "param_offsets", {}).items():
         c_name = f"P_{p_name}"
         alias_map[("p", p_name, "")] = c_name
-        decls.append(f"constexpr int {c_name} = {off};")
+        decls.append((c_name, f"static constexpr int {c_name} = {off};"))
 
     for o_name, (off, _) in getattr(layout, "obs_offsets", {}).items():
         c_name = f"OBS_{o_name}"
         alias_map[("obs", o_name, "")] = c_name
-        decls.append(f"constexpr int {c_name} = {off};")
+        decls.append((c_name, f"static constexpr int {c_name} = {off};"))
 
     for d_name, fields in getattr(layout, "mesh_offsets", {}).items():
         for field_name, val in fields.items():
             if isinstance(val, int):
                 c_name = f"M_{d_name}_{field_name}"
                 alias_map[("m", d_name, field_name)] = c_name
-                decls.append(f"constexpr int {c_name} = {val};")
+                decls.append((c_name, f"static constexpr int {c_name} = {val};"))
 
     return alias_map, decls
 
@@ -76,10 +76,10 @@ def _filter_l_phys(l_phys_stmts: List[Stmt], stmts: List[Stmt]) -> List[Stmt]:
     return [s for s in l_phys_stmts if not isinstance(s, VarDecl) or s.name in used]
 
 
-def _emit_block(emitter: CppEmitter, preamble: List[str], stmts: List[Stmt]) -> str:
+def _emit_block(emitter: CppEmitter, stmts: List[Stmt]) -> str:
     if not stmts:
         return ""
-    lines: List[str] = list(preamble)
+    lines: List[str] = []
     for stmt in stmts:
         lines.extend(emitter.emit(stmt).splitlines())
     return "\n".join(lines)
@@ -98,19 +98,42 @@ def generate_cpp_with_audit(
     Lowers Math IR to Compute IR, stringifies statements to readable C++, and emits
     optional audit watchpoints into evaluate_audit_observables().
     """
+    import re
+    from ion_flux.compiler._3_backend.compute_ir import Literal as IrLiteral
+
     discretizer = FVMDiscretizer(layout, topo, semantic_ctx, state_map, target, math_sys=math_sys)
     l_phys_stmts, eq_stmts, obs_stmts = discretizer.discretize_system(math_sys, audit_compiler=audit_compiler)
     l_phys_ic_stmts, ic_stmts = discretizer.discretize_initial_conditions(math_sys)
     audit_obs_stmts, clamp_meta = discretizer.discretize_audit_observables()
 
-    alias_map, preamble_decls = _build_offset_aliases(layout)
+    alias_map, offset_decls = _build_offset_aliases(layout)
     emitter = CppEmitter(alias_map=alias_map)
 
+    # Hoist non-ALE static domain lengths to file-scope constexpr; keep dynamic ALE lengths local.
+    static_l_phys_map = {
+        s.name: f"static constexpr double {s.name} = {s.init.val};"
+        for s in l_phys_stmts
+        if isinstance(s, VarDecl) and isinstance(s.init, IrLiteral)
+    }
+
+    def _split_l_phys(l_stmts: List[Stmt], stmts: List[Stmt]) -> List[Stmt]:
+        return [
+            s for s in _filter_l_phys(l_stmts, stmts)
+            if not (isinstance(s, VarDecl) and s.name in static_l_phys_map)
+        ]
+
     res_stmts = _filter_l_phys(l_phys_stmts, eq_stmts) + eq_stmts
-    body_str = _emit_block(emitter, preamble_decls, res_stmts)
-    obs_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, obs_stmts) + obs_stmts) if obs_stmts else ""
-    ic_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_ic_stmts, ic_stmts) + ic_stmts)
-    audit_obs_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, audit_obs_stmts) + audit_obs_stmts) if audit_obs_stmts else ""
+    body_str = _emit_block(emitter, _split_l_phys(l_phys_stmts, eq_stmts) + eq_stmts)
+    obs_body_str = _emit_block(emitter, _split_l_phys(l_phys_stmts, obs_stmts) + obs_stmts) if obs_stmts else ""
+    ic_body_str = _emit_block(emitter, _split_l_phys(l_phys_ic_stmts, ic_stmts) + ic_stmts)
+    audit_obs_body_str = _emit_block(emitter, _split_l_phys(l_phys_stmts, audit_obs_stmts) + audit_obs_stmts) if audit_obs_stmts else ""
+
+    all_bodies = "\n".join([body_str, obs_body_str, ic_body_str, audit_obs_body_str])
+    used_tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", all_bodies))
+
+    const_lines = [decl for name, decl in offset_decls if name in used_tokens]
+    const_lines.extend(decl for name, decl in static_l_phys_map.items() if name in used_tokens)
+    constants_body = "\n".join(const_lines)
 
     cpp_str = generate_cpp_skeleton(
         n_states=layout.n_states,
@@ -120,6 +143,9 @@ def generate_cpp_with_audit(
         obs_body=obs_body_str,
         ic_body=ic_body_str,
         audit_obs_body=audit_obs_body_str,
+        constants_body=constants_body,
+        has_clamp=("CLAMP(" in all_bodies),
+        has_harmonic=("ion_flux_harmonic(" in all_bodies),
     )
 
     return {

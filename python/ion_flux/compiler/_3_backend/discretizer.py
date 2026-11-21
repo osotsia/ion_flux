@@ -122,6 +122,110 @@ def _clamp_or_direct(idx_expr: Expr, bound: int, var_bounds: Optional[Dict[str, 
     return FuncCall("CLAMP", [clean, Literal(bound)])
 
 
+def _unpack_eq_var(cond: Any) -> Optional[Tuple[str, int]]:
+    if not isinstance(cond, BinaryOp) or cond.op != "==" or not isinstance(cond.right, Literal):
+        return None
+    try:
+        target = int(float(cond.right.val))
+    except (TypeError, ValueError):
+        return None
+    match cond.left:
+        case Var(name=n):
+            return n, target
+        case BinaryOp(op="+", left=Var(name=n), right=Literal(val=c)):
+            return n, target - int(float(c))
+        case BinaryOp(op="-", left=Var(name=n), right=Literal(val=c)):
+            return n, target + int(float(c))
+        case _:
+            return None
+
+
+def _narrow_then_bounds(idx_mgr: "IndexManager", cond: Any) -> "IndexManager":
+    unpacked = _unpack_eq_var(cond)
+    if not unpacked:
+        return idx_mgr
+    var_name, val = unpacked
+    if var_name not in idx_mgr.var_bounds:
+        return idx_mgr
+    lo, hi = idx_mgr.var_bounds[var_name]
+    if lo <= val <= hi and lo < hi:
+        narrowed = idx_mgr.clone()
+        narrowed.var_bounds[var_name] = (val, val)
+        return narrowed
+    return idx_mgr
+
+
+def _narrow_else_bounds(idx_mgr: "IndexManager", cond: Any) -> "IndexManager":
+    unpacked = _unpack_eq_var(cond)
+    if not unpacked:
+        return idx_mgr
+    var_name, val = unpacked
+    if var_name not in idx_mgr.var_bounds:
+        return idx_mgr
+    lo, hi = idx_mgr.var_bounds[var_name]
+    if val == lo and lo < hi:
+        narrowed = idx_mgr.clone()
+        narrowed.var_bounds[var_name] = (lo + 1, hi)
+        return narrowed
+    if val == hi and lo < hi:
+        narrowed = idx_mgr.clone()
+        narrowed.var_bounds[var_name] = (lo, hi - 1)
+        return narrowed
+    return idx_mgr
+
+
+def _unpack_eq_var(cond: Any) -> Optional[Tuple[str, int]]:
+    if not isinstance(cond, BinaryOp) or cond.op != "==" or not isinstance(cond.right, Literal):
+        return None
+    try:
+        target = int(float(cond.right.val))
+    except (TypeError, ValueError):
+        return None
+    match cond.left:
+        case Var(name=n):
+            return n, target
+        case BinaryOp(op="+", left=Var(name=n), right=Literal(val=c)):
+            return n, target - int(float(c))
+        case BinaryOp(op="-", left=Var(name=n), right=Literal(val=c)):
+            return n, target + int(float(c))
+        case _:
+            return None
+
+
+def _narrow_then_bounds(idx_mgr: "IndexManager", cond: Any) -> "IndexManager":
+    unpacked = _unpack_eq_var(cond)
+    if not unpacked:
+        return idx_mgr
+    var_name, val = unpacked
+    if var_name not in idx_mgr.var_bounds:
+        return idx_mgr
+    lo, hi = idx_mgr.var_bounds[var_name]
+    if lo <= val <= hi and lo < hi:
+        narrowed = idx_mgr.clone()
+        narrowed.var_bounds[var_name] = (val, val)
+        return narrowed
+    return idx_mgr
+
+
+def _narrow_else_bounds(idx_mgr: "IndexManager", cond: Any) -> "IndexManager":
+    unpacked = _unpack_eq_var(cond)
+    if not unpacked:
+        return idx_mgr
+    var_name, val = unpacked
+    if var_name not in idx_mgr.var_bounds:
+        return idx_mgr
+    lo, hi = idx_mgr.var_bounds[var_name]
+    if val == lo and lo < hi:
+        narrowed = idx_mgr.clone()
+        narrowed.var_bounds[var_name] = (lo + 1, hi)
+        return narrowed
+    if val == hi and lo < hi:
+        narrowed = idx_mgr.clone()
+        narrowed.var_bounds[var_name] = (lo, hi - 1)
+        return narrowed
+    return idx_mgr
+
+
 class IndexManager:
     """
     Manages active loop variable contexts and linearizes N-dimensional
@@ -214,9 +318,31 @@ class MeshMetrics:
     finite-volume quantities: control volume sizes, face areas, and node spacings.
     """
 
-    def __init__(self, layout: Any, topo: TopologyAnalyzer):
+    def __init__(self, layout: Any, topo: TopologyAnalyzer, dynamic_domains: Optional[Dict[str, Any]] = None):
         self.layout = layout
         self.topo = topo
+        self.dynamic_domains = dynamic_domains or {}
+
+    def _is_strictly_positive_metric(self, base_axis: Optional[str], field: str) -> bool:
+        if not base_axis or base_axis in self.dynamic_domains:
+            return False
+        mesh_cache = getattr(self.layout, "mesh_cache", None)
+        if not mesh_cache:
+            return False
+        bounds = self.topo.domains.get(base_axis, {}).get("bounds", (0.0, 1.0))
+        l_phys = float(bounds[1] - bounds[0])
+        if l_phys <= 0.0:
+            return False
+        offs = self.layout.mesh_offsets.get(base_axis, {})
+        if field not in offs:
+            return False
+        start = offs[field]
+        res = self.topo.domains.get(base_axis, {}).get("resolution", 1)
+        count = max(res - 1, 0) if field == "w_dx_faces" else res
+        if count == 0:
+            return False
+        min_w = min(mesh_cache.get(start + k, 0.0) for k in range(count))
+        return (l_phys * min_w) > 1e-29
 
     def domain_length(self, base_axis: Optional[str]) -> Expr:
         """Returns the physical length variable for an axis (or default 1.0)."""
@@ -227,8 +353,10 @@ class MeshMetrics:
         off_w_dx = self.layout.mesh_offsets[base_axis]["w_dx_faces"]
         clamped_face = _clamp_or_direct(face_idx, max(resolution - 1, 1), var_bounds)
         w_dx = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_face), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
-        l_phys = self.domain_length(base_axis)
-        return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", l_phys, w_dx)])
+        prod = BinaryOp("*", self.domain_length(base_axis), w_dx)
+        if self._is_strictly_positive_metric(base_axis, "w_dx_faces"):
+            return prod
+        return FuncCall("std::max", [Literal("1e-30"), prod])
 
     def node_span_dx(self, base_axis: str, node_idx: Expr, resolution: int, var_bounds: Optional[Dict[str, Tuple[int, int]]] = None) -> Expr:
         """Returns the total distance spanning across the cell (dx_left + dx_right)."""
@@ -237,8 +365,10 @@ class MeshMetrics:
         clamped_l = _clamp_or_direct(BinaryOp("-", node_idx, Literal(1)), max(resolution - 1, 1), var_bounds)
         w_dx_r = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_r), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
         w_dx_l = ArrayAccess("m", BinaryOp("+", Literal(off_w_dx), clamped_l), symbol=base_axis, field="w_dx_faces", base_offset=off_w_dx)
-        l_phys = self.domain_length(base_axis)
-        return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", l_phys, BinaryOp("+", w_dx_r, w_dx_l))])
+        prod = BinaryOp("*", self.domain_length(base_axis), BinaryOp("+", w_dx_r, w_dx_l))
+        if self._is_strictly_positive_metric(base_axis, "w_dx_faces"):
+            return prod
+        return FuncCall("std::max", [Literal("1e-30"), prod])
 
     def face_area(self, base_axis: str, face_idx: Expr) -> Expr:
         """Returns the interfacial face area A_face at face_idx."""
@@ -249,8 +379,10 @@ class MeshMetrics:
         """Returns the control volume V_cell scaled by physical domain length."""
         off_vol = self.layout.mesh_offsets[base_axis]["w_V_nodes"]
         vol_node = ArrayAccess("m", BinaryOp("+", Literal(off_vol), node_idx), symbol=base_axis, field="w_V_nodes", base_offset=off_vol)
-        l_phys = self.domain_length(base_axis)
-        return FuncCall("std::max", [Literal("1e-30"), BinaryOp("*", vol_node, l_phys)])
+        prod = BinaryOp("*", vol_node, self.domain_length(base_axis))
+        if self._is_strictly_positive_metric(base_axis, "w_V_nodes"):
+            return prod
+        return FuncCall("std::max", [Literal("1e-30"), prod])
 
     def cell_coordinate(self, base_axis: str, node_idx: Expr) -> Expr:
         """Returns the continuous physical coordinate at node_idx."""
@@ -717,7 +849,7 @@ class FVMDiscretizer:
         self.dynamic_domain_bindings = math_sys.dynamic_domain_bindings if math_sys else {}
 
         # Initialize modular subsystems
-        self.metrics = MeshMetrics(layout, topo)
+        self.metrics = MeshMetrics(layout, topo, self.dynamic_domain_bindings)
         self.sampler = StateSampler(layout, topo, self.dirichlet_bcs)
         self.stitcher = PiecewiseFluxStitcher(topo)
         self.stencils = SpatialStencils(self.metrics, self.stitcher, topo, layout, self.neumann_bcs, discretizer=self)
@@ -728,6 +860,7 @@ class FVMDiscretizer:
         self.neumann_bcs = math_sys.neumann_bcs
         self.dirichlet_bcs = math_sys.dirichlet_bcs
         self.dynamic_domain_bindings = math_sys.dynamic_domain_bindings
+        self.metrics.dynamic_domains = self.dynamic_domain_bindings
         self.sampler.dirichlet_bcs = self.dirichlet_bcs
         self.stencils.neumann_bcs = self.neumann_bcs
         self.ale.dynamic_domain_bindings = self.dynamic_domain_bindings
@@ -974,7 +1107,8 @@ class FVMDiscretizer:
                 bc_ir = self.lower_expr(bc_info.expr, idx_mgr, current_axis, face=None, current_eq=current_eq)
                 if cond is True:
                     return bc_ir
-                return Ternary(cond, bc_ir, self._dispatch(node, idx_mgr, current_axis, face, current_eq))
+                else_mgr = _narrow_else_bounds(idx_mgr, cond)
+                return Ternary(cond, bc_ir, self._dispatch(node, else_mgr, current_axis, face, current_eq))
 
         return self._dispatch(node, idx_mgr, current_axis, face, current_eq)
 
@@ -1042,11 +1176,20 @@ class FVMDiscretizer:
                     bc_ir = self.lower_expr(bc_info.expr, idx_mgr, axis_name, face=None, current_eq=current_eq)
                     return cse_var_stmts(flux_var, bc_ir)
                 if cond is not False:
-                    bc_ir = self.lower_expr(bc_info.expr, idx_mgr, axis_name, face=None, current_eq=current_eq)
-                    bulk_ir = self._dispatch(child, idx_mgr, axis_name, face, current_eq)
+                    then_mgr = _narrow_then_bounds(idx_mgr, cond)
+                    else_mgr = _narrow_else_bounds(idx_mgr, cond)
+                    bc_ir = self.lower_expr(bc_info.expr, then_mgr, axis_name, face=None, current_eq=current_eq)
+                    bulk_ir = self._dispatch(child, else_mgr, axis_name, face, current_eq)
+                    bc_stmts = cse_assign_stmts(flux_var, bc_ir)
+                    bulk_stmts = cse_assign_stmts(flux_var, bulk_ir)
+                    if (
+                        len(bc_stmts) == 1 and isinstance(bc_stmts[0], Assign)
+                        and len(bulk_stmts) == 1 and isinstance(bulk_stmts[0], Assign)
+                    ):
+                        return [VarDecl("const double", flux_var, Ternary(cond, bc_stmts[0].rhs, bulk_stmts[0].rhs))]
                     return [
                         VarDecl("double", flux_var, Literal(0.0)),
-                        IfElse(cond, cse_assign_stmts(flux_var, bc_ir), cse_assign_stmts(flux_var, bulk_ir)),
+                        IfElse(cond, bc_stmts, bulk_stmts),
                     ]
 
             if neighbor is not None:
@@ -1054,24 +1197,27 @@ class FVMDiscretizer:
                 base_ax = self.topo.get_base_axis(axis_name)
                 bnd_idx = (cr.end_idx - 1) if face == "right" else cr.start_idx
                 bnd_cond = self._simplify_eq_cond(idx_mgr.get_local(base_ax), bnd_idx, idx_mgr.var_bounds)
-                this_flux = self._dispatch(child, idx_mgr, axis_name, face, current_eq)
                 if bnd_cond is False:
-                    return cse_var_stmts(flux_var, this_flux)
+                    return cse_var_stmts(flux_var, self._dispatch(child, idx_mgr, axis_name, face, current_eq))
 
-                nb_flux = self.lower_expr(neighbor.div_flux, idx_mgr, axis_name, face=face, current_eq=current_eq)
+                then_mgr = _narrow_then_bounds(idx_mgr, bnd_cond)
+                else_mgr = _narrow_else_bounds(idx_mgr, bnd_cond)
+                this_flux_bnd = self._dispatch(child, then_mgr, axis_name, face, current_eq)
+                nb_flux = self.lower_expr(neighbor.div_flux, then_mgr, axis_name, face=face, current_eq=current_eq)
                 fa_var = f"_fa_{self._cse_counter}"
                 fb_var = f"_fb_{self._cse_counter}"
                 self._cse_counter += 1
                 then_stmts = (
-                    cse_var_stmts(fa_var, this_flux)
+                    cse_var_stmts(fa_var, this_flux_bnd)
                     + cse_var_stmts(fb_var, nb_flux)
                     + [Assign(Var(flux_var), self.stitcher.harmonic_mean(Var(fa_var), Var(fb_var)))]
                 )
                 if bnd_cond is True:
                     return [VarDecl("double", flux_var, Literal(0.0))] + then_stmts
+                this_flux_bulk = self._dispatch(child, else_mgr, axis_name, face, current_eq)
                 return [
                     VarDecl("double", flux_var, Literal(0.0)),
-                    IfElse(bnd_cond, then_stmts, cse_assign_stmts(flux_var, this_flux)),
+                    IfElse(bnd_cond, then_stmts, cse_assign_stmts(flux_var, this_flux_bulk)),
                 ]
 
             bulk_ir = self._dispatch(child, idx_mgr, axis_name, face, current_eq)

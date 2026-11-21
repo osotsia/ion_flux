@@ -17,14 +17,16 @@ TEMPLATE = """
 #include <omp.h>
 #endif
 
-#define CLAMP(idx, bound) (std::max(0, std::min((int)(idx), (int)(bound) - 1)))
-
+{% if has_clamp %}#define CLAMP(idx, bound) (std::max(0, std::min((int)(idx), (int)(bound) - 1)))
+{% endif %}{% if has_harmonic %}
 static inline double ion_flux_harmonic(double a, double b) {
     const double abs_a = std::abs(a);
     const double abs_b = std::abs(b);
     return (a * abs_b + b * abs_a + 5e-31 * (a + b)) / (abs_a + abs_b + 1e-30);
 }
-
+{% endif %}{% if constants_body %}
+{{ constants_body }}
+{% endif %}
 #ifdef ENZYME_ACTIVE
 int enzyme_dup = 1;
 int enzyme_const = 2;
@@ -42,11 +44,8 @@ void set_spatial_threads(int num_threads) {
 }
 
 void evaluate_ic(const double* __restrict__ p, const double* __restrict__ m, double* __restrict__ y0, double* __restrict__ ydot0) {
-    int N = {{ n_states }};
-    for (int i = 0; i < N; ++i) {
-        y0[i] = 0.0;
-        ydot0[i] = 0.0;
-    }
+    {% if n_states > 0 %}std::fill_n(y0, {{ n_states }}, 0.0);
+    std::fill_n(ydot0, {{ n_states }}, 0.0);{% endif %}
 {{ ic_body | indent(4, true) }}
 }
 
@@ -126,7 +125,18 @@ void evaluate_vjp(
 } // extern "C"
 """
 
-def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, obs_body: str, ic_body: str = "", audit_obs_body: str = "") -> str:
+def generate_cpp_skeleton(
+    n_states: int,
+    n_params: int,
+    n_obs: int,
+    body: str,
+    obs_body: str,
+    ic_body: str = "",
+    audit_obs_body: str = "",
+    constants_body: str = "",
+    has_clamp: bool = True,
+    has_harmonic: bool = True,
+) -> str:
     env = jinja2.Environment()
     template = env.from_string(TEMPLATE)
     return template.render(
@@ -137,4 +147,7 @@ def generate_cpp_skeleton(n_states: int, n_params: int, n_obs: int, body: str, o
         obs_body=obs_body,
         ic_body=ic_body,
         audit_obs_body=audit_obs_body,
+        constants_body=constants_body,
+        has_clamp=has_clamp,
+        has_harmonic=has_harmonic,
     )

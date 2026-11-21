@@ -194,7 +194,7 @@ class ExecutableManifest:
         return manifest
 
 
-COMPILER_CACHE_VERSION = "2026.04.v9"
+COMPILER_CACHE_VERSION = "2026.04.v10"
 
 
 def _compute_ast_fingerprint(ast_payload: Dict[str, Any], layout: MemoryLayout, target: str, jacobian_bandwidth: Optional[int], audit_compiler: bool = False) -> str:
