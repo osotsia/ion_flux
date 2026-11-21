@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
-use crate::ffi::callbacks::{NativeJvpFn, NativeVjpFn};
+use crate::ffi::callbacks::Callbacks;
 use crate::stepper::problem::CprData;
 use crate::control::backward_pass::{AdjointParams, solve_adjoint_sensitivities};
 
@@ -16,14 +16,9 @@ pub fn discrete_adjoint_native<'py>(
     event_trigger_idx: isize
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-    let jvp_fn: NativeJvpFn = unsafe {
-        *lib.get(b"evaluate_jvp\0")
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_jvp: {e}")))?
-    };
-    let vjp_fn: NativeVjpFn = unsafe {
-        *lib.get(b"evaluate_vjp\0")
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_vjp: {e}")))?
-    };
+    let fns = Callbacks::from_lib(&lib).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let jvp_fn = fns.jvp_fn.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Missing evaluate_jvp"))?;
+    let vjp_fn = fns.vjp_fn.ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Missing evaluate_vjp"))?;
 
     let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
     let id_slice = id_arr.as_slice().map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("id_arr must be contiguous: {e}")))?;

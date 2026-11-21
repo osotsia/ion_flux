@@ -170,13 +170,15 @@ class IndexEvaluator:
                     neighbor = int(self.mesh_cache.get(ci_off + k, 0))
                     cols.append(s_off + neighbor)
 
-            case Reduction(loops=loops, child_expr=child_expr, pre_stmts=pre_stmts):
+            case Reduction(loops=loops, child_expr=child_expr, vol_exprs=vol_exprs, pre_stmts=pre_stmts):
                 def eval_loops(depth, current_env):
                     if depth == len(loops):
                         for p_stmt in pre_stmts:
                             if isinstance(p_stmt, VarDecl):
                                 self.var_deps[p_stmt.name] = self.extract_cols(p_stmt.init, current_env)
                         cols.extend(self.extract_cols(child_expr, current_env))
+                        for ve in vol_exprs:
+                            cols.extend(self.extract_cols(ve, current_env))
                         return
                     var, end_expr = loops[depth]
                     end = self.eval_idx(end_expr, current_env)

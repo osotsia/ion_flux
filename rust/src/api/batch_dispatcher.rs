@@ -101,17 +101,7 @@ impl TrajectoryBuilder {
 }
 
 fn load_callbacks(lib: &libloading::Library) -> Result<(Callbacks, Option<NativeIcFn>), String> {
-    unsafe {
-        let fns = Callbacks {
-            res_fn: *lib.get(b"evaluate_residual\0").map_err(|e| format!("Missing evaluate_residual: {e}"))?,
-            obs_fn: lib.get(b"evaluate_observables\0").map(|s| *s).ok(),
-            jvp_fn: lib.get(b"evaluate_jvp\0").map(|s| *s).ok(),
-            vjp_fn: lib.get(b"evaluate_vjp\0").map(|s| *s).ok(),
-            set_threads_fn: lib.get(b"set_spatial_threads\0").map(|s| *s).ok(),
-        };
-        let ic_fn: Option<NativeIcFn> = lib.get(b"evaluate_ic\0").map(|s| *s).ok();
-        Ok((fns, ic_fn))
-    }
+    Ok((Callbacks::from_lib(lib)?, Callbacks::load_ic(lib)))
 }
 
 use std::collections::HashMap;

@@ -742,3 +742,245 @@ fn test_realtime_frozen_step_counter() {
     assert_eq!(diag.realtime_frozen_steps, 1);
     assert_eq!(diag.rejected_steps, 1);
 }
+
+#[test]
+fn test_calc_algebraic_roots_pure_differential_is_noop() {
+    let (mut prob, mut state, mut history, mut scratch, mut lu, mut diag) = create_mock_fixture();
+    prob.id.fill(1.0);
+    let y_orig = state.y.clone();
+
+    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut lu, &mut diag)
+        .expect("Pure differential root check should succeed");
+
+    assert!(diag.ic_converged);
+    assert_eq!(diag.ic_iters, 0);
+    assert_eq!(diag.ic_final_max_res, 0.0);
+    assert_eq!(diag.numeric_factorizations, 0);
+    assert_eq!(state.y, y_orig);
+}
+
+#[test]
+fn test_calc_algebraic_roots_clamped_step_and_gmres_diagonal() {
+    // 1. SparseLU path with max_steps clamping converges from large offset
+    let (mut prob, mut state, mut history, mut scratch, mut lu, mut diag) = create_mock_fixture();
+    prob.max_steps[5] = 0.5;
+    state.y[5] = -10.0;
+
+    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut lu, &mut diag)
+        .expect("Clamped root convergence failed");
+
+    let expected_y5 = state.y[0..5].iter().sum::<f64>() + state.p[1];
+    assert!(diag.ic_converged);
+    assert!((state.y[5] - expected_y5).abs() < 1e-8);
+
+    // 2. GMRES (bw = -1) path uses diagonal damped Jacobi from assembled triplets
+    let (mut prob_g, mut state_g, mut hist_g, mut scr_g, _, mut diag_g) = create_mock_fixture();
+    prob_g.bw = -1;
+    state_g.y[5] = 0.0;
+    let mut gmres = crate::linear::solver::LinearSolver::new(MOCK_N, -1);
+
+    algebraic_roots::calc_algebraic_roots(&prob_g, &mut state_g, &mut hist_g, &mut scr_g, &mut gmres, &mut diag_g)
+        .expect("GMRES diagonal algebraic root convergence failed");
+
+    assert!(diag_g.ic_converged);
+    assert!((state_g.y[5] - expected_y5).abs() < 1e-7);
+}
+
+#[test]
+fn test_calc_algebraic_roots_nan_residual_rolls_back_state() {
+    unsafe extern "C" fn nan_on_negative_res(
+        y: *const f64, _ydot: *const f64, _p: *const f64, _m: *const f64, res: *mut f64,
+    ) {
+        let y_val = *y;
+        *res = if y_val < 0.0 { f64::NAN } else { y_val + 10.0 };
+    }
+    unsafe extern "C" fn unit_jvp(
+        _y: *const f64, _ydot: *const f64, _p: *const f64, _m: *const f64,
+        _cj: f64, v: *const f64, _dy: *mut f64, _dydot: *mut f64, _rd: *mut f64, out: *mut f64,
+    ) {
+        *out = *v;
+    }
+
+    let prob = crate::stepper::problem::Problem {
+        n: 1,
+        bw: 0,
+        n_obs: 0,
+        id: vec![0.0],
+        constraints: vec![0.0],
+        m: vec![],
+        spatial_diag: vec![0.0],
+        max_steps: vec![0.0],
+        cpr: crate::stepper::problem::CprData {
+            color_seeds: vec![vec![1.0]],
+            color_ptrs: vec![0, 1],
+            color_rows: vec![0],
+            color_cols: vec![0],
+            dense_rows: vec![],
+        },
+        config: crate::stepper::problem::SolverConfig::default(),
+        fns: crate::ffi::callbacks::Callbacks {
+            res_fn: nan_on_negative_res,
+            obs_fn: None,
+            jvp_fn: Some(unit_jvp),
+            vjp_fn: None,
+            set_threads_fn: None,
+        },
+    };
+    let mut state = crate::stepper::state::SystemState::new(vec![1.0], vec![0.0], vec![]);
+    let mut history = crate::stepper::history::BdfHistory::new(1);
+    let mut scratch = crate::stepper::state::StepScratchpad::new(1);
+    let mut lu = crate::linear::solver::LinearSolver::new(1, 0);
+    let mut diag = crate::diagnostics::Diagnostics::new(1);
+
+    algebraic_roots::calc_algebraic_roots(&prob, &mut state, &mut history, &mut scratch, &mut lu, &mut diag)
+        .expect("calc_algebraic_roots should recover gracefully from NaN residuals");
+
+    assert!(!diag.ic_converged);
+    assert!(diag.ic_final_max_res.is_nan());
+    assert!(state.y[0].is_finite(), "State must roll back when residual hits NaN");
+    assert_eq!(state.y[0], 1.0);
+}
+
+#[test]
+fn test_gmres_symmetric_breakdown_and_high_cj_preconditioning() {
+    use crate::linear::gmres::solve_gmres;
+
+    // 4-node linear system where nodes 2 & 3 are completely symmetric (Krylov dim 3 < n=4)
+    let c_j = 1e9_f64;
+    let mut rhs = [1.0, 2.0, 3.0, 3.0];
+    let rhs_orig = rhs;
+
+    let matvec = |v: &[f64], out: &mut [f64]| {
+        out[0] = (c_j + 3.0) * v[0] - v[1] - v[2] - v[3];
+        out[1] = -v[0] + (c_j + 1.0) * v[1];
+        out[2] = -v[0] + (c_j + 1.0) * v[2];
+        out[3] = -v[0] + (c_j + 1.0) * v[3];
+    };
+    let precond = |v: &[f64], out: &mut [f64]| {
+        for i in 0..4 {
+            out[i] = v[i] / (c_j + 1.0);
+        }
+    };
+
+    solve_gmres(4, &mut rhs, matvec, precond)
+        .expect("GMRES should handle symmetric Krylov breakdown and large c_j preconditioning");
+
+    let mut check = [0.0; 4];
+    matvec(&rhs, &mut check);
+    for i in 0..4 {
+        assert!(
+            (check[i] - rhs_orig[i]).abs() < 1e-5,
+            "GMRES residual mismatch at {i}: got {}, expected {}",
+            check[i],
+            rhs_orig[i]
+        );
+    }
+}
+
+#[test]
+fn test_adjoint_sliver_step_preserves_terminal_dl_dy() {
+    let (prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+    let n = prob.n;
+
+    let mut t_vec = vec![0.0];
+    let mut y_vec = state.y.clone();
+    let mut ydot_vec = state.ydot.clone();
+    let mut p_vec = state.p.clone();
+
+    for _ in 1..4 {
+        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, 0.01, None)
+            .expect("Forward step failed");
+        t_vec.push(state.t);
+        y_vec.extend_from_slice(&state.y);
+        ydot_vec.extend_from_slice(&state.ydot);
+        p_vec.extend_from_slice(&state.p);
+    }
+    // Append a 1e-12 sliver final microstep whose terminal dl_dy[-1] must carry over cleanly
+    t_vec.push(state.t + 1e-12);
+    y_vec.extend_from_slice(&state.y);
+    ydot_vec.extend_from_slice(&state.ydot);
+    p_vec.extend_from_slice(&state.p);
+
+    let n_rows = t_vec.len();
+    use numpy::ndarray::{Array1, Array2};
+    let t_arr = Array1::from_vec(t_vec);
+    let y_arr = Array2::from_shape_vec((n_rows, n), y_vec).unwrap();
+    let ydot_arr = Array2::from_shape_vec((n_rows, n), ydot_vec).unwrap();
+    let p_arr = Array2::from_shape_vec((n_rows, MOCK_N_PARAMS), p_vec).unwrap();
+
+    let mut dl_dy_vec = vec![0.0; n_rows * n];
+    dl_dy_vec[(n_rows - 1) * n] = 1.0;
+    let dl_dy_arr = Array2::from_shape_vec((n_rows, n), dl_dy_vec).unwrap();
+
+    let adj_params = crate::control::backward_pass::AdjointParams {
+        bandwidth: prob.bw,
+        id_slice: &prob.id,
+        m_slice: &prob.m,
+        cpr: &prob.cpr,
+        jvp_fn: prob.fns.jvp_fn.unwrap(),
+        vjp_fn: prob.fns.vjp_fn.unwrap(),
+        event_trigger_idx: -1,
+    };
+
+    let grads = crate::control::backward_pass::solve_adjoint_sensitivities(
+        &adj_params, y_arr.view(), ydot_arr.view(), t_arr.view(), p_arr.view(), dl_dy_arr.view(),
+    ).expect("Adjoint solve with sliver step failed");
+
+    assert!(grads[0].abs() > 1e-6, "Terminal dl_dy was dropped across final 1e-12 sliver step: {:?}", grads);
+}
+
+#[test]
+fn test_adjoint_gmres_survives_enzyme_lambda_zeroing() {
+    unsafe extern "C" fn zeroing_vjp(
+        y: *const f64, ydot: *const f64, p: *const f64, m: *const f64,
+        lambda_vec: *const f64, res_dummy: *mut f64,
+        dp_out: *mut f64, dy_out: *mut f64, dydot_out: *mut f64,
+    ) {
+        mock_evaluate_vjp(y, ydot, p, m, lambda_vec, res_dummy, dp_out, dy_out, dydot_out);
+        let lam_mut = std::slice::from_raw_parts_mut(lambda_vec as *mut f64, MOCK_N);
+        lam_mut.fill(0.0);
+    }
+
+    let (mut prob, mut state, mut history, mut scratch, mut linear_solver, mut diag) = create_mock_fixture();
+    prob.bw = -1;
+    let n = prob.n;
+
+    let mut t_vec = vec![0.0];
+    let mut y_vec = state.y.clone();
+    let mut ydot_vec = state.ydot.clone();
+    let mut p_vec = state.p.clone();
+    for _ in 1..4 {
+        bdf::step(&prob, &mut state, &mut history, &mut scratch, &mut linear_solver, &mut diag, 0.01, None)
+            .expect("Forward step failed");
+        t_vec.push(state.t);
+        y_vec.extend_from_slice(&state.y);
+        ydot_vec.extend_from_slice(&state.ydot);
+        p_vec.extend_from_slice(&state.p);
+    }
+
+    use numpy::ndarray::{Array1, Array2};
+    let n_rows = t_vec.len();
+    let t_arr = Array1::from_vec(t_vec);
+    let y_arr = Array2::from_shape_vec((n_rows, n), y_vec).unwrap();
+    let ydot_arr = Array2::from_shape_vec((n_rows, n), ydot_vec).unwrap();
+    let p_arr = Array2::from_shape_vec((n_rows, MOCK_N_PARAMS), p_vec).unwrap();
+    let mut dl_dy_vec = vec![0.0; n_rows * n];
+    dl_dy_vec[(n_rows - 1) * n] = 1.0;
+    let dl_dy_arr = Array2::from_shape_vec((n_rows, n), dl_dy_vec).unwrap();
+
+    let adj_params = crate::control::backward_pass::AdjointParams {
+        bandwidth: -1,
+        id_slice: &prob.id,
+        m_slice: &prob.m,
+        cpr: &prob.cpr,
+        jvp_fn: prob.fns.jvp_fn.unwrap(),
+        vjp_fn: zeroing_vjp,
+        event_trigger_idx: -1,
+    };
+
+    let grads = crate::control::backward_pass::solve_adjoint_sensitivities(
+        &adj_params, y_arr.view(), ydot_arr.view(), t_arr.view(), p_arr.view(), dl_dy_arr.view(),
+    ).expect("GMRES adjoint failed with lambda-zeroing VJP");
+
+    assert!(grads[0].abs() > 1e-6, "GMRES basis corrupted by VJP lambda zeroing: {:?}", grads);
+}

@@ -21,6 +21,34 @@ def get_active_audit() -> Optional["AuditSession"]:
     return _AUDIT_CONTEXT.get()
 
 
+def grade_audit(checks: Dict[str, Any], static_audit: Optional[Dict[str, Any]]) -> List[str]:
+    """Single source of truth for reducing runtime and static audit checks into status tokens."""
+    statuses = [c.get("status", "PASS") for c in checks.values()]
+    if static_audit:
+        if "cpr_jvp_probe_passed" in static_audit:
+            statuses.append("PASS" if static_audit["cpr_jvp_probe_passed"] else "WARN")
+        ledger = static_audit.get("boundary_ledger", [])
+        if any(e.get("implicit_zero_flux_faces") for e in ledger):
+            statuses.append("WARN")
+        if any(e.get("missing_gauge_anchor") for e in ledger):
+            statuses.append("WARN")
+        ic = static_audit.get("ic_health")
+        if ic is not None:
+            statuses.append("PASS" if ic.get("ic_converged", False) else "FAIL")
+            j_max, j_min = ic.get("init_jac_max", 0.0), ic.get("init_jac_min", 0.0)
+            if j_min > 0.0 and j_max > 0.0 and (j_max / j_min) > 1e20:
+                statuses.append("WARN")
+    return statuses
+
+
+def reduce_status(statuses: List[str]) -> str:
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "WARN" in statuses:
+        return "WARN"
+    return "PASS"
+
+
 class SolverAuditReport:
     """Structured scorecard and verification data produced by solve(..., audit_solver=True)."""
 
@@ -41,20 +69,7 @@ class SolverAuditReport:
         self.provenance = provenance or {}
 
     def _all_statuses(self) -> List[str]:
-        statuses = [c.get("status", "PASS") for c in self.checks.values()]
-        if self.static_audit:
-            if "cpr_jvp_probe_passed" in self.static_audit:
-                statuses.append("PASS" if self.static_audit["cpr_jvp_probe_passed"] else "WARN")
-            ledger = self.static_audit.get("boundary_ledger", [])
-            if any(e.get("implicit_zero_flux_faces") for e in ledger):
-                statuses.append("WARN")
-            ic = self.static_audit.get("ic_health")
-            if ic is not None:
-                statuses.append("PASS" if ic.get("ic_converged", False) else "FAIL")
-                j_max, j_min = ic.get("init_jac_max", 0.0), ic.get("init_jac_min", 0.0)
-                if j_min > 0.0 and j_max > 0.0 and (j_max / j_min) > 1e20:
-                    statuses.append("WARN")
-        return statuses
+        return grade_audit(self.checks, self.static_audit)
 
     @property
     def passed(self) -> bool:
@@ -62,12 +77,7 @@ class SolverAuditReport:
 
     @property
     def status(self) -> str:
-        statuses = self._all_statuses()
-        if "FAIL" in statuses:
-            return "FAIL"
-        if "WARN" in statuses:
-            return "WARN"
-        return "PASS"
+        return reduce_status(self._all_statuses())
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -107,11 +117,14 @@ class SolverAuditReport:
 
             ledger = self.static_audit.get("boundary_ledger", [])
             implicit_count = sum(len(e.get("implicit_zero_flux_faces", [])) for e in ledger)
-            led_st = "WARN" if implicit_count > 0 else "PASS"
+            gauge_missing = [e["state"] for e in ledger if e.get("missing_gauge_anchor")]
+            led_st = "WARN" if (implicit_count > 0 or gauge_missing) else "PASS"
             print(f"  [{led_st:<4}] Boundary Completeness     {implicit_count} faces use implicit zero-flux fallback")
             for e in ledger:
                 for face in e.get("implicit_zero_flux_faces", []):
                     print(f"         - {e['state']}.{face}")
+            if gauge_missing:
+                print(f"         - Missing Dirichlet gauge anchor on spatial DAE: {', '.join(gauge_missing)}")
         else:
             print("  [SKIP] Static Audit            Compile with Engine(..., audit_compiler=True) for full checks")
 
@@ -490,22 +503,45 @@ def run_solver_audit(
             c_seeds, c_ptrs, c_rows, c_cols, c_dense = manifest.cpr_cache
             dl_dy = np.zeros_like(y_traj)
 
-            v_offset = None
-            qoi_name = "0.5*||y(T)||^2"
+            v_info = None
             for v_cand in ("V_cell", "V", "v", "Voltage"):
                 if v_cand in manifest.layout.state_offsets:
-                    v_offset = manifest.layout.state_offsets[v_cand][0]
-                    qoi_name = v_cand
+                    v_info = (v_cand, manifest.layout.state_offsets[v_cand][0])
                     break
 
-            if v_offset is not None:
-                dl_dy[-1, v_offset] = 1.0
-                qoi_val = abs(float(y_traj[-1, v_offset]))
+            i_info = None
+            for i_cand in ("i_app", "I_app", "I"):
+                if i_cand in manifest.layout.state_offsets:
+                    i_info = (i_cand, manifest.layout.state_offsets[i_cand][0])
+                    break
+
+            if len(t_eval_arr) > 1:
+                dt = np.zeros_like(t_eval_arr)
+                dt[1:] = np.diff(t_eval_arr)
+                total_t = max(float(t_eval_arr[-1] - t_eval_arr[0]), 1e-12)
+                w_t = dt / total_t
             else:
-                y_final = y_traj[-1]
-                norm_y = float(np.linalg.norm(y_final)) + 1e-12
-                dl_dy[-1] = y_final / norm_y
-                qoi_val = norm_y
+                w_t = np.ones(len(t_eval_arr), dtype=np.float64)
+
+            if v_info is not None:
+                v_name, v_off = v_info
+                v_traj = y_traj[:, v_off]
+                v_scale = max(float(np.max(np.abs(v_traj))), 1e-6)
+                dl_dy[:, v_off] = w_t * v_traj / (v_scale ** 2)
+                qoi_val = 0.5 * float(np.sum(w_t * ((v_traj / v_scale) ** 2)))
+                qoi_name = f"{v_name}(L2)"
+                if i_info is not None:
+                    i_name, i_off = i_info
+                    i_traj = y_traj[:, i_off]
+                    i_scale = max(float(np.max(np.abs(i_traj))), 1e-6)
+                    dl_dy[:, i_off] = w_t * i_traj / (i_scale ** 2)
+                    qoi_val += 0.5 * float(np.sum(w_t * ((i_traj / i_scale) ** 2)))
+                    qoi_name = f"{v_name}+{i_name}(L2)"
+            else:
+                y_scale = max(float(np.max(np.abs(y_traj))), 1e-6)
+                dl_dy[:] = (w_t[:, None] * y_traj) / (y_scale ** 2)
+                qoi_val = 0.5 * float(np.sum(w_t * np.sum((y_traj / y_scale) ** 2, axis=1)))
+                qoi_name = "||y||_L2^2"
 
             p_grad = discrete_adjoint_native(
                 manifest.lib_path, y_traj, ydot_traj,
@@ -523,9 +559,14 @@ def run_solver_audit(
                     continue
                 p_val = parameters.get(p_name, manifest.default_parameters.get(p_name, 1.0))
                 grad_val = float(p_grad_arr[off])
-                norm_sens = (abs(p_val) / max(qoi_val, 1e-6)) * abs(grad_val)
+                if abs(p_val) > 0.0:
+                    norm_sens = (abs(p_val) / max(qoi_val, 1e-6)) * abs(grad_val)
+                    is_dead = norm_sens < 1e-10
+                else:
+                    norm_sens = abs(grad_val)
+                    is_dead = abs(grad_val) < 1e-12
                 sens_ranking.append((p_name, norm_sens, grad_val))
-                if abs(grad_val) < 1e-15:
+                if is_dead:
                     dead_params.append(p_name)
                 elif norm_sens > 1e4:
                     extreme_params.append(p_name)
@@ -714,25 +755,18 @@ class AuditSession:
 
     @property
     def passed(self) -> bool:
-        solver_ok = all(r.passed for r in self.reports)
-        static_ok = all(s.get("ic_health", {}).get("ic_converged", True) for s in self.static_reports)
-        return solver_ok and static_ok
+        return self.status != "FAIL"
 
     @property
     def status(self) -> str:
         if not self.reports and not self.static_reports:
             return "EMPTY"
-        statuses = [r.status for r in self.reports]
+        statuses: List[str] = []
+        for r in self.reports:
+            statuses.extend(r._all_statuses())
         for s in self.static_reports:
-            if not s.get("ic_health", {}).get("ic_converged", True):
-                statuses.append("FAIL")
-            elif not s.get("cpr_jvp_probe_passed", True):
-                statuses.append("WARN")
-        if "FAIL" in statuses:
-            return "FAIL"
-        if "WARN" in statuses:
-            return "WARN"
-        return "PASS"
+            statuses.extend(grade_audit({}, s))
+        return reduce_status(statuses)
 
     def __bool__(self) -> bool:
         return True

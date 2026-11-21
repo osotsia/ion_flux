@@ -20,7 +20,7 @@ struct AdjointWorkspace {
     jvp_out: Vec<f64>, jvp_dy: Vec<f64>, jvp_dydot: Vec<f64>, res_dummy: Vec<f64>,
     dp_out: Vec<f64>, dy_out: Vec<f64>, dydot_out: Vec<f64>,
     lambda_vjp: Vec<f64>, vjp_dp: Vec<f64>, vjp_dy: Vec<f64>, vjp_dydot: Vec<f64>,
-    gmres_dp: Vec<f64>, gmres_dy: Vec<f64>, gmres_dydot: Vec<f64>, gmres_res_dummy: Vec<f64>,
+    gmres_lambda: Vec<f64>, gmres_dp: Vec<f64>, gmres_dy: Vec<f64>, gmres_dydot: Vec<f64>, gmres_res_dummy: Vec<f64>,
 }
 
 impl AdjointWorkspace {
@@ -30,7 +30,7 @@ impl AdjointWorkspace {
             jvp_out: vec![0.0; n], jvp_dy: vec![0.0; n], jvp_dydot: vec![0.0; n], res_dummy: vec![0.0; n],
             dp_out: vec![0.0; n_params], dy_out: vec![0.0; n], dydot_out: vec![0.0; n],
             lambda_vjp: vec![0.0; n], vjp_dp: vec![0.0; n_params], vjp_dy: vec![0.0; n], vjp_dydot: vec![0.0; n],
-            gmres_dp: vec![0.0; n_params], gmres_dy: vec![0.0; n], gmres_dydot: vec![0.0; n], gmres_res_dummy: vec![0.0; n],
+            gmres_lambda: vec![0.0; n], gmres_dp: vec![0.0; n_params], gmres_dy: vec![0.0; n], gmres_dydot: vec![0.0; n], gmres_res_dummy: vec![0.0; n],
         }
     }
 }
@@ -52,8 +52,14 @@ pub fn solve_adjoint_sensitivities(
     let mut diag = Diagnostics::new(n);
     let mut solver = NativeSparseLuSolver::new(n, params.bandwidth);
     let mut ws = AdjointWorkspace::new(n, n_params);
+    let mut pending_dl_dy = vec![0.0; n];
 
     for step in (1..y_arr.nrows()).rev() {
+        let dl_dy_step = dl_dy_arr.row(step).to_slice().unwrap();
+        for i in 0..n {
+            pending_dl_dy[i] += dl_dy_step[i];
+        }
+
         let dt = t_arr[step] - t_arr[step - 1];
         if dt <= 1e-12 { continue; }
 
@@ -61,10 +67,10 @@ pub fn solve_adjoint_sensitivities(
         let y = y_arr.row(step).to_slice().unwrap();
         let ydot = ydot_arr.row(step).to_slice().unwrap();
         let p_list = p_arr.row(step).to_slice().unwrap();
-        let dl_dy_step = dl_dy_arr.row(step).to_slice().unwrap();
 
         for i in 0..n {
-            ws.rhs[i] = -dl_dy_step[i] + prev_dydot_vjp[i] * prev_c_j;
+            ws.rhs[i] = -pending_dl_dy[i] + prev_dydot_vjp[i] * prev_c_j;
+            pending_dl_dy[i] = 0.0;
         }
 
         if params.event_trigger_idx >= 0 && step == y_arr.nrows() - 1 {
@@ -89,14 +95,17 @@ pub fn solve_adjoint_sensitivities(
 fn solve_gmres_step(params: &AdjointParams, ws: &mut AdjointWorkspace, c_j: f64, y: &[f64], ydot: &[f64], p: &[f64]) -> Result<(), String> {
     let n = y.len();
     let mut jvp_t = |v: &[f64], out: &mut [f64]| {
-        unsafe { (params.vjp_fn)(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), params.m_slice.as_ptr(), v.as_ptr(), ws.gmres_res_dummy.as_mut_ptr(), ws.gmres_dp.as_mut_ptr(), ws.gmres_dy.as_mut_ptr(), ws.gmres_dydot.as_mut_ptr()); }
+        // Copy v into scratch because Enzyme zeroes the res-shadow (lambda_vec) buffer in-place.
+        ws.gmres_lambda.copy_from_slice(v);
+        unsafe { (params.vjp_fn)(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), params.m_slice.as_ptr(), ws.gmres_lambda.as_ptr(), ws.gmres_res_dummy.as_mut_ptr(), ws.gmres_dp.as_mut_ptr(), ws.gmres_dy.as_mut_ptr(), ws.gmres_dydot.as_mut_ptr()); }
         for i in 0..n { out[i] = ws.gmres_dy[i] + c_j * ws.gmres_dydot[i]; }
     };
     let precond = |v: &[f64], out: &mut [f64]| {
         for i in 0..n { out[i] = v[i] / (c_j * params.id_slice[i] + 1.0); }
     };
     solve_gmres(n, &mut ws.rhs, &mut jvp_t, precond)?;
-    unsafe { (params.vjp_fn)(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), params.m_slice.as_ptr(), ws.rhs.as_ptr(), ws.res_dummy.as_mut_ptr(), ws.dp_out.as_mut_ptr(), ws.dy_out.as_mut_ptr(), ws.dydot_out.as_mut_ptr()); }
+    ws.gmres_lambda.copy_from_slice(&ws.rhs);
+    unsafe { (params.vjp_fn)(y.as_ptr(), ydot.as_ptr(), p.as_ptr(), params.m_slice.as_ptr(), ws.gmres_lambda.as_ptr(), ws.res_dummy.as_mut_ptr(), ws.dp_out.as_mut_ptr(), ws.dy_out.as_mut_ptr(), ws.dydot_out.as_mut_ptr()); }
     Ok(())
 }
 

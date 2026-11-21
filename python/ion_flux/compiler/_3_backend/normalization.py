@@ -13,7 +13,8 @@ from ion_flux.compiler._2_middle_end.ast_utils import extract_div_child
 from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp, MathUnaryOp, MathClamp,
     MathGrad, MathDiv, MathDt, MathCoords, MathIntegral, MathBoundaryRef,
-    MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathInitialCondition, MathNeumannBC, MathSystem
+    MathEquation, MathObservable, MathPiecewiseRegion, MathDirichletOverride, MathInitialCondition, MathNeumannBC, MathSystem,
+    math_children, extract_domain_name
 )
 
 
@@ -344,25 +345,6 @@ def verify_no_unreduced_broadcasts(math_sys: MathSystem, topo: TopologyAnalyzer)
             return set()
         return {topo.get_base_axis(ax) for ax in topo.get_axes(domain_name)}
 
-    def infer_domain_name(expr: MathExpr) -> Optional[str]:
-        match expr:
-            case MathState(domain_name=d_name):
-                return d_name
-            case MathBoundaryRef(domain=d_name, child=c):
-                return d_name or infer_domain_name(c)
-            case MathGrad(axis=ax, child=c) | MathDiv(axis=ax, child=c):
-                return ax or infer_domain_name(c)
-            case MathCoords(axis=ax):
-                return ax
-            case MathUnaryOp(child=c) | MathDt(child=c):
-                return infer_domain_name(c)
-            case MathBinaryOp(left=l, right=r):
-                return infer_domain_name(l) or infer_domain_name(r)
-            case MathClamp(child=c):
-                return infer_domain_name(c)
-            case _:
-                return None
-
     def check_expr(expr: MathExpr, active_axes: set, context_label: str) -> None:
         match expr:
             case MathState(name=s_name, domain_name=d_name):
@@ -382,22 +364,16 @@ def verify_no_unreduced_broadcasts(math_sys: MathSystem, topo: TopologyAnalyzer)
             case MathIntegral(child=child, over_domain=over_domain):
                 check_expr(child, active_axes | base_axes_of(over_domain), context_label)
             case MathBoundaryRef(child=child, domain=domain):
-                pin_dom = domain or infer_domain_name(child)
+                pin_dom = domain or extract_domain_name(child)
                 pinned = set()
                 if pin_dom:
                     axes = topo.get_axes(pin_dom)
                     if axes:
                         pinned.add(topo.get_base_axis(axes[-1]))
                 check_expr(child, active_axes | pinned, context_label)
-            case MathUnaryOp(child=child) | MathGrad(child=child) | MathDiv(child=child) | MathDt(child=child):
-                check_expr(child, active_axes, context_label)
-            case MathBinaryOp(left=left, right=right):
-                check_expr(left, active_axes, context_label)
-                check_expr(right, active_axes, context_label)
-            case MathClamp(child=child, lower=lower, upper=upper):
-                check_expr(child, active_axes, context_label)
-                check_expr(lower, active_axes, context_label)
-                check_expr(upper, active_axes, context_label)
+            case _:
+                for child in math_children(expr):
+                    check_expr(child, active_axes, context_label)
 
     for eq in math_sys.equations:
         eq_axes = base_axes_of(eq.target_domain)

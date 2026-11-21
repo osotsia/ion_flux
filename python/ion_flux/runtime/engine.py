@@ -27,8 +27,8 @@ class Engine:
                  audit_compiler: Optional[bool] = None, **kwargs):
         from ion_flux.runtime.audit import get_active_audit
         active_audit = get_active_audit()
-        resolved_audit_compiler = (
-            audit_compiler if audit_compiler is not None
+        compile_audited = (
+            bool(audit_compiler) if audit_compiler is not None
             else (active_audit.compiler if active_audit is not None else False)
         )
 
@@ -36,21 +36,39 @@ class Engine:
         self.target = target
         self.solver_backend = solver_backend.lower()
         self.mock_execution = mock_execution
-        self.audit_compiler = bool(resolved_audit_compiler)
-        
-        if model:
-            self.manifest = build_manifest(
-                model, target, cache, jacobian_bandwidth, mock_execution, audit_compiler=self.audit_compiler
-            )
-        else:
-            self.manifest = None
 
-        if active_audit is not None and self.audit_compiler and self.manifest and self.manifest.static_audit:
-            active_audit.record_static(self.audit_compiler_report())
-            
-        self.parameters = {k: _ParamHandle(k, v) for k, v in self.manifest.default_parameters.items()} if self.manifest else {}
-        for k, v in kwargs.items(): 
+        manifest = (
+            build_manifest(model, target, cache, jacobian_bandwidth, mock_execution, audit_compiler=compile_audited)
+            if model else None
+        )
+        self._attach_manifest(manifest, audit_compiler=audit_compiler)
+        for k, v in kwargs.items():
             setattr(self, k, v)
+
+    def _attach_manifest(self, manifest: Optional[ExecutableManifest], audit_compiler: Optional[bool] = None) -> None:
+        from ion_flux.runtime.audit import get_active_audit
+        active_audit = get_active_audit()
+        inferred_audit = bool((manifest.static_audit or {}).get("audit_compiler", False)) if manifest else False
+
+        self.manifest = manifest
+        self.audit_compiler = (
+            bool(audit_compiler) if audit_compiler is not None
+            else (active_audit.compiler if active_audit is not None else inferred_audit)
+        )
+        self.parameters = (
+            {k: _ParamHandle(k, v) for k, v in manifest.default_parameters.items()}
+            if manifest else {}
+        )
+
+        if active_audit is not None and self.audit_compiler and manifest is not None:
+            if manifest.static_audit:
+                active_audit.record_static(self.audit_compiler_report())
+            elif manifest.native_lib is not None and not self.mock_execution:
+                from ion_flux.runtime.manifest import run_native_static_audit
+                native_audit: Dict[str, Any] = {"audit_compiler": True}
+                native_audit.update(run_native_static_audit(manifest))
+                manifest.static_audit = native_audit
+                active_audit.record_static(dict(native_audit))
 
     @property
     def layout(self): 
@@ -117,15 +135,15 @@ class Engine:
 
     # --- Architectural Serialization Boundaries ---
     @classmethod
-    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native") -> "Engine":
+    def load(cls, binary_path: str, target: str = "cpu:serial", solver_backend: str = "native",
+             audit_compiler: Optional[bool] = None) -> "Engine":
         engine = cls.__new__(cls)
+        engine.model = None
         engine.target = target
-        engine.solver_backend = solver_backend
+        engine.solver_backend = solver_backend.lower()
         engine.mock_execution = False
-        
-        engine.manifest = ExecutableManifest.load(binary_path)
-        engine.audit_compiler = bool((engine.manifest.static_audit or {}).get("audit_compiler", False))
-        engine.parameters = {name: _ParamHandle(name, val) for name, val in engine.manifest.default_parameters.items()}
+        manifest = ExecutableManifest.load(binary_path)
+        engine._attach_manifest(manifest, audit_compiler=audit_compiler)
         return engine
 
     def export_binary(self, export_path: str) -> None:
@@ -144,13 +162,7 @@ class Engine:
         audit = self.manifest.static_audit
         if "cpr_jvp_probe_passed" not in audit and self.manifest.native_lib is not None:
             from ion_flux.runtime.manifest import run_native_static_audit
-            audit.update(run_native_static_audit(
-                self.manifest,
-                self.manifest.default_parameters,
-                self.manifest.cpr_cache,
-                self.manifest.spatial_diag,
-                self.manifest.max_steps,
-            ))
+            audit.update(run_native_static_audit(self.manifest))
         return dict(audit)
 
     def audit(self, protocol: Any = None, parameters: Optional[Dict[str, float]] = None,

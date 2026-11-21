@@ -317,3 +317,57 @@ def test_oracle_ill_conditioned_multiscale_asymmetry():
     
     np.testing.assert_allclose(res["c_mac"].data[-1], c_mac_exact, rtol=1e-3,
         err_msg="Ill-conditioned matrix inversion injected massive floating-point truncation error.")
+
+
+@REQUIRES_RUNTIME
+def test_algebraic_roots_happy_path_and_edge_cases():
+    """
+    Validates algebraic root initialization (`calc_algebraic_roots`) across:
+      1. Happy path: coupled nonlinear algebraic system snaps from poor IC (`V=0, w=0`).
+      2. Edge case: consistent IC needs 0 Newton iterations.
+      3. Edge case: unsolvable algebraic constraint sets `ic_converged=False` safely.
+    """
+    class CoupledNonlinearIC(fx.PDE):
+        y = fx.State(domain=None, name="y")
+        w = fx.State(domain=None, name="w", max_newton_step=0.5)
+        V = fx.State(domain=None, name="V")
+
+        def math(self):
+            return {
+                "equations": {
+                    self.y: fx.dt(self.y) == -0.1 * self.y,
+                    self.w: self.w * self.w + self.w == self.y + 2.0,  # root for y=4 -> w=2 (from w>0)
+                    self.V: self.V == 3.0 * self.w + 1.0,              # root -> V=7
+                },
+                "boundaries": {},
+                "initial_conditions": {self.y: 4.0, self.w: 1.0, self.V: 0.0},
+            }
+
+    eng = fx.Engine(model=CoupledNonlinearIC(), target="cpu:serial")
+    sess = eng.start_session()
+    diag = sess.diagnostics
+    assert diag["ic_converged"] is True
+    assert diag["ic_final_max_res"] < 1e-8
+    assert sess.get_scalar("w") == pytest.approx(2.0, rel=1e-6)
+    assert sess.get_scalar("V") == pytest.approx(7.0, rel=1e-6)
+
+    # Edge case: already-converged state reinitializes in 0 iterations
+    sess.reinitialize_algebraic()
+    assert sess.diagnostics["ic_converged"] is True
+    assert sess.diagnostics["ic_iters"] == 0
+
+    # Edge case: unsolvable algebraic equation marks ic_converged=False cleanly without panic
+    class ImpossibleIC(fx.PDE):
+        x = fx.State(domain=None, name="x")
+
+        def math(self):
+            return {
+                "equations": {self.x: self.x == self.x + 2.0},
+                "boundaries": {},
+                "initial_conditions": {self.x: 0.0},
+            }
+
+    eng_bad = fx.Engine(model=ImpossibleIC(), target="cpu:serial", audit_compiler=True)
+    report = eng_bad.audit_compiler_report()
+    assert report["ic_health"]["ic_converged"] is False
+    assert report["ic_health"]["ic_final_max_res"] >= 1.99

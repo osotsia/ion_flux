@@ -794,3 +794,169 @@ def test_phase2_audit_compiler_ir_clamps_and_so_roundtrip(tmp_path):
     loaded = fx.Engine.load(str(export_so), target="cpu:serial")
     assert loaded.audit_compiler is True
     assert loaded.audit_compiler_report()["clamp_meta"][0]["label"] == "c_safe"
+
+
+class _EnzymeComplexIRModel(fx.PDE):
+    """Combines Piecewise harmonic stitching, spatial integrals, ALE, clamp, and sqrt."""
+    cell = fx.Domain(bounds=(0.0, 2.0), resolution=10, name="cell")
+    reg_L = cell.region(bounds=(0.0, 1.0), resolution=5, name="reg_L")
+    reg_R = cell.region(bounds=(1.0, 2.0), resolution=5, name="reg_R")
+
+    c = fx.State(domain=cell, name="c")
+    L = fx.State(domain=None, name="L")
+    avg = fx.State(domain=None, name="avg")
+
+    D_L = fx.Parameter(default=1.5, name="D_L")
+    D_R = fx.Parameter(default=0.4, name="D_R")
+    k_scale = fx.Parameter(default=0.3, name="k_scale")
+
+    def math(self):
+        c_safe = fx.clamp(self.c, lower=0.1, upper=10.0, label="c_safe")
+        flux_L = -self.D_L * fx.grad(self.c)
+        flux_R = -self.D_R * fx.grad(self.c)
+        return {
+            "equations": {
+                self.c: fx.Piecewise({
+                    self.reg_L: fx.dt(self.c) == -fx.div(flux_L) - self.k_scale * fx.sqrt(c_safe),
+                    self.reg_R: fx.dt(self.c) == -fx.div(flux_R) - self.k_scale * fx.sqrt(c_safe),
+                }),
+                self.L: fx.dt(self.L) == 0.2 * self.k_scale,
+                self.avg: self.avg == fx.integral(c_safe, over=self.cell),
+            },
+            "boundaries": {
+                self.cell: {"right": self.L},
+                flux_L: {"left": 0.0},
+                flux_R: {"right": 0.0},
+            },
+            "initial_conditions": {
+                self.c: 1.0 + 0.5 * self.cell.coords,
+                self.L: 2.0,
+                self.avg: 2.0,
+            },
+        }
+
+
+@REQUIRES_ENZYME
+def test_enzyme_jvp_vjp_duality_and_param_fd_across_ir_features():
+    """
+    Verifies on real Enzyme-compiled C++ (Piecewise harmonic + Reduction + ALE + clamp + sqrt):
+      1. Exact forward/reverse duality: <lambda, J(c_j) * v> == <J(c_j)^T * lambda, v>.
+      2. Exact parameter VJP vs. central finite differences: dp_out == <lambda, dF/dp>.
+    """
+    eng = fx.Engine(model=_EnzymeComplexIRModel(), target="cpu:serial", mock_execution=False)
+    m = eng.manifest
+    n = eng.layout.n_states
+    rng = np.random.default_rng(123)
+
+    y = rng.uniform(0.5, 4.0, size=n)
+    ydot = rng.uniform(-0.5, 0.5, size=n)
+    v = rng.standard_normal(n)
+    lam = rng.standard_normal(n)
+    c_j = 3.5
+    params = {"D_L": 1.5, "D_R": 0.4, "k_scale": 0.3}
+
+    jvp_out = m.evaluate_jvp(y.tolist(), ydot.tolist(), c_j, v.tolist(), params)
+    dp_out, dy_out, dydot_out = m.evaluate_vjp(y.tolist(), ydot.tolist(), params, lam.tolist())
+
+    lhs = float(np.dot(lam, jvp_out))
+    rhs = float(np.dot(np.asarray(dy_out) + c_j * np.asarray(dydot_out), v))
+    np.testing.assert_allclose(lhs, rhs, rtol=1e-10, atol=1e-10)
+
+    eps = 1e-6
+    for p_name in ("D_L", "D_R", "k_scale"):
+        off = eng.layout.get_param_offset(p_name)
+        p_plus = {**params, p_name: params[p_name] + eps}
+        p_minus = {**params, p_name: params[p_name] - eps}
+        f_plus = np.asarray(m.evaluate_residual(y.tolist(), ydot.tolist(), p_plus))
+        f_minus = np.asarray(m.evaluate_residual(y.tolist(), ydot.tolist(), p_minus))
+        fd_dp = float(np.dot(lam, (f_plus - f_minus) / (2.0 * eps)))
+        np.testing.assert_allclose(dp_out[off], fd_dp, rtol=1e-6, atol=1e-7)
+
+
+@REQUIRES_ENZYME
+def test_enzyme_unstructured_csr_jvp_vjp_duality_and_param_fd():
+    """Verifies Enzyme JVP-VJP duality and parameter VJP on unstructured CSR mesh loops."""
+    tet = {
+        "nodes": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "elements": [[0, 1, 2, 3]],
+    }
+
+    class UnstructuredEnzymeProbe(fx.PDE):
+        mesh = fx.Domain.from_mesh(tet, name="mesh", surfaces={"top": [2, 3]})
+        c = fx.State(domain=mesh, name="c")
+        D = fx.Parameter(default=1.2, name="D")
+        q_in = fx.Parameter(default=-2.5, name="q_in")
+
+        def math(self):
+            flux = -self.D * fx.grad(self.c)
+            return {
+                "equations": {self.c: fx.dt(self.c) == -fx.div(flux)},
+                "boundaries": {flux: {"top": self.q_in}},
+                "initial_conditions": {self.c: 1.0},
+            }
+
+    eng = fx.Engine(model=UnstructuredEnzymeProbe(), target="cpu:serial", mock_execution=False)
+    m = eng.manifest
+    n = eng.layout.n_states
+    rng = np.random.default_rng(7)
+
+    y = rng.uniform(1.0, 5.0, size=n)
+    ydot = rng.uniform(-1.0, 1.0, size=n)
+    v = rng.standard_normal(n)
+    lam = rng.standard_normal(n)
+    c_j = 12.0
+    params = {"D": 1.2, "q_in": -2.5}
+
+    jvp_out = m.evaluate_jvp(y.tolist(), ydot.tolist(), c_j, v.tolist(), params)
+    dp_out, dy_out, dydot_out = m.evaluate_vjp(y.tolist(), ydot.tolist(), params, lam.tolist())
+
+    lhs = float(np.dot(lam, jvp_out))
+    rhs = float(np.dot(np.asarray(dy_out) + c_j * np.asarray(dydot_out), v))
+    np.testing.assert_allclose(lhs, rhs, rtol=1e-10, atol=1e-10)
+
+    eps = 1e-6
+    for p_name in ("D", "q_in"):
+        off = eng.layout.get_param_offset(p_name)
+        f_p = np.asarray(m.evaluate_residual(y.tolist(), ydot.tolist(), {**params, p_name: params[p_name] + eps}))
+        f_m = np.asarray(m.evaluate_residual(y.tolist(), ydot.tolist(), {**params, p_name: params[p_name] - eps}))
+        fd_dp = float(np.dot(lam, (f_p - f_m) / (2.0 * eps)))
+        np.testing.assert_allclose(dp_out[off], fd_dp, rtol=1e-6, atol=1e-7)
+
+
+@REQUIRES_ENZYME
+def test_enzyme_equilibrium_zero_flux_and_repeated_vjp_isolation():
+    """
+    1. Evaluates Enzyme JVP & VJP at uniform equilibrium (ion_flux_harmonic(0, 0))
+       and at the clamp boundary (c == 0.1), asserting finite, NaN-free derivatives.
+    2. Verifies consecutive `evaluate_vjp` calls do not mutate caller lists or
+       leak accumulator values across invocations.
+    """
+    eng = fx.Engine(model=_EnzymeComplexIRModel(), target="cpu:serial", mock_execution=False)
+    m = eng.manifest
+    n = eng.layout.n_states
+
+    off_c, sz_c = eng.layout.state_offsets["c"]
+    off_L = eng.layout.get_state_offset("L")
+    off_avg = eng.layout.get_state_offset("avg")
+
+    for c_val in (1.0, 0.1):
+        y_arr = np.zeros(n, dtype=np.float64)
+        y_arr[off_c : off_c + sz_c] = c_val
+        y_arr[off_L] = 2.0
+        y_arr[off_avg] = 2.0 * c_val
+        y = y_arr.tolist()
+        ydot = [0.0] * n
+        jac = np.asarray(eng.evaluate_jacobian(y, ydot, 1.0, {}))
+        assert np.all(np.isfinite(jac))
+
+        lam1 = [1.0] * n
+        lam1_copy = list(lam1)
+        dp1, dy1, dydot1 = m.evaluate_vjp(y, ydot, {}, lam1)
+        assert lam1 == lam1_copy
+        assert np.all(np.isfinite(dp1)) and np.all(np.isfinite(dy1)) and np.all(np.isfinite(dydot1))
+
+        lam2 = [2.5] * n
+        dp2, dy2, dydot2 = m.evaluate_vjp(y, ydot, {}, lam2)
+        np.testing.assert_allclose(dp2, 2.5 * np.asarray(dp1), rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(dy2, 2.5 * np.asarray(dy1), rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(dydot2, 2.5 * np.asarray(dydot1), rtol=1e-12, atol=1e-12)

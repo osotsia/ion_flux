@@ -17,7 +17,10 @@ from ion_flux.compiler._2_middle_end.verification import verify_manifold
 from ion_flux.compiler._3_backend.normalization import NormalizationPass, verify_no_unreduced_broadcasts
 from ion_flux.compiler._3_backend.cpr_orchestrator import compute_cpr
 from ion_flux.compiler._3_backend.compute_ir import format_compute_ir
-from ion_flux.compiler._3_backend.math_ir import MathSystem, MathDiv, MathGrad, MathUnaryOp, MathBinaryOp, MathClamp, MathBoundaryRef, MathIntegral, extract_math_state_names, has_time_derivative
+from ion_flux.compiler._3_backend.math_ir import (
+    MathSystem, MathDiv, MathGrad, any_math, collect_bc_ids,
+    extract_math_state_names, has_time_derivative,
+)
 from ion_flux.compiler._4_codegen.builder import generate_cpp_with_audit
 
 
@@ -97,32 +100,8 @@ class Compiler:
         state_domain_map: Dict[str, str],
     ) -> List[Dict[str, Any]]:
         """Classifies left, right, and interface boundary conditions for every spatial state."""
-        def collect_bc_ids(expr: Any, out: set) -> None:
-            if getattr(expr, "bc_id", None):
-                out.add(expr.bc_id)
-            match expr:
-                case MathUnaryOp(child=c) | MathGrad(child=c) | MathDiv(child=c) | MathBoundaryRef(child=c) | MathIntegral(child=c):
-                    collect_bc_ids(c, out)
-                case MathBinaryOp(left=l, right=r):
-                    collect_bc_ids(l, out)
-                    collect_bc_ids(r, out)
-                case MathClamp(child=c, lower=lo, upper=hi):
-                    collect_bc_ids(c, out)
-                    collect_bc_ids(lo, out)
-                    collect_bc_ids(hi, out)
-
-        def has_spatial_op(expr: Any) -> bool:
-            match expr:
-                case MathGrad() | MathDiv():
-                    return True
-                case MathUnaryOp(child=c) | MathIntegral(child=c) | MathBoundaryRef(child=c):
-                    return has_spatial_op(c)
-                case MathBinaryOp(left=l, right=r):
-                    return has_spatial_op(l) or has_spatial_op(r)
-                case MathClamp(child=c, lower=lo, upper=hi):
-                    return has_spatial_op(c) or has_spatial_op(lo) or has_spatial_op(hi)
-                case _:
-                    return False
+        def _is_spatial_node(node: Any) -> bool:
+            return isinstance(node, (MathGrad, MathDiv))
 
         by_state: Dict[str, List[Any]] = {}
         for eq in math_sys.equations:
@@ -136,12 +115,12 @@ class Compiler:
             axes = topo.get_axes(dom)
             last_ax = axes[-1] if axes else ""
             coord_sys = topo.domains.get(topo.get_base_axis(last_ax), {}).get("coord_sys", "cartesian") if last_ax else "cartesian"
-            is_spatial = any(has_spatial_op(e.lhs) or has_spatial_op(e.rhs) for e in eqs)
+            is_spatial = any(any_math(e.lhs, _is_spatial_node) or any_math(e.rhs, _is_spatial_node) for e in eqs)
             is_dae = not any(has_time_derivative(e.lhs) or has_time_derivative(e.rhs) for e in eqs)
             dirichlet = math_sys.dirichlet_bcs.get(s_name, {})
 
             if coord_sys == "unstructured":
-                bc_ids: set = set()
+                bc_ids: List[str] = []
                 for e in eqs:
                     collect_bc_ids(e.lhs, bc_ids)
                     collect_bc_ids(e.rhs, bc_ids)
@@ -149,6 +128,8 @@ class Compiler:
                 for bid in bc_ids:
                     for side in math_sys.neumann_bcs.get(bid, {}):
                         surfaces[side] = "Neumann"
+                for side in dirichlet:
+                    surfaces[side] = "Dirichlet"
                 ledger.append({
                     "state": s_name,
                     "domain": dom,
@@ -167,7 +148,7 @@ class Compiler:
             if eqs[0].is_piecewise and eqs[0].regions:
                 regs = sorted(eqs[0].regions, key=lambda r: r.start_idx)
                 for idx_r, reg in enumerate(regs):
-                    reg_bc_ids: set = set()
+                    reg_bc_ids: List[str] = []
                     collect_bc_ids(reg.expr, reg_bc_ids)
                     if reg.div_flux:
                         collect_bc_ids(reg.div_flux, reg_bc_ids)
@@ -195,7 +176,7 @@ class Compiler:
                             if is_spatial:
                                 implicit_faces.append(f"{reg.domain_name}.right")
             else:
-                bc_ids = set()
+                bc_ids = []
                 for e in eqs:
                     collect_bc_ids(e.lhs, bc_ids)
                     collect_bc_ids(e.rhs, bc_ids)

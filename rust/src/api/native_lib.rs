@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, ToPyArray};
-use crate::ffi::callbacks::{NativeResFn, NativeObsFn, NativeJvpFn, NativeVjpFn, NativeIcFn, NativeSetThreadsFn};
+use crate::ffi::callbacks::{Callbacks, NativeResFn, NativeObsFn, NativeJvpFn, NativeVjpFn, NativeIcFn, NativeSetThreadsFn};
 use crate::stepper::problem::CprData;
 use crate::linear::jacobian::assemble_triplets_analytical;
 
@@ -29,31 +29,24 @@ impl NativeLibrary {
             libloading::Library::new(&lib_path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to load compiled binary at {}: {}", lib_path, e)))?
         };
-        unsafe {
-            let res_fn: NativeResFn = *lib.get(b"evaluate_residual\0")
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_residual: {e}")))?;
-            let obs_fn: Option<NativeObsFn> = lib.get(b"evaluate_observables\0").map(|s| *s).ok();
-            let audit_obs_fn: Option<NativeObsFn> = lib.get(b"evaluate_audit_observables\0").map(|s| *s).ok();
-            let jvp_fn: Option<NativeJvpFn> = lib.get(b"evaluate_jvp\0").map(|s| *s).ok();
-            let vjp_fn: Option<NativeVjpFn> = lib.get(b"evaluate_vjp\0").map(|s| *s).ok();
-            let ic_fn: Option<NativeIcFn> = lib.get(b"evaluate_ic\0").map(|s| *s).ok();
-            let set_threads_fn: Option<NativeSetThreadsFn> = lib.get(b"set_spatial_threads\0").map(|s| *s).ok();
+        let fns = Callbacks::from_lib(&lib).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let ic_fn = Callbacks::load_ic(&lib);
+        let audit_obs_fn: Option<NativeObsFn> = unsafe { lib.get(b"evaluate_audit_observables\0").map(|s| *s).ok() };
 
-            Ok(Self {
-                _lib: lib,
-                lib_path,
-                n_states,
-                n_params,
-                n_obs,
-                res_fn,
-                obs_fn,
-                audit_obs_fn,
-                jvp_fn,
-                vjp_fn,
-                ic_fn,
-                set_threads_fn,
-            })
-        }
+        Ok(Self {
+            _lib: lib,
+            lib_path,
+            n_states,
+            n_params,
+            n_obs,
+            res_fn: fns.res_fn,
+            obs_fn: fns.obs_fn,
+            audit_obs_fn,
+            jvp_fn: fns.jvp_fn,
+            vjp_fn: fns.vjp_fn,
+            ic_fn,
+            set_threads_fn: fns.set_threads_fn,
+        })
     }
 
     pub fn set_spatial_threads(&self, num_threads: i32) {

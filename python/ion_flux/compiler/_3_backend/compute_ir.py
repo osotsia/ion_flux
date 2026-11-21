@@ -97,6 +97,32 @@ class RawCpp(Expr):
         self.code = code
 
 
+def compute_expr_children(expr: Expr) -> Tuple[Expr, ...]:
+    """
+    Canonical exhaustive child accessor for Compute IR Expr nodes.
+    Raises TypeError on unknown Expr subclasses to prevent silent traversal omissions.
+    """
+    match expr:
+        case Literal() | Var() | RawCpp():
+            return ()
+        case ArrayAccess(index=idx):
+            return (idx,)
+        case UnaryMinus(expr=child):
+            return (child,)
+        case BinaryOp(left=l, right=r):
+            return (l, r)
+        case FuncCall(args=args):
+            return tuple(args)
+        case Ternary(cond=c, true_val=tv, false_val=fv):
+            return (c, tv, fv)
+        case UnstructuredRead(state_offset=so, rp_offset=rp, ci_offset=ci, w_offset=wo, idx_expr=ie):
+            return (so, rp, ci, wo, ie)
+        case Reduction(loops=loops, child_expr=ce, vol_exprs=ves):
+            return tuple(end_e for _, end_e in loops) + (ce,) + tuple(ves)
+        case _:
+            raise TypeError(f"Unhandled Compute IR Expr node: {type(expr).__name__}")
+
+
 def format_compute_ir(stmts: List[Stmt], indent: int = 0) -> str:
     """Renders Compute IR statements with symbolic MemoryRefs and indented loop blocks."""
     pad = "  " * indent

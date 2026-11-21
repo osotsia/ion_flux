@@ -345,3 +345,109 @@ def test_oracle_adjoint_mass_matrix_vjp():
         simulated_grad, exact_grad, rtol=2e-2,
         err_msg="Adjoint Mass Matrix Error: VJP loop ignored capacity multiplier on dF/dydot."
     )
+
+
+@REQUIRES_RUNTIME
+def test_unstructured_gmres_adjoint_matches_finite_difference():
+    """
+    Verifies end-to-end Enzyme VJP + Rust matrix-free GMRES discrete adjoint
+    exactness against central finite differences on a 3D tetrahedral mesh.
+    """
+    tet = {
+        "nodes": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "elements": [[0, 1, 2, 3]],
+    }
+
+    class UnstructuredDiffusion(fx.PDE):
+        mesh = fx.Domain.from_mesh(tet, name="mesh", surfaces={"top": [2, 3]})
+        c = fx.State(domain=mesh, name="c")
+        D = fx.Parameter(default=1.5, name="D")
+
+        def math(self):
+            flux = -self.D * fx.grad(self.c)
+            return {
+                "equations": {self.c: fx.dt(self.c) == -fx.div(flux)},
+                "boundaries": {flux: {"top": -2.0}},
+                "initial_conditions": {self.c: 1.0},
+            }
+
+    eng = fx.Engine(model=UnstructuredDiffusion(), target="cpu:serial", mock_execution=False)
+    t_eval = np.linspace(0.0, 0.5, 25)
+    target = eng.solve(t_eval=t_eval, parameters={"D": 2.5}, show_progress=False)["c"].data
+
+    res_ad = eng.solve(t_eval=t_eval, parameters={"D": 1.5}, requires_grad=["D"], show_progress=False)
+    grad_ad = fx.metrics.rmse(res_ad["c"], target).backward()["D"]
+
+    eps = 1e-5
+    l_p = fx.metrics.rmse(eng.solve(t_eval=t_eval, parameters={"D": 1.5 + eps}, show_progress=False)["c"], target).value
+    l_m = fx.metrics.rmse(eng.solve(t_eval=t_eval, parameters={"D": 1.5 - eps}, show_progress=False)["c"], target).value
+    grad_fd = (l_p - l_m) / (2.0 * eps)
+
+    assert abs(grad_ad) > 1e-3
+    np.testing.assert_allclose(grad_ad, grad_fd, rtol=2e-2, atol=1e-5)
+
+
+@REQUIRES_RUNTIME
+def test_piecewise_and_ale_continuous_adjoint_vs_fd():
+    """
+    Verifies Enzyme VJP + Rust discrete adjoint accuracy across Piecewise harmonic
+    interfaces and Arbitrary Lagrangian-Eulerian (ALE) dynamic grid dilation.
+    """
+    class PiecewiseAleAdjointPDE(fx.PDE):
+        cell = fx.Domain(bounds=(0.0, 2.0), resolution=10, name="cell")
+        reg_L = cell.region(bounds=(0.0, 1.0), resolution=5, name="reg_L")
+        reg_R = cell.region(bounds=(1.0, 2.0), resolution=5, name="reg_R")
+
+        c = fx.State(domain=cell, name="c")
+        L = fx.State(domain=None, name="L")
+        avg = fx.State(domain=None, name="avg")
+
+        D_L = fx.Parameter(default=1.2, name="D_L")
+        D_R = fx.Parameter(default=0.4, name="D_R")
+        v_grow = fx.Parameter(default=0.15, name="v_grow")
+
+        def math(self):
+            flux_L = -self.D_L * fx.grad(self.c)
+            flux_R = -self.D_R * fx.grad(self.c)
+            return {
+                "equations": {
+                    self.c: fx.Piecewise({
+                        self.reg_L: fx.dt(self.c) == -fx.div(flux_L),
+                        self.reg_R: fx.dt(self.c) == -fx.div(flux_R),
+                    }),
+                    self.L: fx.dt(self.L) == self.v_grow,
+                    self.avg: self.avg == fx.integral(self.c, over=self.cell),
+                },
+                "boundaries": {
+                    self.cell: {"right": self.L},
+                    flux_L: {"left": -0.5},
+                    flux_R: {"right": 0.0},
+                },
+                "initial_conditions": {
+                    self.c: 1.0 + 0.5 * self.cell.coords,
+                    self.L: 2.0,
+                    self.avg: 3.0,
+                },
+            }
+
+    eng = fx.Engine(model=PiecewiseAleAdjointPDE(), target="cpu:serial", mock_execution=False)
+    t_eval = np.linspace(0.0, 1.0, 25)
+    target_params = {"D_L": 1.8, "D_R": 0.7, "v_grow": 0.25}
+    guess_params = {"D_L": 1.2, "D_R": 0.4, "v_grow": 0.15}
+    target = eng.solve(t_eval=t_eval, parameters=target_params, show_progress=False)["c"].data
+
+    res_ad = eng.solve(t_eval=t_eval, parameters=guess_params, requires_grad=list(guess_params), show_progress=False)
+    grads_ad = fx.metrics.rmse(res_ad["c"], target).backward()
+
+    eps = 1e-5
+    for p_name in guess_params:
+        l_p = fx.metrics.rmse(
+            eng.solve(t_eval=t_eval, parameters={**guess_params, p_name: guess_params[p_name] + eps}, show_progress=False)["c"],
+            target,
+        ).value
+        l_m = fx.metrics.rmse(
+            eng.solve(t_eval=t_eval, parameters={**guess_params, p_name: guess_params[p_name] - eps}, show_progress=False)["c"],
+            target,
+        ).value
+        grad_fd = (l_p - l_m) / (2.0 * eps)
+        np.testing.assert_allclose(grads_ad[p_name], grad_fd, rtol=3e-2, atol=1e-5)

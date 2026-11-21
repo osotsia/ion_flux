@@ -29,7 +29,7 @@ from ion_flux.compiler._3_backend.math_ir import (
     MathExpr, MathScalar, MathParameter, MathState, MathBinaryOp,
     MathUnaryOp, MathClamp, MathGrad, MathDiv, MathDt, MathCoords, MathIntegral,
     MathBoundaryRef, MathEquation, MathObservable, MathDirichletOverride,
-    MathInitialCondition, MathNeumannBC, MathSystem, extract_math_state_names
+    MathInitialCondition, MathNeumannBC, MathSystem, extract_math_state_names, extract_domain_name
 )
 
 
@@ -120,25 +120,6 @@ def _clamp_or_direct(idx_expr: Expr, bound: int, var_bounds: Optional[Dict[str, 
     if b is not None and 0 <= b[0] and b[1] < bound:
         return clean
     return FuncCall("CLAMP", [clean, Literal(bound)])
-
-
-def extract_domain_name(expr: MathExpr) -> Optional[str]:
-    """Recursively resolves the governing spatial domain identifier of an expression."""
-    match expr:
-        case MathState(domain_name=domain_name):
-            return domain_name
-        case MathBoundaryRef(domain=domain, child=child):
-            return domain or extract_domain_name(child)
-        case MathGrad(axis=axis, child=child) | MathDiv(axis=axis, child=child):
-            return axis or extract_domain_name(child)
-        case MathCoords(axis=axis):
-            return axis
-        case MathUnaryOp(child=child) | MathDt(child=child):
-            return extract_domain_name(child)
-        case MathBinaryOp(left=left, right=right):
-            return extract_domain_name(left) or extract_domain_name(right)
-        case _:
-            return None
 
 
 class IndexManager:
@@ -1171,12 +1152,6 @@ class FVMDiscretizer:
             case MathUnaryOp(op="neg", child=child):
                 child_ir = self.lower_expr(child, idx_mgr, current_axis, face, current_eq)
                 return UnaryMinus(child_ir)
-
-            case MathUnaryOp(op="coords"):
-                base_axis = resolve_axis(self.topo, current_axis)
-                if not base_axis or self.topo.domains.get(base_axis, {}).get("coord_sys") == "unstructured":
-                    return Literal(0.0)
-                return self.metrics.cell_coordinate(base_axis, idx_mgr.get_local(base_axis))
 
             case MathClamp(child=child, lower=lower, upper=upper, label=lbl):
                 if self.audit_compiler and getattr(self, "_active_eq_ctx", None):

@@ -29,16 +29,7 @@ impl SolverHandle {
         is_realtime: bool, rel_tol: Option<f64>, abs_tol: Option<f64>, max_newton_iters: Option<usize>, record_trace: bool
     ) -> PyResult<Self> {
         let lib = unsafe { libloading::Library::new(&lib_path).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? };
-        let fns = Callbacks {
-            res_fn: unsafe {
-                *lib.get(b"evaluate_residual\0")
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Missing evaluate_residual: {e}")))?
-            },
-            obs_fn: unsafe { lib.get(b"evaluate_observables\0").map(|s| *s).ok() },
-            jvp_fn: unsafe { lib.get(b"evaluate_jvp\0").map(|s| *s).ok() },
-            vjp_fn: unsafe { lib.get(b"evaluate_vjp\0").map(|s| *s).ok() },
-            set_threads_fn: unsafe { lib.get(b"set_spatial_threads\0").map(|s| *s).ok() },
-        };
+        let fns = Callbacks::from_lib(&lib).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         
         let cpr = CprData { color_seeds: cpr_seeds, color_ptrs: cpr_ptrs, color_rows: cpr_rows, color_cols: cpr_cols, dense_rows: cpr_dense };
         let mut config = if is_realtime { SolverConfig::realtime() } else { SolverConfig::default() };

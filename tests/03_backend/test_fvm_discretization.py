@@ -845,5 +845,100 @@ class TestNonlinearSpatialMMS:
         assert drift < 1e-12, f"Thermodynamic drift detected at equilibrium: {drift:.3e}"
 
 
+class TestPhase1IRExhaustiveness:
+    """Meta-tests enforcing exhaustive IR traversal across all MathExpr and Compute IR nodes."""
+
+    def test_math_ir_and_compute_ir_exhaustiveness(self):
+        from ion_flux.compiler._3_backend import math_ir, compute_ir
+
+        s = math_ir.MathState(name="c", domain_name="x", offset=0, size=5)
+        sc = math_ir.MathScalar(1.0)
+        sample_math = {
+            math_ir.MathScalar: sc,
+            math_ir.MathParameter: math_ir.MathParameter(name="k", offset=0),
+            math_ir.MathState: s,
+            math_ir.MathCoords: math_ir.MathCoords(axis="x"),
+            math_ir.MathUnaryOp: math_ir.MathUnaryOp(op="exp", child=s),
+            math_ir.MathGrad: math_ir.MathGrad(child=s, axis="x"),
+            math_ir.MathDiv: math_ir.MathDiv(child=s, axis="x"),
+            math_ir.MathDt: math_ir.MathDt(child=s),
+            math_ir.MathIntegral: math_ir.MathIntegral(child=s, over_domain="x"),
+            math_ir.MathBoundaryRef: math_ir.MathBoundaryRef(child=s, side="right"),
+            math_ir.MathBinaryOp: math_ir.MathBinaryOp(op="add", left=s, right=sc),
+            math_ir.MathClamp: math_ir.MathClamp(child=s, lower=sc, upper=sc, label="c"),
+        }
+
+        for sub in math_ir.MathExpr.__subclasses__():
+            assert sub in sample_math, f"Missing exhaustiveness test sample for MathExpr subclass {sub.__name__}"
+            node = sample_math[sub]
+            _ = math_ir.math_children(node)
+            _ = math_ir.extract_math_state_names(node)
+            _ = math_ir.has_time_derivative(node)
+            _ = math_ir.extract_domain_name(node)
+            math_ir.collect_bc_ids(node, [])
+
+        class _UnknownMath(math_ir.MathExpr):
+            pass
+
+        with pytest.raises(TypeError, match="Unhandled MathExpr"):
+            math_ir.math_children(_UnknownMath())
+
+        lit = compute_ir.Literal(1.0)
+        var = compute_ir.Var("i")
+        sample_compute = {
+            compute_ir.Literal: lit,
+            compute_ir.Var: var,
+            compute_ir.RawCpp: compute_ir.RawCpp("0.0"),
+            compute_ir.ArrayAccess: compute_ir.ArrayAccess("y", var),
+            compute_ir.UnaryMinus: compute_ir.UnaryMinus(var),
+            compute_ir.BinaryOp: compute_ir.BinaryOp("+", var, lit),
+            compute_ir.FuncCall: compute_ir.FuncCall("std::exp", [var]),
+            compute_ir.Ternary: compute_ir.Ternary(var, lit, lit),
+            compute_ir.UnstructuredRead: compute_ir.UnstructuredRead(lit, lit, lit, lit, var),
+            compute_ir.Reduction: compute_ir.Reduction([("i", lit)], var, [lit]),
+        }
+
+        for sub in compute_ir.Expr.__subclasses__():
+            assert sub in sample_compute, f"Missing exhaustiveness test sample for Compute Expr subclass {sub.__name__}"
+            _ = compute_ir.compute_expr_children(sample_compute[sub])
+
+        class _UnknownComputeExpr(compute_ir.Expr):
+            pass
+
+        with pytest.raises(TypeError, match="Unhandled Compute IR Expr"):
+            compute_ir.compute_expr_children(_UnknownComputeExpr())
+
+    @REQUIRES_RUNTIME
+    def test_clamp_inside_boundary_gradient_and_integral(self):
+        class ClampOperatorsPDE(fx.PDE):
+            x = fx.Domain(bounds=(0.0, 1.0), resolution=5, name="x")
+            c = fx.State(domain=x, name="c")
+            v_right = fx.State(domain=None, name="v_right")
+            v_int = fx.State(domain=None, name="v_int")
+
+            def math(self):
+                c_safe = fx.clamp(self.c, lower=0.5, upper=4.0, label="c_safe")
+                flux = -fx.grad(c_safe, axis=self.x)
+                return {
+                    "equations": {
+                        self.c: fx.dt(self.c) == -fx.div(flux, axis=self.x),
+                        self.v_right: self.v_right == c_safe.right,
+                        self.v_int: self.v_int == fx.integral(c_safe, over=self.x),
+                    },
+                    "boundaries": {flux: {"left": 0.0, "right": 0.0}},
+                    "initial_conditions": {
+                        self.c: 1.0 + 4.0 * self.x.coords,  # [1, 2, 3, 4, 5] -> clamped [1, 2, 3, 4, 4]
+                        self.v_right: 4.0,
+                        self.v_int: 2.875,
+                    },
+                }
+
+        eng = fx.Engine(model=ClampOperatorsPDE(), target="cpu:serial")
+        y0, ydot0 = eng.manifest.evaluate_ic({})
+        res0 = eng.evaluate_residual(y0, ydot0)
+        assert res0[eng.layout.get_state_offset("v_right")] == pytest.approx(0.0, abs=1e-12)
+        assert res0[eng.layout.get_state_offset("v_int")] == pytest.approx(0.0, abs=1e-12)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])

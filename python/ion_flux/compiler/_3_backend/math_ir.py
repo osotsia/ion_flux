@@ -6,7 +6,7 @@ and domain boundary constraints prior to spatial discretization and memory layou
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any, Tuple
 
 
 class MathNode:
@@ -172,17 +172,14 @@ class MathSystem:
         return format_math_system(self, state_filter=state_filter)
 
 
-def extract_math_state_names(expr: MathExpr) -> List[str]:
+def math_children(expr: MathExpr) -> Tuple[MathExpr, ...]:
     """
-    Recursively extracts all unique State variable names referenced in a MathExpr.
-    Uses class pattern matching on typed Math IR expressions.
+    Canonical exhaustive child accessor for MathExpr.
+    Raises TypeError on unknown MathExpr subclasses to prevent silent node drops.
     """
-    names: List[str] = []
-
     match expr:
-        case MathState(name=name):
-            return [name]
-
+        case MathScalar() | MathParameter() | MathState() | MathCoords():
+            return ()
         case (
             MathUnaryOp(child=child)
             | MathGrad(child=child)
@@ -191,51 +188,71 @@ def extract_math_state_names(expr: MathExpr) -> List[str]:
             | MathIntegral(child=child)
             | MathBoundaryRef(child=child)
         ):
-            names.extend(extract_math_state_names(child))
-
+            return (child,)
         case MathBinaryOp(left=left, right=right):
-            names.extend(extract_math_state_names(left))
-            names.extend(extract_math_state_names(right))
-
+            return (left, right)
         case MathClamp(child=child, lower=lower, upper=upper):
-            names.extend(extract_math_state_names(child))
-            names.extend(extract_math_state_names(lower))
-            names.extend(extract_math_state_names(upper))
-
+            return (child, lower, upper)
         case _:
-            pass
+            raise TypeError(f"Unhandled MathExpr node: {type(expr).__name__}")
 
+
+def any_math(expr: MathExpr, predicate: Callable[[MathExpr], bool]) -> bool:
+    """Returns True if predicate holds for expr or any descendant."""
+    if predicate(expr):
+        return True
+    return any(any_math(child, predicate) for child in math_children(expr))
+
+
+def extract_domain_name(expr: MathExpr) -> Optional[str]:
+    """Recursively resolves the governing spatial domain identifier of an expression."""
+    match expr:
+        case MathState(domain_name=domain_name):
+            return domain_name
+        case MathBoundaryRef(domain=domain, child=child):
+            return domain or extract_domain_name(child)
+        case MathGrad(axis=axis, child=child) | MathDiv(axis=axis, child=child):
+            return axis or extract_domain_name(child)
+        case MathCoords(axis=axis):
+            return axis
+        case MathIntegral():
+            return None
+        case _:
+            for child in math_children(expr):
+                dom = extract_domain_name(child)
+                if dom is not None:
+                    return dom
+            return None
+
+
+def collect_bc_ids(expr: MathExpr, out: List[str]) -> None:
+    """Collects unique boundary-condition tags across expr and all descendants."""
+    bid = getattr(expr, "bc_id", None)
+    if bid and bid not in out:
+        out.append(bid)
+    for child in math_children(expr):
+        collect_bc_ids(child, out)
+
+
+def extract_math_state_names(expr: MathExpr) -> List[str]:
+    """Recursively extracts all unique State variable names referenced in a MathExpr."""
+    names: List[str] = []
+
+    def _walk(node: MathExpr) -> None:
+        if isinstance(node, MathState):
+            names.append(node.name)
+            return
+        for child in math_children(node):
+            _walk(child)
+
+    _walk(expr)
     seen = set()
     return [x for x in names if not (x in seen or seen.add(x))]
 
 
 def has_time_derivative(expr: MathExpr) -> bool:
     """Returns True if a MathExpr contains any time derivative (MathDt or is_ydot MathState)."""
-    match expr:
-        case MathState(is_ydot=True) | MathDt():
-            return True
-
-        case (
-            MathUnaryOp(child=child)
-            | MathGrad(child=child)
-            | MathDiv(child=child)
-            | MathIntegral(child=child)
-            | MathBoundaryRef(child=child)
-        ):
-            return has_time_derivative(child)
-
-        case MathBinaryOp(left=left, right=right):
-            return has_time_derivative(left) or has_time_derivative(right)
-
-        case MathClamp(child=child, lower=lower, upper=upper):
-            return (
-                has_time_derivative(child)
-                or has_time_derivative(lower)
-                or has_time_derivative(upper)
-            )
-
-        case _:
-            return False
+    return any_math(expr, lambda n: isinstance(n, MathDt) or (isinstance(n, MathState) and n.is_ydot))
 
 
 _MATH_OP_PREC = {
@@ -277,17 +294,7 @@ def _math_expr_key(expr: MathExpr) -> tuple:
 
 
 def _math_node_size(expr: MathExpr) -> int:
-    match expr:
-        case MathScalar() | MathParameter() | MathState() | MathCoords():
-            return 1
-        case MathUnaryOp(child=c) | MathGrad(child=c) | MathDiv(child=c) | MathDt(child=c) | MathIntegral(child=c) | MathBoundaryRef(child=c):
-            return 1 + _math_node_size(c)
-        case MathBinaryOp(left=l, right=r):
-            return 1 + _math_node_size(l) + _math_node_size(r)
-        case MathClamp(child=c, lower=lo, upper=hi):
-            return 1 + _math_node_size(c) + _math_node_size(lo) + _math_node_size(hi)
-        case _:
-            return 1
+    return 1 + sum(_math_node_size(c) for c in math_children(expr))
 
 
 def _collect_math_cse(expr: MathExpr, counts: Dict[tuple, int], samples: Dict[tuple, MathExpr]) -> None:
@@ -296,16 +303,8 @@ def _collect_math_cse(expr: MathExpr, counts: Dict[tuple, int], samples: Dict[tu
         counts[k] = counts.get(k, 0) + 1
         if k not in samples:
             samples[k] = expr
-    match expr:
-        case MathUnaryOp(child=c) | MathGrad(child=c) | MathDiv(child=c) | MathDt(child=c) | MathIntegral(child=c) | MathBoundaryRef(child=c):
-            _collect_math_cse(c, counts, samples)
-        case MathBinaryOp(left=l, right=r):
-            _collect_math_cse(l, counts, samples)
-            _collect_math_cse(r, counts, samples)
-        case MathClamp(child=c, lower=lo, upper=hi):
-            _collect_math_cse(c, counts, samples)
-            _collect_math_cse(lo, counts, samples)
-            _collect_math_cse(hi, counts, samples)
+    for child in math_children(expr):
+        _collect_math_cse(child, counts, samples)
 
 
 def _format_math_expr(expr: MathExpr, parent_prec: int = 0, cse_aliases: Optional[Dict[tuple, str]] = None) -> str:
@@ -373,22 +372,6 @@ def _format_math_expr(expr: MathExpr, parent_prec: int = 0, cse_aliases: Optiona
             return str(expr)
 
 
-def _collect_bc_ids(expr: MathExpr, out: List[str]) -> None:
-    bid = getattr(expr, "bc_id", None)
-    if bid and bid not in out:
-        out.append(bid)
-    match expr:
-        case MathUnaryOp(child=c) | MathGrad(child=c) | MathDiv(child=c) | MathDt(child=c) | MathIntegral(child=c) | MathBoundaryRef(child=c):
-            _collect_bc_ids(c, out)
-        case MathBinaryOp(left=l, right=r):
-            _collect_bc_ids(l, out)
-            _collect_bc_ids(r, out)
-        case MathClamp(child=c, lower=lo, upper=hi):
-            _collect_bc_ids(c, out)
-            _collect_bc_ids(lo, out)
-            _collect_bc_ids(hi, out)
-
-
 def format_math_system(math_sys: "MathSystem", state_filter: Optional[str] = None) -> str:
     counts: Dict[tuple, int] = {}
     samples: Dict[tuple, MathExpr] = {}
@@ -425,8 +408,8 @@ def format_math_system(math_sys: "MathSystem", state_filter: Optional[str] = Non
         lines.append(f"  [{kind}] {s_name} (domain={dom}):")
         eq_bc_ids: List[str] = []
         for eq in eqs:
-            _collect_bc_ids(eq.lhs, eq_bc_ids)
-            _collect_bc_ids(eq.rhs, eq_bc_ids)
+            collect_bc_ids(eq.lhs, eq_bc_ids)
+            collect_bc_ids(eq.rhs, eq_bc_ids)
             lhs_s = _format_math_expr(eq.lhs, 0, cse_aliases)
             rhs_s = _format_math_expr(eq.rhs, 0, cse_aliases)
             if eq.is_piecewise and eq.current_region:

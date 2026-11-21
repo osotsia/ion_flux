@@ -180,11 +180,21 @@ class ExecutableManifest:
         cpp_source = meta.get("cpp_source", "")
         static_audit = meta.get("static_audit")
         
-        return cls(binary_path, layout, default_parameters, ast_payload, jacobian_bandwidth, 
-                   cpr_cache, id_arr, spatial_diag, max_steps, state_domain_map, cpp_source, static_audit)
+        manifest = cls(
+            binary_path, layout, default_parameters, ast_payload, jacobian_bandwidth,
+            cpr_cache, id_arr, spatial_diag, max_steps, state_domain_map, cpp_source, static_audit
+        )
+        if (
+            manifest.static_audit is not None
+            and manifest.static_audit.get("audit_compiler")
+            and manifest.native_lib is not None
+            and ("cpr_jvp_probe_passed" not in manifest.static_audit or "ic_health" not in manifest.static_audit)
+        ):
+            manifest.static_audit.update(run_native_static_audit(manifest))
+        return manifest
 
 
-COMPILER_CACHE_VERSION = "2026.04.v7"
+COMPILER_CACHE_VERSION = "2026.04.v9"
 
 
 def _compute_ast_fingerprint(ast_payload: Dict[str, Any], layout: MemoryLayout, target: str, jacobian_bandwidth: Optional[int], audit_compiler: bool = False) -> str:
@@ -222,19 +232,30 @@ def _encode_meta_cpp(meta_json_str: str) -> str:
 
 def run_native_static_audit(
     manifest: ExecutableManifest,
-    default_parameters: Dict[str, float],
-    cpr_cache: Tuple[List, List, List, List, List],
-    spatial_diag: List[float],
-    max_steps: List[float],
+    default_parameters: Optional[Dict[str, float]] = None,
+    cpr_cache: Optional[Tuple[List, List, List, List, List]] = None,
+    spatial_diag: Optional[List[float]] = None,
+    max_steps: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """Runs O(1) randomized CPR-vs-Enzyme JVP verification and t=0 IC/Jacobian checks."""
+    params = default_parameters if default_parameters is not None else manifest.default_parameters
+    cpr = cpr_cache if cpr_cache is not None else manifest.cpr_cache
+    s_diag = spatial_diag if spatial_diag is not None else manifest.spatial_diag
+    m_steps = max_steps if max_steps is not None else manifest.max_steps
+
     n = manifest.layout.n_states
-    y0, ydot0 = manifest.evaluate_ic(default_parameters)
+    y0, ydot0 = manifest.evaluate_ic(params)
     rng = np.random.default_rng(42)
 
     y_probe = np.asarray(y0, dtype=np.float64) + rng.uniform(0.01, 0.05, size=n)
     ydot_probe = np.asarray(ydot0, dtype=np.float64)
-    rows, cols, vals = manifest.evaluate_jacobian_triplets(y_probe.tolist(), ydot_probe.tolist(), 1.0, default_parameters)
+    p_list = manifest.pack_parameters(params)
+    m_list = manifest.layout.get_mesh_data()
+    c_seeds, c_ptrs, c_rows, c_cols, c_dense = cpr
+    rows, cols, vals = manifest.native_lib.evaluate_jacobian_triplets(
+        y_probe.tolist(), ydot_probe.tolist(), p_list, m_list, 1.0,
+        c_seeds, c_ptrs, c_rows, c_cols, c_dense
+    )
 
     r_arr = np.asarray(rows, dtype=np.intp)
     c_arr = np.asarray(cols, dtype=np.intp)
@@ -244,7 +265,7 @@ def run_native_static_audit(
     max_jvp_rel_diff = 0.0
     for seed_idx in range(3):
         vec = rng.standard_normal(n)
-        jvp_enzyme = manifest.evaluate_jvp(y_probe.tolist(), ydot_probe.tolist(), 1.0, vec.tolist(), default_parameters)
+        jvp_enzyme = manifest.evaluate_jvp(y_probe.tolist(), ydot_probe.tolist(), 1.0, vec.tolist(), params)
         j_cpr_vec = np.bincount(r_arr, weights=v_arr * vec[c_arr], minlength=n) if len(v_arr) > 0 else np.zeros(n)
         abs_diff = float(np.max(np.abs(jvp_enzyme - j_cpr_vec)))
         jvp_scale = max(1.0, float(np.max(np.abs(jvp_enzyme))))
@@ -254,7 +275,7 @@ def run_native_static_audit(
         if rel_diff > max_jvp_rel_diff:
             max_jvp_rel_diff = rel_diff
 
-    res_pre = np.asarray(manifest.evaluate_residual(y0, ydot0, default_parameters), dtype=np.float64)
+    res_pre = np.asarray(manifest.evaluate_residual(y0, ydot0, params), dtype=np.float64)
     id_np = np.asarray(manifest.id_arr, dtype=np.float64)
     alg_mask = id_np < 0.5
     pre_snap_alg_max_res = float(np.max(np.abs(res_pre[alg_mask]))) if np.any(alg_mask) else 0.0
@@ -271,15 +292,12 @@ def run_native_static_audit(
     }
 
     if SolverHandle is not None:
-        p_list = manifest.pack_parameters(default_parameters)
-        m_list = manifest.layout.get_mesh_data()
         constraints = [0.0] * n
-        c_seeds, c_ptrs, c_rows, c_cols, c_dense = cpr_cache
         try:
             handle = SolverHandle(
                 manifest.lib_path, n, manifest.jacobian_bandwidth,
                 y0, ydot0, manifest.id_arr, constraints, p_list, m_list,
-                spatial_diag, max_steps, manifest.layout.n_obs,
+                s_diag, m_steps, manifest.layout.n_obs,
                 c_seeds, c_ptrs, c_rows, c_cols, c_dense, False,
                 None, None, None, False
             )
@@ -442,7 +460,7 @@ def build_manifest(model: PDE, target: str = "cpu:serial", cache: bool = True, j
         compute_ir=compute_ir_str,
     )
     if audit_compiler and static_audit is not None and not mock_execution and RUST_FFI_AVAILABLE and manifest.native_lib is not None:
-        static_audit.update(run_native_static_audit(manifest, default_parameters, cpr_cache, spatial_diag, max_steps))
+        static_audit.update(run_native_static_audit(manifest))
     return manifest
 
 

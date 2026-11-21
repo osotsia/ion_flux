@@ -12,7 +12,8 @@ from ion_flux.compiler._3_backend.math_ir import MathSystem
 from ion_flux.compiler._3_backend.discretizer import FVMDiscretizer
 from ion_flux.compiler._3_backend.compute_ir import (
     Stmt, Expr, Var, ArrayAccess, BinaryOp, UnaryMinus, FuncCall,
-    Ternary, VarDecl, Assign, Loop, IfElse, UnstructuredRead, Reduction, format_compute_ir
+    Ternary, VarDecl, Assign, Loop, IfElse, UnstructuredRead, Reduction,
+    compute_expr_children, format_compute_ir
 )
 from ion_flux.compiler._4_codegen.cpp_emitter import CppEmitter
 from ion_flux.compiler._4_codegen.templates import generate_cpp_skeleton
@@ -51,26 +52,12 @@ def _collect_used_vars(stmts: List[Stmt]) -> set:
     used: set = set()
 
     def walk_expr(e: Expr) -> None:
-        match e:
-            case Var(name=n):
-                used.add(n)
-            case ArrayAccess(index=idx):
-                walk_expr(idx)
-            case BinaryOp(left=l, right=r):
-                walk_expr(l); walk_expr(r)
-            case UnaryMinus(expr=c):
-                walk_expr(c)
-            case FuncCall(args=args):
-                for a in args: walk_expr(a)
-            case Ternary(cond=c, true_val=t, false_val=f):
-                walk_expr(c); walk_expr(t); walk_expr(f)
-            case Reduction(loops=loops, child_expr=ce, vol_exprs=ves, pre_stmts=ps):
-                for _, end_e in loops: walk_expr(end_e)
-                walk_stmts(ps)
-                walk_expr(ce)
-                for ve in ves: walk_expr(ve)
-            case UnstructuredRead(state_offset=so, rp_offset=rp, ci_offset=ci, w_offset=wo, idx_expr=ie):
-                walk_expr(so); walk_expr(rp); walk_expr(ci); walk_expr(wo); walk_expr(ie)
+        if isinstance(e, Var):
+            used.add(e.name)
+        elif isinstance(e, Reduction):
+            walk_stmts(e.pre_stmts)
+        for child in compute_expr_children(e):
+            walk_expr(child)
 
     def walk_stmts(ss: List[Stmt]) -> None:
         for s in ss:
@@ -119,7 +106,8 @@ def generate_cpp_with_audit(
     alias_map, preamble_decls = _build_offset_aliases(layout)
     emitter = CppEmitter(alias_map=alias_map)
 
-    body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, eq_stmts) + eq_stmts)
+    res_stmts = _filter_l_phys(l_phys_stmts, eq_stmts) + eq_stmts
+    body_str = _emit_block(emitter, preamble_decls, res_stmts)
     obs_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, obs_stmts) + obs_stmts) if obs_stmts else ""
     ic_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_ic_stmts, ic_stmts) + ic_stmts)
     audit_obs_body_str = _emit_block(emitter, preamble_decls, _filter_l_phys(l_phys_stmts, audit_obs_stmts) + audit_obs_stmts) if audit_obs_stmts else ""
@@ -136,7 +124,7 @@ def generate_cpp_with_audit(
 
     return {
         "cpp_source": cpp_str,
-        "eq_stmts": eq_stmts,
+        "eq_stmts": res_stmts,
         "compute_pretty": format_compute_ir(eq_stmts) if audit_compiler else "",
         "clamp_meta": clamp_meta,
     }
