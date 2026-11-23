@@ -269,9 +269,10 @@ class Paten2026_DFN(fx.PDE):
         eta_n = self.phi_s_n - self.phi_e - U_n
         eta_p = self.phi_s_p - self.phi_e - U_p
 
+        # Symmetric Butler-Volmer: j_k = 2*j0_k*sinh(F*eta_k/(2RT)) (Eqs. 3b, 53)
         F_RT = F / (2.0 * R_const * T)
-        J_n = a_n * j0_n * sinh_ast(F_RT * eta_n)
-        J_p = a_p * j0_p * sinh_ast(F_RT * eta_p)
+        J_n = 2.0 * a_n * j0_n * sinh_ast(F_RT * eta_n)
+        J_p = 2.0 * a_p * j0_p * sinh_ast(F_RT * eta_p)
 
         c_L = ce_safe / 1000.0
         D_e = 8.794e-11 * c_L**2 - 3.972e-10 * c_L + 4.862e-10

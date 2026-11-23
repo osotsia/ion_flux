@@ -201,12 +201,12 @@ class ThermodynamicSignProbe(fx.PDE):
                - 17.7326 * tanh_ast(15.7890 * (x_p - 0.3117)) 
                + 17.5842 * tanh_ast(15.9308 * (x_p - 0.3120)))
         
-        # Hardcoded j0 for isolation testing
+        # Hardcoded j0 for isolation testing (factor of 2 matches Chen 2020 k_n calibration)
         j0_n = 6.48e-7 * (1000.0 * 29866.0 * (33133.0 - 29866.0))**0.5
-        a_n = 3.0 * 0.25 / 5.86e-6
+        a_n = 3.0 * 0.75 / 5.86e-6
         L_n = 85.2e-6
         
-        term_n = i_den / (a_n * L_n * j0_n)
+        term_n = i_den / (2.0 * a_n * L_n * j0_n)
         eta_r_n = - (2.0 * R_const * T / F) * arcsinh_ast(term_n)
         
         sig_n, sig_p = 215.0, 0.18
@@ -509,8 +509,9 @@ class ThermalSourceProbe(fx.PDE):
         j0_n = m_n * (ce_safe_n * c_surf_n * (c_max_n - c_surf_n))**0.5
         j0_p = m_p * (ce_safe_p * c_surf_p * (c_max_p - c_surf_p))**0.5
         
-        term_n = i_den / (a_n * L_n * j0_n)
-        term_p = i_den / (a_p * L_p * j0_p)
+        # Factor of 2 matches J_k = 2*a_k*j0_k*sinh(F*eta/(2RT)) used to calibrate m_k
+        term_n = i_den / (2.0 * a_n * L_n * j0_n)
+        term_p = i_den / (2.0 * a_p * L_p * j0_p)
         
         eta_r_n = - (2.0 * R_const * self.T_cell / F) * (fx.integral(arcsinh_ast(term_n), over=self.x_n) / L_n)
         eta_r_p = - (2.0 * R_const * self.T_cell / F) * (fx.integral(arcsinh_ast(term_p), over=self.x_p) / L_p)

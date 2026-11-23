@@ -148,8 +148,9 @@ class ExactTSPMe(fx.PDE):
         U_eq = U_p - U_n
         
         # 2. Reaction Overpotential (Eq. 8c)
-        term_n = i_den / (a_n * L_n * j0_n)
-        term_p = i_den / (a_p * L_p * j0_p)
+        # Note: Eq. 8c omits the factor of 2 in the denominator; kept here to match J_k = 2*a_k*j0_k*sinh(...) used to calibrate m_k in Chen et al. (2020).
+        term_n = i_den / (2.0 * a_n * L_n * j0_n)
+        term_p = i_den / (2.0 * a_p * L_p * j0_p)
         eta_r_n = - (2.0 * R_const * self.T_cell / F) * (fx.integral(arcsinh_ast(term_n), over=self.x_n) / L_n)
         eta_r_p = - (2.0 * R_const * self.T_cell / F) * (fx.integral(arcsinh_ast(term_p), over=self.x_p) / L_p)
         eta_r = eta_r_n + eta_r_p

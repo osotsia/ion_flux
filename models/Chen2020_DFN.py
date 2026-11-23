@@ -134,10 +134,11 @@ class Chen2020_DFN(fx.PDE):
         eta_n = fx.clamp(self.phi_s_n - self.phi_e - U_n, lower=-0.5, upper=0.5)
         eta_p = fx.clamp(self.phi_s_p - self.phi_e - U_p, lower=-0.5, upper=0.5)
         
-        # Volumetric Butler-Volmer Reaction Current Densities (J_k) [A/m^3] (Table I)
+        # Volumetric Butler-Volmer Reaction Current Densities (J_k) [A/m^3]
+        # Note: Table I omits the factor of 2 and inverts RT/F; Eqs. 15-20 calibrate k_k using 2*j0*sinh(F*eta/(2RT)).
         F_RT = F / (2.0 * R_const * T)  # Using alpha = 0.5 symmetry
-        J_n = a_n * j0_n * sinh_ast(F_RT * eta_n)
-        J_p = a_p * j0_p * sinh_ast(F_RT * eta_p)
+        J_n = 2.0 * a_n * j0_n * sinh_ast(F_RT * eta_n)
+        J_p = 2.0 * a_p * j0_p * sinh_ast(F_RT * eta_p)
 
         # =====================================================================
         # 6. Transport Tensors
